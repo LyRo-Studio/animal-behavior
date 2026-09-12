@@ -13,7 +13,7 @@ from app.core.security import generate_opaque_token, hash_opaque_token
 from app.models.account import Account, AccountRole
 from app.models.account_action_token import AccountActionToken, AccountActionTokenPurpose
 from app.services.accounts import derive_display_name, validate_email_domain
-from app.services.mail import MailMessage, MailTransport
+from app.services.mail import MailMessage, MailTransport, build_set_password_link
 
 
 class DuplicateActiveAccountError(Exception):
@@ -21,7 +21,7 @@ class DuplicateActiveAccountError(Exception):
 
 
 def _build_invite_email(account: Account, raw_token: str) -> MailMessage:
-    invite_link = f"{settings.frontend_base_url}/set-password?token={raw_token}"
+    invite_link = build_set_password_link(raw_token)
     return MailMessage(
         to=account.email,
         subject="You've been invited to the Animal Behavior application",

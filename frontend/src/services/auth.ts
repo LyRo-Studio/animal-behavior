@@ -55,6 +55,19 @@ export async function logout(refreshToken: string): Promise<void> {
   })
 }
 
+/**
+ * Request a password-reset email. Always resolves — the backend gives the
+ * same generic response whether or not the email matches an active
+ * account (never reveal which), so there's nothing meaningful to reject on.
+ */
+export async function requestPasswordReset(email: string): Promise<void> {
+  await fetch(`${API_BASE_URL}/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  })
+}
+
 export async function fetchCurrentAccount(accessToken: string): Promise<CurrentAccount> {
   const response = await fetch(`${API_BASE_URL}/accounts/me`, {
     headers: { Authorization: `Bearer ${accessToken}` },

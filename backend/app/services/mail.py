@@ -25,6 +25,13 @@ class MailMessage:
     text_body: str
 
 
+def build_set_password_link(raw_token: str) -> str:
+    """The link a User follows to set a password — shared by the invite
+    (ticket #4) and forgot-password-reset (ticket #5) emails, which both
+    authorize the same set-password endpoint with the same token shape."""
+    return f"{settings.frontend_base_url}/set-password?token={raw_token}"
+
+
 class MailTransport(Protocol):
     def send(self, message: MailMessage) -> None: ...
 

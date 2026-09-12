@@ -55,6 +55,15 @@ describe('router navigation guard', () => {
     expect(ensureSessionMock).not.toHaveBeenCalled()
   })
 
+  it('never checks for a session on the public forgot-password route', async () => {
+    const { default: router } = await import('../index')
+    await router.push({ name: 'forgot-password' })
+    await router.isReady()
+
+    expect(router.currentRoute.value.name).toBe('forgot-password')
+    expect(ensureSessionMock).not.toHaveBeenCalled()
+  })
+
   it('requires a session for the status route too — only Login and set-password are exempt', async () => {
     ensureSessionMock.mockResolvedValue(false)
 

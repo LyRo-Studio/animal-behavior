@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # local dev origin.
     frontend_base_url: str = "http://localhost:5173"
 
+    # Ticket #5 (Forgot-password reset): shorter-lived than an invite link,
+    # since it's requested and used in one sitting rather than waiting on
+    # an Admin-invited User to first check their email.
+    password_reset_token_expire_hours: int = 1
+
     @property
     def cors_origin_list(self) -> list[str]:
         """CORS_ORIGINS as a comma-separated env var, split into a list."""

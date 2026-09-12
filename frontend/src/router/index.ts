@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 import AdminView from '@/views/AdminView.vue'
+import ForgotPasswordView from '@/views/ForgotPasswordView.vue'
 import HomeView from '@/views/HomeView.vue'
 import LoginView from '@/views/LoginView.vue'
 import SetPasswordView from '@/views/SetPasswordView.vue'
@@ -17,14 +18,15 @@ declare module 'vue-router' {
 
 // Routes reachable without a session — every other route, including the
 // pre-existing `status` health-check page, requires one (see the
-// navigation guard below). `set-password` is also public: a newly invited
-// (or, from ticket #5, password-resetting) User has no session yet.
-const PUBLIC_ROUTE_NAMES = new Set(['login', 'set-password'])
+// navigation guard below). `set-password` and `forgot-password` are also
+// public: a newly invited or password-resetting User has no session yet.
+const PUBLIC_ROUTE_NAMES = new Set(['login', 'set-password', 'forgot-password'])
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     { path: '/login', name: 'login', component: LoginView },
+    { path: '/forgot-password', name: 'forgot-password', component: ForgotPasswordView },
     { path: '/set-password', name: 'set-password', component: SetPasswordView },
     { path: '/status', name: 'status', component: StatusView },
     { path: '/', name: 'home', component: HomeView },

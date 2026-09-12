@@ -17,3 +17,13 @@ class FakeMailTransport:
 
     def send(self, message: MailMessage) -> None:
         self.sent.append(message)
+
+
+@dataclass
+class FailingMailTransport:
+    """Raises on every send — simulates an SMTP outage for tests that
+    assert a mail-transport failure never changes an endpoint's response
+    (see test_forgot_password.py's account-enumeration regression test)."""
+
+    def send(self, message: MailMessage) -> None:
+        raise RuntimeError("simulated SMTP failure")
