@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import decode_access_token
 from app.db.session import get_db
-from app.models.account import Account
+from app.models.account import Account, AccountRole
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -40,4 +40,15 @@ def get_current_account(
     if account is None or not account.is_active:
         raise unauthenticated
 
+    return account
+
+
+def require_admin(account: Account = Depends(get_current_account)) -> Account:
+    """Resolve the current Account and require it to be an Admin.
+
+    403 (not 401 — the caller *is* authenticated, just not authorized) for
+    a non-Admin request to an Admin-only endpoint.
+    """
+    if account.role != AccountRole.ADMIN:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
     return account

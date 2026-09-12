@@ -37,6 +37,23 @@ class Settings(BaseSettings):
     first_admin_email: str = "admin@vives.be"
     first_admin_password: str = "dev-only-insecure-password"
 
+    # Ticket #4 (Admin adds a User): invite links, and the mail transport
+    # that sends them. SMTP host has no default: an unset SMTP_HOST means
+    # "no real mail server configured", which `get_mail_transport` reads as
+    # "log instead of sending" — a safe dev/test fallback, not a broken
+    # deployment (docker-compose.yml doesn't require these).
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_email: str = "no-reply@vives.be"
+    smtp_use_tls: bool = True
+    invite_token_expire_hours: int = 72
+    # Used to build the invite link emailed to a new User — not itself a
+    # secret, so (like cors_origins) it's safe to default to the frontend's
+    # local dev origin.
+    frontend_base_url: str = "http://localhost:5173"
+
     @property
     def cors_origin_list(self) -> list[str]:
         """CORS_ORIGINS as a comma-separated env var, split into a list."""

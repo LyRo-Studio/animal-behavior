@@ -1,18 +1,15 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRouter, createWebHistory } from 'vue-router'
+
+import { session } from '@/stores/session'
 
 import HomeView from '../HomeView.vue'
 
 const logoutMock = vi.hoisted(() => vi.fn())
 
 vi.mock('@/stores/session', () => ({
-  session: {
-    logout: logoutMock,
-    currentAccount: {
-      value: { id: 1, email: 'jan.peeters@vives.be', displayName: 'Jan', role: 'user' },
-    },
-  },
+  session: { logout: logoutMock, currentAccount: { value: null } },
 }))
 
 function createTestRouter() {
@@ -21,11 +18,21 @@ function createTestRouter() {
     routes: [
       { path: '/', name: 'home', component: HomeView },
       { path: '/login', name: 'login', component: { template: '<div>login</div>' } },
+      { path: '/admin', name: 'admin', component: { template: '<div>admin</div>' } },
     ],
   })
 }
 
 describe('HomeView', () => {
+  beforeEach(() => {
+    session.currentAccount.value = {
+      id: 1,
+      email: 'jan.peeters@vives.be',
+      displayName: 'Jan',
+      role: 'user',
+    }
+  })
+
   afterEach(() => {
     logoutMock.mockReset()
   })
@@ -52,5 +59,33 @@ describe('HomeView', () => {
 
     expect(logoutMock).toHaveBeenCalledOnce()
     expect(router.currentRoute.value.name).toBe('login')
+  })
+
+  it('does not show an Admin link for a User account', async () => {
+    const router = createTestRouter()
+    router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(HomeView, { global: { plugins: [router] } })
+
+    expect(wrapper.text()).not.toContain('Admin')
+  })
+
+  it('shows an Admin link for an Admin account', async () => {
+    session.currentAccount.value = {
+      id: 2,
+      email: 'admin.person@vives.be',
+      displayName: 'Admin',
+      role: 'admin',
+    }
+    const router = createTestRouter()
+    router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(HomeView, { global: { plugins: [router] } })
+
+    const adminLink = wrapper.findComponent({ name: 'RouterLink' })
+    expect(adminLink.exists()).toBe(true)
+    expect(wrapper.text()).toContain('Admin')
   })
 })

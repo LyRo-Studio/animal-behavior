@@ -1,3 +1,5 @@
+import { API_BASE_URL } from '@/services/apiBase'
+
 export interface AuthTokens {
   accessToken: string
   refreshToken: string
@@ -9,9 +11,6 @@ export interface CurrentAccount {
   displayName: string
   role: 'admin' | 'user'
 }
-
-// `||`, not `??`: see the same reasoning in services/health.ts.
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
 const GENERIC_LOGIN_ERROR = 'Invalid email or password'
 

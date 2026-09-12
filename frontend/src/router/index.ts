@@ -1,21 +1,34 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
+import AdminView from '@/views/AdminView.vue'
 import HomeView from '@/views/HomeView.vue'
 import LoginView from '@/views/LoginView.vue'
+import SetPasswordView from '@/views/SetPasswordView.vue'
 import StatusView from '@/views/StatusView.vue'
 import { session } from '@/stores/session'
 
-// Login is the only route reachable without a session — every other route,
-// including the pre-existing `status` health-check page, requires one (see
-// the navigation guard below), per ticket #3's acceptance criteria.
-const PUBLIC_ROUTE_NAMES = new Set(['login'])
+declare module 'vue-router' {
+  interface RouteMeta {
+    // Ticket #4: the Admin page requires role = admin, on top of the
+    // ordinary "requires a session" check every non-public route gets.
+    requiresAdmin?: boolean
+  }
+}
+
+// Routes reachable without a session — every other route, including the
+// pre-existing `status` health-check page, requires one (see the
+// navigation guard below). `set-password` is also public: a newly invited
+// (or, from ticket #5, password-resetting) User has no session yet.
+const PUBLIC_ROUTE_NAMES = new Set(['login', 'set-password'])
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     { path: '/login', name: 'login', component: LoginView },
+    { path: '/set-password', name: 'set-password', component: SetPasswordView },
     { path: '/status', name: 'status', component: StatusView },
     { path: '/', name: 'home', component: HomeView },
+    { path: '/admin', name: 'admin', component: AdminView, meta: { requiresAdmin: true } },
   ],
 })
 
@@ -27,6 +40,13 @@ router.beforeEach(async (to) => {
   const hasSession = await session.ensureSession()
   if (!hasSession) {
     return { name: 'login', query: { redirect: to.fullPath } }
+  }
+
+  // A User hitting /admin directly is redirected to Home rather than
+  // shown an error — same "not reachable by a User" rule as the nav link
+  // being hidden from them (CONTEXT.md's "Admin page" entry).
+  if (to.meta.requiresAdmin && session.currentAccount.value?.role !== 'admin') {
+    return { name: 'home' }
   }
 
   return true

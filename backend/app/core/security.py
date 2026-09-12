@@ -58,15 +58,20 @@ def decode_access_token(token: str) -> dict[str, Any]:
     return payload
 
 
-def generate_refresh_token() -> str:
-    """Generate a new opaque, high-entropy refresh token."""
-    return secrets.token_urlsafe(48)
+def generate_opaque_token(num_bytes: int = 48) -> str:
+    """Generate a new opaque, high-entropy token.
+
+    Shared by refresh tokens and account-action tokens (invite /
+    password-reset links) — both are the same shape: a random bearer
+    secret, never a user-chosen value.
+    """
+    return secrets.token_urlsafe(num_bytes)
 
 
-def hash_refresh_token(raw_token: str) -> str:
-    """Hash an opaque refresh token for storage/lookup.
+def hash_opaque_token(raw_token: str) -> str:
+    """Hash an opaque token for storage/lookup.
 
-    Refresh tokens are high-entropy random strings, not user-chosen
+    Opaque tokens are high-entropy random strings, not user-chosen
     secrets, so a fast cryptographic hash (unlike Argon2id for passwords)
     is appropriate here — brute-forcing the hash back to the token is
     infeasible regardless of hash speed.
