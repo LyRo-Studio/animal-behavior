@@ -44,8 +44,14 @@ class SmtpMailTransport:
     ) -> None:
         self._host = host
         self._port = port
-        self._username = username
-        self._password = password
+        self._username = username.strip() if username else username
+        # Gmail displays an App Password grouped into 4-character chunks
+        # with spaces (e.g. "abcd efgh ijkl mnop") for readability — a
+        # value pasted verbatim into .env otherwise fails SMTP AUTH.
+        # Stripping all whitespace is harmless for any other provider's
+        # password too, since a real password isn't expected to contain
+        # spaces.
+        self._password = "".join(password.split()) if password else password
         self._from_email = from_email
         self._use_tls = use_tls
 
