@@ -4,6 +4,11 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 from app.core.config import settings
+from app.db.base import Base
+
+# Import every model module so it registers on Base.metadata before
+# autogenerate inspects it.
+from app.models import account, refresh_token  # noqa: F401
 
 # Alembic Config object, giving access to values in alembic.ini.
 config = context.config
@@ -15,8 +20,7 @@ if config.config_file_name is not None:
 # hardcoding it in alembic.ini, per the project's secrets/config convention.
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
-# No ORM models yet (schema arrives in ticket #3) — nothing to autogenerate against.
-target_metadata = None
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:

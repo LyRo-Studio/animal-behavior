@@ -23,8 +23,19 @@ class Settings(BaseSettings):
     # `pytest`/`ruff` work standalone with no .env present at all — never
     # used against a real database in Docker, where DATABASE_URL is always
     # supplied explicitly (see docker-compose.yml).
-    database_url: str = "postgresql+psycopg://animal_behavior:animal_behavior@localhost:5432/animal_behavior"
+    database_url: str = (
+        "postgresql+psycopg://animal_behavior:animal_behavior@localhost:5432/animal_behavior"
+    )
     cors_origins: str = "http://localhost:5173"
+
+    # Same "safe placeholder for standalone pytest/ruff" spirit as above —
+    # docker-compose.yml requires all four of these explicitly via `:?` and
+    # never falls back to these values in a deployed environment.
+    jwt_secret_key: str = "dev-only-insecure-secret-do-not-use-in-production"
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 7
+    first_admin_email: str = "admin@vives.be"
+    first_admin_password: str = "dev-only-insecure-password"
 
     @property
     def cors_origin_list(self) -> list[str]:
