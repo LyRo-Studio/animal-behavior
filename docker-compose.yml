@@ -35,6 +35,17 @@ services:
       REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
       FIRST_ADMIN_EMAIL: ${FIRST_ADMIN_EMAIL:?Set FIRST_ADMIN_EMAIL in .env (see .env.example)}
       FIRST_ADMIN_PASSWORD: ${FIRST_ADMIN_PASSWORD:?Set FIRST_ADMIN_PASSWORD in .env (see .env.example)}
+      # No `:?` here: an unset SMTP_HOST is a legitimate local-dev choice
+      # (logs invite emails instead of sending — see app/services/mail.py),
+      # not a missing-secret mistake like the vars above.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-no-reply@vives.be}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      INVITE_TOKEN_EXPIRE_HOURS: ${INVITE_TOKEN_EXPIRE_HOURS:-72}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:5173}
     ports:
       - "8000:8000"
     depends_on:

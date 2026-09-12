@@ -41,7 +41,10 @@ class Account(Base):
     # or not that account is currently active (it always returns the same
     # generic failure either way).
     email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Nullable: a User Admin-invited (ticket #4) has no password until they
+    # follow their invite link and set one — login always rejects a None
+    # hash rather than attempting to verify against it.
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     display_name: Mapped[str] = mapped_column(String(100), nullable=False)
     role: Mapped[AccountRole] = mapped_column(
         Enum(
@@ -61,5 +64,8 @@ class Account(Base):
     )
 
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(  # noqa: F821
+        back_populates="account", cascade="all, delete-orphan"
+    )
+    action_tokens: Mapped[list["AccountActionToken"]] = relationship(  # noqa: F821
         back_populates="account", cascade="all, delete-orphan"
     )

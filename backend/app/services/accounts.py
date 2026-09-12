@@ -9,6 +9,19 @@ from app.core.config import settings
 from app.core.security import hash_password
 from app.models.account import Account, AccountRole
 
+ALLOWED_EMAIL_DOMAINS = frozenset({"vives.be", "student.vives.be"})
+
+
+class InvalidEmailDomainError(Exception):
+    """Raised when an email's domain isn't in ALLOWED_EMAIL_DOMAINS."""
+
+
+def validate_email_domain(email: str) -> None:
+    """Enforce CONTEXT.md's "Allowed email domains" decision (case-insensitive)."""
+    domain = email.rsplit("@", 1)[-1].lower()
+    if domain not in ALLOWED_EMAIL_DOMAINS:
+        raise InvalidEmailDomainError(domain)
+
 
 def derive_display_name(email: str) -> str:
     """Derive a display name from an email's local-part.

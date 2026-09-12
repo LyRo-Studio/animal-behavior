@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.security import (
     create_access_token,
-    generate_refresh_token,
-    hash_refresh_token,
+    generate_opaque_token,
+    hash_opaque_token,
     verify_password,
 )
 from app.models.account import Account
@@ -34,7 +34,7 @@ class AuthenticationError(Exception):
 
 def _find_refresh_token(db: Session, raw_refresh_token: str) -> RefreshToken | None:
     """Look up a RefreshToken row by its raw (unhashed) token value."""
-    token_hash = hash_refresh_token(raw_refresh_token)
+    token_hash = hash_opaque_token(raw_refresh_token)
     return db.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
 
 
@@ -42,11 +42,11 @@ def _issue_token_pair(db: Session, account: Account) -> tuple[str, str]:
     """Create a fresh access token and a new, persisted refresh token."""
     access_token = create_access_token(account.id, account.role.value)
 
-    raw_refresh_token = generate_refresh_token()
+    raw_refresh_token = generate_opaque_token()
     db.add(
         RefreshToken(
             account_id=account.id,
-            token_hash=hash_refresh_token(raw_refresh_token),
+            token_hash=hash_opaque_token(raw_refresh_token),
             expires_at=datetime.now(UTC) + timedelta(days=settings.refresh_token_expire_days),
         )
     )
@@ -61,10 +61,13 @@ def login(db: Session, email: str, password: str) -> tuple[str, str]:
     account = db.scalar(select(Account).where(Account.email == normalized_email))
 
     # Same generic failure whether the account doesn't exist, the password
-    # is wrong, or the account is deactivated — never reveal which.
+    # is wrong, the account is deactivated, or it's an invited User who
+    # hasn't set a password yet (password_hash is None until then) — never
+    # reveal which.
     if (
         account is None
         or not account.is_active
+        or account.password_hash is None
         or not verify_password(password, account.password_hash)
     ):
         raise AuthenticationError

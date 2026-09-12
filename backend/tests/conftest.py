@@ -12,6 +12,8 @@ from alembic.config import Config
 from app.core.config import settings
 from app.db.session import get_db
 from app.main import app
+from app.services.mail import get_mail_transport
+from tests.fakes import FakeMailTransport
 
 _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
@@ -55,14 +57,25 @@ def db_session(db_connection: Connection) -> Generator[Session, None, None]:
 
 
 @pytest.fixture()
-def client(db_session: Session) -> Generator[TestClient, None, None]:
+def mail_transport() -> FakeMailTransport:
+    """The fake mail transport injected into the app for this test — see
+    tests/fakes.py and issue #1's testing decisions."""
+    return FakeMailTransport()
+
+
+@pytest.fixture()
+def client(
+    db_session: Session, mail_transport: FakeMailTransport
+) -> Generator[TestClient, None, None]:
     """A test client for the FastAPI app, hitting real routes end-to-end.
 
-    The app's own `get_db` dependency is overridden to use the per-test
-    transactional session above, so requests made through this client see
-    (and roll back) the same data a test sets up directly via `db_session`.
+    The app's own `get_db`/`get_mail_transport` dependencies are overridden
+    to use the per-test transactional session and fake mail transport
+    above, so requests made through this client see (and roll back) the
+    same data a test sets up directly, and never send real email.
     """
     app.dependency_overrides[get_db] = lambda: db_session
+    app.dependency_overrides[get_mail_transport] = lambda: mail_transport
     try:
         with TestClient(app) as test_client:
             yield test_client
