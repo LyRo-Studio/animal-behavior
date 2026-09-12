@@ -108,3 +108,8 @@ stays mandatory; only the token *values* configured in it change.
   lavendel, heaven) but the huisstijlgids reserves them for identifying
   study domains, not general UI semantics (success/warning/danger) — exact
   mapping still open, see grilling round 1.
+- `muted`/`border` (structural UI grays) also have no VIVES equivalent, and
+  the huisstijlgids explicitly permits only 20%/40%/60%/80% tints of zwart
+  as grayscale exceptions (no other percentages of any palette color are
+  allowed) — so `border` uses 20% zwart and `muted` uses 40% zwart, rather
+  than inventing a new gray or reusing the old blue-neutral scale.
