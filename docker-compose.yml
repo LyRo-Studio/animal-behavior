@@ -28,6 +28,13 @@ services:
       # whatever password `db` actually started with.
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-animal_behavior}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}@db:5432/${POSTGRES_DB:-animal_behavior}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      # No fallbacks for secrets/credentials — same reasoning as
+      # POSTGRES_PASSWORD above. Lifetimes are safe to default.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env (see .env.example)}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      FIRST_ADMIN_EMAIL: ${FIRST_ADMIN_EMAIL:?Set FIRST_ADMIN_EMAIL in .env (see .env.example)}
+      FIRST_ADMIN_PASSWORD: ${FIRST_ADMIN_PASSWORD:?Set FIRST_ADMIN_PASSWORD in .env (see .env.example)}
     ports:
       - "8000:8000"
     depends_on:
