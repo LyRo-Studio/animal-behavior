@@ -6,7 +6,12 @@ from app.api.deps import require_admin
 from app.db.session import get_db
 from app.models.account import Account
 from app.schemas.admin import AdminAccountOut, AdminCreateAccountRequest
-from app.services.accounts import InvalidEmailDomainError
+from app.services.accounts import (
+    AccountNotFoundError,
+    CannotDeactivateAdminError,
+    InvalidEmailDomainError,
+    deactivate_account,
+)
 from app.services.invites import DuplicateActiveAccountError, create_invited_account
 from app.services.mail import MailTransport, get_mail_transport
 
@@ -35,4 +40,18 @@ def create_account(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="An active account with this email already exists.",
+        ) from None
+
+
+@router.post("/accounts/{account_id}/deactivate", response_model=AdminAccountOut)
+def deactivate(account_id: int, db: Session = Depends(get_db)) -> Account:
+    try:
+        return deactivate_account(db, account_id)
+    except AccountNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Account not found."
+        ) from None
+    except CannotDeactivateAdminError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Admin accounts cannot be deactivated."
         ) from None

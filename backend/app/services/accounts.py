@@ -2,18 +2,33 @@
 first-Admin seeding (see CONTEXT.md's "Display name" and "Bootstrap" decisions).
 """
 
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.security import hash_password
 from app.models.account import Account, AccountRole
+from app.services.refresh_tokens import revoke_all_refresh_tokens
 
 ALLOWED_EMAIL_DOMAINS = frozenset({"vives.be", "student.vives.be"})
 
 
 class InvalidEmailDomainError(Exception):
     """Raised when an email's domain isn't in ALLOWED_EMAIL_DOMAINS."""
+
+
+class AccountNotFoundError(Exception):
+    """Raised when an Admin operates on an Account id that doesn't exist."""
+
+
+class CannotDeactivateAdminError(Exception):
+    """Raised when attempting to deactivate an Admin Account.
+
+    CONTEXT.md's "Admin creation" decision: only User accounts can be
+    created/deactivated through the app this round.
+    """
 
 
 def validate_email_domain(email: str) -> None:
@@ -55,3 +70,38 @@ def seed_first_admin(db: Session) -> None:
     )
     db.add(admin)
     db.commit()
+
+
+def deactivate_account(db: Session, account_id: int) -> Account:
+    """Deactivate a User Account and immediately revoke its outstanding refresh tokens.
+
+    Per issue #6's acceptance criteria: `is_active = False` locks the
+    Account out of login right away (app/services/auth.py's login already
+    rejects any inactive account), and revoking its refresh tokens here is
+    defense-in-depth on top of /auth/refresh's own is_active check — the
+    same belt-and-braces pattern as set_password's post-reset revocation
+    (app/services/account_actions.py) rather than waiting on the account's
+    next refresh cycle.
+
+    Restricted to User-role Accounts (CannotDeactivateAdminError otherwise):
+    this round has exactly one Admin, and deactivating it would permanently
+    lock the application out of account management — see
+    CannotDeactivateAdminError's docstring.
+
+    Idempotent: deactivating an already-inactive User just re-affirms
+    is_active = False and revokes any tokens somehow still outstanding.
+    """
+    account = db.get(Account, account_id)
+    if account is None:
+        raise AccountNotFoundError
+    if account.role != AccountRole.USER:
+        raise CannotDeactivateAdminError
+
+    account.is_active = False
+    db.add(account)
+
+    revoke_all_refresh_tokens(db, account.id, datetime.now(UTC))
+
+    db.commit()
+    db.refresh(account)
+    return account
