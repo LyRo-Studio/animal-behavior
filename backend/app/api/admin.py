@@ -9,10 +9,13 @@ from app.schemas.admin import AdminAccountOut, AdminCreateAccountRequest
 from app.services.accounts import (
     AccountNotFoundError,
     CannotDeactivateAdminError,
+    DeactivatedAccountExistsError,
+    DuplicateActiveAccountError,
     InvalidEmailDomainError,
     deactivate_account,
+    reactivate_account,
 )
-from app.services.invites import DuplicateActiveAccountError, create_invited_account
+from app.services.invites import create_invited_account
 from app.services.mail import MailTransport, get_mail_transport
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -41,6 +44,17 @@ def create_account(
             status_code=status.HTTP_409_CONFLICT,
             detail="An active account with this email already exists.",
         ) from None
+    except DeactivatedAccountExistsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": (
+                    "An account with this email already exists but is deactivated. "
+                    "Reactivate it instead of creating a new one."
+                ),
+                "existing_account_id": exc.account_id,
+            },
+        ) from None
 
 
 @router.post("/accounts/{account_id}/deactivate", response_model=AdminAccountOut)
@@ -54,4 +68,19 @@ def deactivate(account_id: int, db: Session = Depends(get_db)) -> Account:
     except CannotDeactivateAdminError:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Admin accounts cannot be deactivated."
+        ) from None
+
+
+@router.post("/accounts/{account_id}/reactivate", response_model=AdminAccountOut)
+def reactivate(account_id: int, db: Session = Depends(get_db)) -> Account:
+    try:
+        return reactivate_account(db, account_id)
+    except AccountNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Account not found."
+        ) from None
+    except DuplicateActiveAccountError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot reactivate: another active account already uses this email.",
         ) from None

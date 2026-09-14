@@ -7,11 +7,29 @@ import AdminView from '../AdminView.vue'
 const listAccountsMock = vi.hoisted(() => vi.fn())
 const createAccountMock = vi.hoisted(() => vi.fn())
 const deactivateAccountMock = vi.hoisted(() => vi.fn())
+const reactivateAccountMock = vi.hoisted(() => vi.fn())
+// A real class, not a plain mock: AdminView does `err instanceof
+// DeactivatedAccountExistsError`, so the mocked module needs to export the
+// same constructor identity that tests throw instances of. `vi.hoisted`
+// because `vi.mock` factories are hoisted above ordinary declarations.
+const DeactivatedAccountExistsError = vi.hoisted(
+  () =>
+    class DeactivatedAccountExistsError extends Error {
+      existingAccountId: number
+      constructor(message: string, existingAccountId: number) {
+        super(message)
+        this.name = 'DeactivatedAccountExistsError'
+        this.existingAccountId = existingAccountId
+      }
+    },
+)
 
 vi.mock('@/services/admin', () => ({
   listAccounts: listAccountsMock,
   createAccount: createAccountMock,
   deactivateAccount: deactivateAccountMock,
+  reactivateAccount: reactivateAccountMock,
+  DeactivatedAccountExistsError,
 }))
 
 vi.mock('@/stores/session', () => ({
@@ -33,6 +51,7 @@ describe('AdminView', () => {
     listAccountsMock.mockReset()
     createAccountMock.mockReset()
     deactivateAccountMock.mockReset()
+    reactivateAccountMock.mockReset()
   })
 
   it('loads and renders the account list', async () => {
@@ -217,5 +236,101 @@ describe('AdminView', () => {
 
     resolveFirst({ id: 1, email: 'a@vives.be', displayName: 'A', role: 'user', isActive: false })
     await flushPromises()
+  })
+
+  it('reactivates an inactive account and updates its row', async () => {
+    listAccountsMock.mockResolvedValue([
+      { id: 1, email: 'jan.peeters@vives.be', displayName: 'Jan', role: 'user', isActive: false },
+    ])
+    reactivateAccountMock.mockResolvedValue({
+      id: 1,
+      email: 'jan.peeters@vives.be',
+      displayName: 'Jan',
+      role: 'user',
+      isActive: true,
+    })
+    const router = createTestRouter()
+    router.push('/admin')
+    await router.isReady()
+
+    const wrapper = mount(AdminView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    // Only the inactive row gets a reactivate action.
+    const buttons = wrapper.findAll('button[data-testid="reactivate"]')
+    expect(buttons).toHaveLength(1)
+
+    await buttons[0]!.trigger('click')
+    await flushPromises()
+
+    expect(reactivateAccountMock).toHaveBeenCalledWith('a-token', 1)
+    expect(wrapper.findAll('button[data-testid="reactivate"]')).toHaveLength(0)
+    const rows = wrapper.findAll('tbody tr')
+    expect(rows[0]!.text()).toContain('Active')
+    // A now-active User row should get its deactivate action back.
+    expect(wrapper.findAll('button[data-testid="deactivate"]')).toHaveLength(1)
+  })
+
+  it('shows the backend-provided reason when reactivating an account fails', async () => {
+    listAccountsMock.mockResolvedValue([
+      { id: 1, email: 'jan.peeters@vives.be', displayName: 'Jan', role: 'user', isActive: false },
+    ])
+    reactivateAccountMock.mockRejectedValue(
+      new Error('Cannot reactivate: another active account already uses this email.'),
+    )
+    const router = createTestRouter()
+    router.push('/admin')
+    await router.isReady()
+
+    const wrapper = mount(AdminView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    await wrapper.find('button[data-testid="reactivate"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Cannot reactivate: another active account')
+    expect(wrapper.findAll('button[data-testid="reactivate"]')).toHaveLength(1)
+  })
+
+  it('offers reactivating the existing account when creation fails because it is deactivated', async () => {
+    listAccountsMock.mockResolvedValue([
+      { id: 7, email: 'rehired@vives.be', displayName: 'Rehired', role: 'user', isActive: false },
+    ])
+    createAccountMock.mockRejectedValue(
+      new DeactivatedAccountExistsError(
+        'An account with this email already exists but is deactivated. Reactivate it instead of creating a new one.',
+        7,
+      ),
+    )
+    reactivateAccountMock.mockResolvedValue({
+      id: 7,
+      email: 'rehired@vives.be',
+      displayName: 'Rehired',
+      role: 'user',
+      isActive: true,
+    })
+    const router = createTestRouter()
+    router.push('/admin')
+    await router.isReady()
+
+    const wrapper = mount(AdminView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    await wrapper.find('input#new-account-email').setValue('rehired@vives.be')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('already exists but is deactivated')
+    const offerButton = wrapper.find('button[data-testid="reactivate-offer"]')
+    expect(offerButton.exists()).toBe(true)
+
+    await offerButton.trigger('click')
+    await flushPromises()
+
+    expect(reactivateAccountMock).toHaveBeenCalledWith('a-token', 7)
+    expect(wrapper.find('button[data-testid="reactivate-offer"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Reactivated rehired@vives.be.')
+    const rows = wrapper.findAll('tbody tr')
+    expect(rows[0]!.text()).toContain('Active')
   })
 })

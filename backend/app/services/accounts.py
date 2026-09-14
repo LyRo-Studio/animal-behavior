@@ -31,6 +31,26 @@ class CannotDeactivateAdminError(Exception):
     """
 
 
+class DuplicateActiveAccountError(Exception):
+    """Raised when an active Account already exists for the given email."""
+
+
+class DeactivatedAccountExistsError(Exception):
+    """Raised when creating an Account whose email matches an existing, but
+    deactivated, Account.
+
+    CONTEXT.md's revised "Account removal" decision: an email already
+    attached to an Account (active or not) is reused by *reactivating*
+    that Account, never by creating a second row for the same address —
+    the old behavior (silently minting a new row) let two Accounts end up
+    sharing an email if the original one were later reactivated too.
+    """
+
+    def __init__(self, account_id: int) -> None:
+        self.account_id = account_id
+        super().__init__(account_id)
+
+
 def validate_email_domain(email: str) -> None:
     """Enforce CONTEXT.md's "Allowed email domains" decision (case-insensitive)."""
     domain = email.rsplit("@", 1)[-1].lower()
@@ -102,6 +122,43 @@ def deactivate_account(db: Session, account_id: int) -> Account:
 
     revoke_all_refresh_tokens(db, account.id, datetime.now(UTC))
 
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+def reactivate_account(db: Session, account_id: int) -> Account:
+    """Reactivate a previously deactivated Account, restoring its email.
+
+    Idempotent: reactivating an already-active Account is a no-op that
+    just returns it as-is.
+
+    Raises DuplicateActiveAccountError if another Account is somehow
+    already active with this same email. That shouldn't be reachable
+    through normal app usage — create_invited_account now refuses to
+    create a second row for an email that already belongs to any existing
+    Account, active or not (ticket #15) — so this check is a
+    belt-and-braces safety net against races/manual data edits, the same
+    spirit as deactivate_account's own defense-in-depth token revocation.
+    """
+    account = db.get(Account, account_id)
+    if account is None:
+        raise AccountNotFoundError
+    if account.is_active:
+        return account
+
+    conflict = db.scalar(
+        select(Account).where(
+            Account.email == account.email,
+            Account.is_active.is_(True),
+            Account.id != account.id,
+        )
+    )
+    if conflict is not None:
+        raise DuplicateActiveAccountError
+
+    account.is_active = True
+    db.add(account)
     db.commit()
     db.refresh(account)
     return account

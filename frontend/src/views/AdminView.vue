@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 
-import { createAccount, deactivateAccount, listAccounts, type AdminAccount } from '@/services/admin'
+import {
+  createAccount,
+  deactivateAccount,
+  DeactivatedAccountExistsError,
+  listAccounts,
+  reactivateAccount,
+  type AdminAccount,
+} from '@/services/admin'
 import { session } from '@/stores/session'
 
 const accounts = ref<AdminAccount[]>([])
@@ -12,11 +19,16 @@ const email = ref('')
 const submitError = ref<string | null>(null)
 const successMessage = ref<string | null>(null)
 const isSubmitting = ref(false)
+// Set when createAccount fails because the email belongs to a deactivated
+// account — offers reactivating that account right from the form error,
+// instead of leaving the Admin to hunt for it in the table below.
+const reactivateOfferId = ref<number | null>(null)
 
-const deactivateError = ref<string | null>(null)
-// A Set, not a single id: two rows can be mid-request at once, and each
+const rowActionError = ref<string | null>(null)
+// Sets, not single ids: two rows can be mid-request at once, and each
 // row's button must reflect only its own request's state.
 const deactivatingIds = ref<Set<number>>(new Set())
+const reactivatingIds = ref<Set<number>>(new Set())
 
 async function loadAccounts() {
   if (!session.accessToken.value) return
@@ -37,6 +49,7 @@ async function handleSubmit() {
 
   submitError.value = null
   successMessage.value = null
+  reactivateOfferId.value = null
   isSubmitting.value = true
 
   try {
@@ -45,7 +58,12 @@ async function handleSubmit() {
     successMessage.value = `Invite sent to ${account.email}.`
     email.value = ''
   } catch (err) {
-    submitError.value = err instanceof Error ? err.message : 'Failed to create account.'
+    if (err instanceof DeactivatedAccountExistsError) {
+      submitError.value = err.message
+      reactivateOfferId.value = err.existingAccountId
+    } else {
+      submitError.value = err instanceof Error ? err.message : 'Failed to create account.'
+    }
   } finally {
     isSubmitting.value = false
   }
@@ -54,7 +72,7 @@ async function handleSubmit() {
 async function handleDeactivate(account: AdminAccount) {
   if (!session.accessToken.value) return
 
-  deactivateError.value = null
+  rowActionError.value = null
   deactivatingIds.value = new Set(deactivatingIds.value).add(account.id)
 
   try {
@@ -63,11 +81,47 @@ async function handleDeactivate(account: AdminAccount) {
       existing.id === updated.id ? updated : existing,
     )
   } catch (err) {
-    deactivateError.value = err instanceof Error ? err.message : 'Failed to deactivate account.'
+    rowActionError.value = err instanceof Error ? err.message : 'Failed to deactivate account.'
   } finally {
     const remaining = new Set(deactivatingIds.value)
     remaining.delete(account.id)
     deactivatingIds.value = remaining
+  }
+}
+
+async function handleReactivate(id: number) {
+  if (!session.accessToken.value) return
+
+  // Reactivating from the create-form's "already exists" offer reports
+  // its outcome inline on the form, not in the table's row-action banner.
+  const isOffer = reactivateOfferId.value === id
+  if (isOffer) {
+    submitError.value = null
+  } else {
+    rowActionError.value = null
+  }
+  reactivatingIds.value = new Set(reactivatingIds.value).add(id)
+
+  try {
+    const updated = await reactivateAccount(session.accessToken.value, id)
+    accounts.value = accounts.value.map((existing) =>
+      existing.id === updated.id ? updated : existing,
+    )
+    if (isOffer) {
+      reactivateOfferId.value = null
+      successMessage.value = `Reactivated ${updated.email}.`
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to reactivate account.'
+    if (isOffer) {
+      submitError.value = message
+    } else {
+      rowActionError.value = message
+    }
+  } finally {
+    const remaining = new Set(reactivatingIds.value)
+    remaining.delete(id)
+    reactivatingIds.value = remaining
   }
 }
 
@@ -108,15 +162,31 @@ onMounted(loadAccounts)
         </button>
       </form>
 
-      <p v-if="submitError" class="mt-3 text-sm text-danger" role="alert">{{ submitError }}</p>
+      <div v-if="submitError" class="mt-3 text-sm text-danger" role="alert">
+        <p>{{ submitError }}</p>
+        <button
+          v-if="reactivateOfferId !== null"
+          type="button"
+          data-testid="reactivate-offer"
+          :disabled="reactivatingIds.has(reactivateOfferId)"
+          class="mt-1 font-medium text-primary hover:underline disabled:opacity-60"
+          @click="handleReactivate(reactivateOfferId)"
+        >
+          {{
+            reactivatingIds.has(reactivateOfferId)
+              ? 'Reactivating…'
+              : 'Reactivate this account instead'
+          }}
+        </button>
+      </div>
       <p v-if="successMessage" class="mt-3 text-sm text-success">{{ successMessage }}</p>
 
       <h2 class="mt-10 text-lg font-medium text-foreground">Accounts</h2>
       <p v-if="isLoading" class="mt-2 text-sm text-muted">Loading…</p>
       <p v-else-if="loadError" class="mt-2 text-sm text-danger" role="alert">{{ loadError }}</p>
       <template v-else>
-        <p v-if="deactivateError" class="mt-2 text-sm text-danger" role="alert">
-          {{ deactivateError }}
+        <p v-if="rowActionError" class="mt-2 text-sm text-danger" role="alert">
+          {{ rowActionError }}
         </p>
         <table class="mt-4 w-full text-left text-sm">
           <thead>
@@ -146,6 +216,16 @@ onMounted(loadAccounts)
                   @click="handleDeactivate(account)"
                 >
                   {{ deactivatingIds.has(account.id) ? 'Deactivating…' : 'Deactivate' }}
+                </button>
+                <button
+                  v-if="!account.isActive"
+                  type="button"
+                  data-testid="reactivate"
+                  :disabled="reactivatingIds.has(account.id)"
+                  class="text-sm font-medium text-primary hover:underline disabled:opacity-60"
+                  @click="handleReactivate(account.id)"
+                >
+                  {{ reactivatingIds.has(account.id) ? 'Reactivating…' : 'Reactivate' }}
                 </button>
               </td>
             </tr>
