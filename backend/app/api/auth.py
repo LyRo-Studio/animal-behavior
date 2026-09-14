@@ -2,8 +2,16 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.schemas.auth import LoginRequest, LogoutRequest, RefreshRequest, TokenResponse
+from app.schemas.auth import (
+    ForgotPasswordRequest,
+    LoginRequest,
+    LogoutRequest,
+    RefreshRequest,
+    TokenResponse,
+)
 from app.services import auth as auth_service
+from app.services.mail import MailTransport, get_mail_transport
+from app.services.password_reset import request_password_reset
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -38,3 +46,14 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout(payload: LogoutRequest, db: Session = Depends(get_db)) -> None:
     auth_service.logout(db, payload.refresh_token)
+
+
+@router.post("/forgot-password", status_code=status.HTTP_204_NO_CONTENT)
+def forgot_password(
+    payload: ForgotPasswordRequest,
+    db: Session = Depends(get_db),
+    mail_transport: MailTransport = Depends(get_mail_transport),
+) -> None:
+    """Always the same empty 204, whether or not the email matches an
+    active account — see request_password_reset's docstring."""
+    request_password_reset(db, mail_transport, payload.email)

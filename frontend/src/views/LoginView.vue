@@ -72,6 +72,13 @@ async function handleSubmit() {
       >
         {{ isSubmitting ? 'Logging in…' : 'Log in' }}
       </button>
+
+      <RouterLink
+        :to="{ name: 'forgot-password' }"
+        class="mt-4 block text-center text-sm font-medium text-primary hover:underline"
+      >
+        Forgot password?
+      </RouterLink>
     </form>
   </main>
 </template>

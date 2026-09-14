@@ -16,6 +16,11 @@ function createTestRouter() {
     routes: [
       { path: '/login', name: 'login', component: LoginView },
       { path: '/', name: 'home', component: { template: '<div>home</div>' } },
+      {
+        path: '/forgot-password',
+        name: 'forgot-password',
+        component: { template: '<div>forgot-password</div>' },
+      },
     ],
   })
 }
@@ -55,5 +60,16 @@ describe('LoginView', () => {
 
     expect(wrapper.text()).toContain('Invalid email or password')
     expect(router.currentRoute.value.name).toBe('login')
+  })
+
+  it('links to the forgot-password page', async () => {
+    const router = createTestRouter()
+    router.push('/login')
+    await router.isReady()
+
+    const wrapper = mount(LoginView, { global: { plugins: [router] } })
+
+    const forgotPasswordLink = wrapper.findComponent({ name: 'RouterLink' })
+    expect(forgotPasswordLink.props('to')).toEqual({ name: 'forgot-password' })
   })
 })
