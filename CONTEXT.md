@@ -53,13 +53,25 @@ defines no equivalent, and its 6 study-domain accent colors are reserved
 for identifying study domains only.
 
 **Account removal:** Soft-delete (deactivate) rather than hard-delete —
-login is blocked, the row is kept. A deactivated Account's email is
-excluded from the uniqueness check, so it can be reused by a new Account.
+login is blocked, the row is kept, and its outstanding refresh tokens are
+revoked. Deactivating is reversible: an Admin can reactivate the same
+row, restoring `is_active = true` (and thus its email) rather than that
+email being freed for a *new* Account to claim. `POST /admin/accounts`
+rejects an email that belongs to an existing Account regardless of that
+Account's active state — a deactivated Account's email is reused by
+reactivating it, not by minting a second row for the same address (this
+revises the original round-1 decision, which let a new Account reuse a
+deactivated one's email; that path produced duplicate-email hazards once
+reactivation existed — see ticket #15). The email-uniqueness index at the
+DB layer stays scoped to active accounts only (needed to let the
+reactivate step itself run without tripping it) — it's the application
+layer, not the schema, that now keeps it to one row per email over time.
 
-**Admin creation:** Only User accounts can be created/deactivated through
-the app; there is exactly one Admin (the `.env`-seeded one) for this
-round. The `role` field itself isn't restricted to a single Admin at the
-data layer — there's just no UI/endpoint to create a second one yet.
+**Admin creation:** Only User accounts can be created, deactivated, or
+reactivated through the app; there is exactly one Admin (the
+`.env`-seeded one) for this round. The `role` field itself isn't
+restricted to a single Admin at the data layer — there's just no
+UI/endpoint to create a second one yet.
 
 **Post-login routing:** Both Admin and User land on Home. Admin sees an
 added nav link to the Admin page; User does not.

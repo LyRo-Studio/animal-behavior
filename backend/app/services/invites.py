@@ -12,12 +12,13 @@ from app.core.config import settings
 from app.core.security import generate_opaque_token, hash_opaque_token
 from app.models.account import Account, AccountRole
 from app.models.account_action_token import AccountActionToken, AccountActionTokenPurpose
-from app.services.accounts import derive_display_name, validate_email_domain
+from app.services.accounts import (
+    DeactivatedAccountExistsError,
+    DuplicateActiveAccountError,
+    derive_display_name,
+    validate_email_domain,
+)
 from app.services.mail import MailMessage, MailTransport, build_set_password_link
-
-
-class DuplicateActiveAccountError(Exception):
-    """Raised when an active Account already exists for the given email."""
 
 
 def _build_invite_email(account: Account, raw_token: str) -> MailMessage:
@@ -37,10 +38,11 @@ def _build_invite_email(account: Account, raw_token: str) -> MailMessage:
 def create_invited_account(db: Session, mail_transport: MailTransport, email: str) -> Account:
     """Create a User Account and email it an invite link to set a password.
 
-    Raises InvalidEmailDomainError / DuplicateActiveAccountError — both
-    mapped to specific (not generic) HTTP responses by the API layer, since
-    this is an Admin-only endpoint: unlike login, there's no reason to hide
-    *why* creation failed from an already-authenticated Admin.
+    Raises InvalidEmailDomainError / DuplicateActiveAccountError /
+    DeactivatedAccountExistsError — all mapped to specific (not generic)
+    HTTP responses by the API layer, since this is an Admin-only endpoint:
+    unlike login, there's no reason to hide *why* creation failed from an
+    already-authenticated Admin.
     """
     normalized_email = email.strip().lower()
     validate_email_domain(normalized_email)
@@ -50,6 +52,15 @@ def create_invited_account(db: Session, mail_transport: MailTransport, email: st
     )
     if existing_active is not None:
         raise DuplicateActiveAccountError
+
+    # An email already attached to a *deactivated* Account is reused by
+    # reactivating that Account, not by creating a second row for it — see
+    # DeactivatedAccountExistsError's docstring (ticket #15).
+    existing_inactive = db.scalar(
+        select(Account).where(Account.email == normalized_email, Account.is_active.is_(False))
+    )
+    if existing_inactive is not None:
+        raise DeactivatedAccountExistsError(existing_inactive.id)
 
     account = Account(
         email=normalized_email,

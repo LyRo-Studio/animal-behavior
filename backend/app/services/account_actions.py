@@ -8,12 +8,12 @@ outstanding refresh token for that Account).
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_opaque_token, hash_password
 from app.models.account_action_token import AccountActionToken
-from app.models.refresh_token import RefreshToken
+from app.services.refresh_tokens import revoke_all_refresh_tokens
 
 
 class InvalidActionTokenError(Exception):
@@ -43,10 +43,6 @@ def set_password(db: Session, raw_token: str, new_password: str) -> None:
     # Revoke every outstanding refresh token for this Account — matters
     # most for a password reset (ticket #5): forces re-login on every other
     # device/session. A no-op for a fresh invite, which has none yet.
-    db.execute(
-        update(RefreshToken)
-        .where(RefreshToken.account_id == account.id, RefreshToken.revoked_at.is_(None))
-        .values(revoked_at=now)
-    )
+    revoke_all_refresh_tokens(db, account.id, now)
 
     db.commit()
