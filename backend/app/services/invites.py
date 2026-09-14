@@ -16,6 +16,7 @@ from app.services.accounts import (
     DeactivatedAccountExistsError,
     DuplicateActiveAccountError,
     derive_display_name,
+    normalize_email,
     validate_email_domain,
 )
 from app.services.mail import MailMessage, MailTransport, build_set_password_link
@@ -44,7 +45,7 @@ def create_invited_account(db: Session, mail_transport: MailTransport, email: st
     unlike login, there's no reason to hide *why* creation failed from an
     already-authenticated Admin.
     """
-    normalized_email = email.strip().lower()
+    normalized_email = normalize_email(email)
     validate_email_domain(normalized_email)
 
     existing_active = db.scalar(

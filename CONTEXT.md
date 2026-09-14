@@ -125,3 +125,29 @@ stays mandatory; only the token *values* configured in it change.
   as grayscale exceptions (no other percentages of any palette color are
   allowed) — so `border` uses 20% zwart and `muted` uses 40% zwart, rather
   than inventing a new gray or reusing the old blue-neutral scale.
+
+**Brute-force throttling (ticket #7):** In-memory, per-process fixed-window
+rate limiting (`backend/app/services/rate_limit.py`) — no Redis/shared
+store, since the app runs as a single backend instance (`docker-compose.yml`
+has no replicas); revisit if that ever changes. No `X-Forwarded-For` (or
+similar) support — there is no reverse proxy in front of the app in any
+current deployment, and trusting such a header from an untrusted client
+would let the limit be spoofed away; revisit if a proxy is introduced.
+
+- Login and refresh count only *failed* attempts — a success never
+  consumes the budget — specifically so many legitimate users behind one
+  shared IP (e.g. a campus NAT) succeeding normally can never lock each
+  other out; only a run of failures (the actual brute-force signal) does.
+- Login tracks failures on two independent dimensions, per client IP *and*
+  per account (email) — safe to do per-account now that only failures
+  count (a real user's occasional typo stays far under the threshold) —
+  closing the gap a pure per-IP limit leaves open against an attacker
+  distributing attempts across several source IPs at one victim account.
+- Refresh is IP-only: there's no account identifier in a refresh request
+  to key on (just an opaque token).
+- Forgot-password counts *every* request, not just failures — there's no
+  failure/success distinction visible to it, the response is always the
+  same empty 204 — on both per-IP and per-email dimensions. Per-email is
+  safe there in a way it wouldn't be for login if login counted every
+  request too: exceeding it never blocks logging in, only requesting more
+  reset emails for a bit.

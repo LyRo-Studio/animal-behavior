@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.core.security import generate_opaque_token, hash_opaque_token
 from app.models.account import Account
 from app.models.account_action_token import AccountActionToken, AccountActionTokenPurpose
+from app.services.accounts import normalize_email
 from app.services.mail import MailMessage, MailTransport, build_set_password_link
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ def request_password_reset(db: Session, mail_transport: MailTransport, email: st
     this function exists to prevent, so it's caught and logged, never
     propagated.
     """
-    normalized_email = email.strip().lower()
+    normalized_email = normalize_email(email)
     account = db.scalar(
         select(Account).where(Account.email == normalized_email, Account.is_active.is_(True))
     )

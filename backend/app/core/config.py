@@ -59,6 +59,35 @@ class Settings(BaseSettings):
     # an Admin-invited User to first check their email.
     password_reset_token_expire_hours: int = 1
 
+    # Ticket #7 (Brute-force throttling): fixed-window limits on the
+    # unauthenticated auth endpoints — see app/services/rate_limit.py and
+    # app/api/auth.py.
+    #
+    # Login/refresh only count *failed* attempts (a successful login/
+    # refresh never consumes the budget) — so many legitimate users behind
+    # one shared IP (a campus NAT, say) succeeding normally can never
+    # exhaust it; only a run of failures, the actual brute-force signal,
+    # does. Login additionally tracks failures per-account (by email), on
+    # top of per-IP: safe to do now that only failures count (a real
+    # user's occasional typo stays far under the threshold), and it closes
+    # the gap a pure per-IP limit leaves open against an attacker
+    # distributing attempts across several source IPs at one victim
+    # account.
+    #
+    # Forgot-password counts *every* request (there's no failure/success
+    # distinction meaningful to a caller — the response is always the same
+    # empty 204). Its per-email limit is safe in a way login's per-account
+    # one wouldn't be if it counted every request too: exceeding it never
+    # blocks logging in, only requesting more reset emails for a bit.
+    login_rate_limit_max_failed_attempts_per_ip: int = 10
+    login_rate_limit_max_failed_attempts_per_email: int = 10
+    login_rate_limit_window_seconds: int = 300
+    refresh_rate_limit_max_failed_attempts_per_ip: int = 30
+    refresh_rate_limit_window_seconds: int = 300
+    forgot_password_rate_limit_max_attempts_per_ip: int = 10
+    forgot_password_rate_limit_max_attempts_per_email: int = 5
+    forgot_password_rate_limit_window_seconds: int = 900
+
     @property
     def cors_origin_list(self) -> list[str]:
         """CORS_ORIGINS as a comma-separated env var, split into a list."""
