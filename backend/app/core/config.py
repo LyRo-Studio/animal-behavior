@@ -103,6 +103,16 @@ class Settings(BaseSettings):
     aws_secret_access_key: str | None = None
     s3_addressing_style: str = "path"
 
+    # Ticket #21 (Play/download a Cut): short-lived, single-Cut-scoped,
+    # single-action-scoped tokens for the backend-proxied streaming
+    # endpoint — see app/core/security.py's create_media_token and
+    # docs/adr/0002-media-access-tokens-in-url.md. Issuance is rate
+    # limited per Account (CONTEXT.md's "Media browser — abuse
+    # protection" decision), reusing app/services/rate_limit.py.
+    media_token_expire_minutes: int = 15
+    media_token_rate_limit_max_attempts_per_account: int = 30
+    media_token_rate_limit_window_seconds: int = 300
+
     @property
     def cors_origin_list(self) -> list[str]:
         """CORS_ORIGINS as a comma-separated env var, split into a list."""

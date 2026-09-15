@@ -7,6 +7,8 @@ import MediaBrowserView from '../MediaBrowserView.vue'
 const listTestIdsMock = vi.hoisted(() => vi.fn())
 const listCutsMock = vi.hoisted(() => vi.fn())
 const listDatasetFolderMock = vi.hoisted(() => vi.fn())
+const requestMediaTokenMock = vi.hoisted(() => vi.fn())
+const mediaStreamUrlMock = vi.hoisted(() => vi.fn())
 // A real class, not a plain mock: the view does `err instanceof
 // TestNotFoundError`, so the mocked module needs to export the same
 // constructor identity that tests throw instances of.
@@ -19,6 +21,8 @@ vi.mock('@/services/mediaBrowser', () => ({
   listTestIds: listTestIdsMock,
   listCuts: listCutsMock,
   listDatasetFolder: listDatasetFolderMock,
+  requestMediaToken: requestMediaTokenMock,
+  mediaStreamUrl: mediaStreamUrlMock,
   TestNotFoundError,
   DatasetFolderNotFoundError,
 }))
@@ -57,6 +61,8 @@ describe('MediaBrowserView', () => {
     listTestIdsMock.mockReset()
     listCutsMock.mockReset()
     listDatasetFolderMock.mockReset()
+    requestMediaTokenMock.mockReset()
+    mediaStreamUrlMock.mockReset()
   })
 
   it('shows filtered suggestions as the user types', async () => {
@@ -397,5 +403,106 @@ describe('MediaBrowserView', () => {
     const wrapper = await mountView()
 
     expect(wrapper.find('[data-testid="dataset-not-found"]').exists()).toBe(true)
+  })
+
+  const SAMPLE_CUT = {
+    key: 'cuts/T001/T001_C1_ME_F1.mp4',
+    filename: 'T001_C1_ME_F1.mp4',
+    camera: 'C1',
+    condition: 'ME',
+    phase: 'F1',
+    size: 2048,
+    lastModified: '2026-01-01T12:00:00Z',
+  }
+
+  async function searchForSampleCut(wrapper: Awaited<ReturnType<typeof mountView>>) {
+    await wrapper.find('input#test-search').setValue('T001')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+  }
+
+  it('plays a Cut by minting a play token and rendering the resulting stream URL', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([SAMPLE_CUT])
+    requestMediaTokenMock.mockResolvedValue('play-token')
+    mediaStreamUrlMock.mockReturnValue('https://api.example/media/stream?action=play')
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    await wrapper.find('[data-testid="play-cut"]').trigger('click')
+    await flushPromises()
+
+    expect(requestMediaTokenMock).toHaveBeenCalledWith('a-token', SAMPLE_CUT.key, 'play')
+    expect(mediaStreamUrlMock).toHaveBeenCalledWith(SAMPLE_CUT.key, 'play', 'play-token')
+    const player = wrapper.find('[data-testid="cut-player"]')
+    expect(player.exists()).toBe(true)
+    expect(player.attributes('src')).toBe('https://api.example/media/stream?action=play')
+  })
+
+  it('closes the player when "Close player" is clicked', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([SAMPLE_CUT])
+    requestMediaTokenMock.mockResolvedValue('play-token')
+    mediaStreamUrlMock.mockReturnValue('https://api.example/media/stream')
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+    await wrapper.find('[data-testid="play-cut"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="cut-player"]').exists()).toBe(true)
+
+    await wrapper.find('[data-testid="close-player"]').trigger('click')
+
+    expect(wrapper.find('[data-testid="cut-player"]').exists()).toBe(false)
+  })
+
+  it('downloads a Cut by minting a download token and clicking a link to the stream URL', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([SAMPLE_CUT])
+    requestMediaTokenMock.mockResolvedValue('download-token')
+    mediaStreamUrlMock.mockReturnValue('https://api.example/media/stream?action=download')
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    await wrapper.find('[data-testid="download-cut"]').trigger('click')
+    await flushPromises()
+
+    expect(requestMediaTokenMock).toHaveBeenCalledWith('a-token', SAMPLE_CUT.key, 'download')
+    expect(mediaStreamUrlMock).toHaveBeenCalledWith(SAMPLE_CUT.key, 'download', 'download-token')
+    expect(clickSpy).toHaveBeenCalledOnce()
+    clickSpy.mockRestore()
+  })
+
+  it('shows an error and never opens a player when minting a play token fails', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([SAMPLE_CUT])
+    requestMediaTokenMock.mockRejectedValue(new Error('Failed to start playback.'))
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    await wrapper.find('[data-testid="play-cut"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Failed to start playback.')
+    expect(wrapper.find('[data-testid="cut-player"]').exists()).toBe(false)
+  })
+
+  it('closes an open player when a new search starts', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([SAMPLE_CUT])
+    requestMediaTokenMock.mockResolvedValue('play-token')
+    mediaStreamUrlMock.mockReturnValue('https://api.example/media/stream')
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+    await wrapper.find('[data-testid="play-cut"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="cut-player"]').exists()).toBe(true)
+
+    listCutsMock.mockResolvedValue([])
+    await wrapper.find('input#test-search').setValue('T002')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="cut-player"]').exists()).toBe(false)
   })
 })

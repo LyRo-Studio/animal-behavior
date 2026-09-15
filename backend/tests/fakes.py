@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.services.mail import MailMessage
-from app.services.s3_client import S3ObjectInfo
+from app.services.s3_client import S3ObjectInfo, S3ObjectNotFoundError
 
 
 @dataclass
@@ -71,6 +71,11 @@ class FakeS3Client:
             if not recursive and "/" in rest:
                 continue
             yield S3ObjectInfo(key=key, size=len(data), last_modified=self.last_modified)
+
+    def head_object(self, key: str) -> S3ObjectInfo:
+        if key not in self.objects:
+            raise S3ObjectNotFoundError(key)
+        return S3ObjectInfo(key=key, size=len(self.objects[key]), last_modified=self.last_modified)
 
     def read_range(self, key: str, start: int, end: int) -> bytes:
         return self.objects[key][start : end + 1]

@@ -119,3 +119,48 @@ export async function listDatasetFolder(
   const rows: DatasetEntryResponse[] = await response.json()
   return rows.map(toDatasetEntry)
 }
+
+// Ticket #21: play/download a Cut via a short-lived, single-Cut-scoped,
+// single-action-scoped media token — see docs/adr/0002-media-access-tokens-
+// in-url.md. The native <video>/download request that follows can't carry
+// an Authorization header, so the token (not the session) authenticates it.
+export type MediaTokenAction = 'play' | 'download'
+
+interface MediaTokenResponse {
+  token: string
+  expires_in: number
+}
+
+export async function requestMediaToken(
+  accessToken: string,
+  key: string,
+  action: MediaTokenAction,
+): Promise<string> {
+  const response = await fetch(`${API_BASE_URL}/media/cuts/token`, {
+    method: 'POST',
+    headers: { ...authHeaders(accessToken), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, action }),
+  })
+
+  if (response.status === 429) {
+    throw new Error('Too many requests. Please try again shortly.')
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to start ${action === 'play' ? 'playback' : 'download'}.`)
+  }
+
+  const body: MediaTokenResponse = await response.json()
+  return body.token
+}
+
+// The URL the browser's own <video src> / download link hits directly —
+// never fetched via `fetch`, so the media token travels as a query
+// parameter rather than a header (the deliberate, scoped exception in the
+// ADR referenced above).
+export function mediaStreamUrl(key: string, action: MediaTokenAction, token: string): string {
+  const url = new URL(`${API_BASE_URL}/media/stream`)
+  url.searchParams.set('key', key)
+  url.searchParams.set('action', action)
+  url.searchParams.set('token', token)
+  return url.toString()
+}

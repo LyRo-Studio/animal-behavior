@@ -8,10 +8,16 @@ from app.api.accounts import router as accounts_router
 from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
+from app.api.media_browser import public_router as media_stream_router
 from app.api.media_browser import router as media_browser_router
 from app.core.config import settings
+from app.core.logging import configure_access_log_redaction
 from app.db.session import SessionLocal
 from app.services.accounts import seed_first_admin
+
+# ADR 0002: the media-streaming endpoint's token query parameter must never
+# sit in plaintext access logs — see app/core/logging.py.
+configure_access_log_redaction()
 
 
 @asynccontextmanager
@@ -40,3 +46,4 @@ app.include_router(auth_router)
 app.include_router(accounts_router)
 app.include_router(admin_router)
 app.include_router(media_browser_router)
+app.include_router(media_stream_router)

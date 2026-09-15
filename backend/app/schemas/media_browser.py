@@ -1,6 +1,7 @@
+import enum
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CutOut(BaseModel):
@@ -23,3 +24,25 @@ class DatasetEntryOut(BaseModel):
     is_folder: bool
     size: int | None
     last_modified: datetime | None
+
+
+class MediaTokenAction(str, enum.Enum):
+    """Ticket #21: a media token is scoped to exactly one of these — see
+    docs/adr/0002-media-access-tokens-in-url.md."""
+
+    PLAY = "play"
+    DOWNLOAD = "download"
+
+
+class MediaTokenRequest(BaseModel):
+    # Bounded per ENGINEERING-STANDARDS.md's DoS-protection guidance, same
+    # spirit as LoginRequest's field bounds — this feeds straight into a
+    # regex match (parse_cut_key), never persisted or hashed, so the bound
+    # only needs to be generous enough for any real Cut key.
+    key: str = Field(min_length=1, max_length=1024)
+    action: MediaTokenAction
+
+
+class MediaTokenResponse(BaseModel):
+    token: str
+    expires_in: int

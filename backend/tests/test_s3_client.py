@@ -3,9 +3,10 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 import app.services.s3_client as s3_client_module
-from app.services.s3_client import BotoS3Client, S3ObjectInfo, get_s3_client
+from app.services.s3_client import BotoS3Client, S3ObjectInfo, S3ObjectNotFoundError, get_s3_client
 from tests.fakes import FakeS3Client
 
 # FakeS3Client is the only S3Client the app's own tests exercise through the
@@ -99,6 +100,23 @@ def test_list_objects_info_non_recursive_excludes_nested_objects():
     assert keys == {"cuts/T001/video1.mp4"}
 
 
+def test_head_object_returns_metadata_for_an_existing_key():
+    fake = FakeS3Client(objects={"cuts/T001/video1.mp4": b"0123456789"})
+
+    info = fake.head_object("cuts/T001/video1.mp4")
+
+    assert info == S3ObjectInfo(
+        key="cuts/T001/video1.mp4", size=10, last_modified=fake.last_modified
+    )
+
+
+def test_head_object_raises_not_found_for_a_missing_key():
+    fake = FakeS3Client(objects={})
+
+    with pytest.raises(S3ObjectNotFoundError):
+        fake.head_object("cuts/T001/missing.mp4")
+
+
 def test_read_range_is_inclusive_of_both_ends():
     fake = FakeS3Client(objects={"cuts/T001/video1.mp4": b"0123456789"})
 
@@ -171,6 +189,49 @@ def test_boto_list_objects_info_non_recursive_passes_delimiter():
         mock_client.get_paginator.return_value.paginate.assert_called_once_with(
             Bucket="test-bucket", Prefix="cuts/T001/", Delimiter="/"
         )
+
+
+def test_boto_head_object_returns_metadata():
+    last_modified = datetime(2026, 1, 1, tzinfo=UTC)
+    with patch("app.services.s3_client.boto3.client") as boto_client_factory:
+        mock_client = boto_client_factory.return_value
+        mock_client.head_object.return_value = {
+            "ContentLength": 12345,
+            "LastModified": last_modified,
+        }
+
+        info = _boto_client().head_object("cuts/T001/video1.mp4")
+
+        assert info == S3ObjectInfo(
+            key="cuts/T001/video1.mp4", size=12345, last_modified=last_modified
+        )
+        mock_client.head_object.assert_called_once_with(
+            Bucket="test-bucket", Key="cuts/T001/video1.mp4"
+        )
+
+
+def test_boto_head_object_raises_not_found_on_a_404_client_error():
+    with patch("app.services.s3_client.boto3.client") as boto_client_factory:
+        mock_client = boto_client_factory.return_value
+        mock_client.head_object.side_effect = ClientError(
+            {"ResponseMetadata": {"HTTPStatusCode": 404}, "Error": {"Code": "404"}},
+            "HeadObject",
+        )
+
+        with pytest.raises(S3ObjectNotFoundError):
+            _boto_client().head_object("cuts/T001/missing.mp4")
+
+
+def test_boto_head_object_reraises_a_non_404_client_error():
+    with patch("app.services.s3_client.boto3.client") as boto_client_factory:
+        mock_client = boto_client_factory.return_value
+        mock_client.head_object.side_effect = ClientError(
+            {"ResponseMetadata": {"HTTPStatusCode": 403}, "Error": {"Code": "AccessDenied"}},
+            "HeadObject",
+        )
+
+        with pytest.raises(ClientError):
+            _boto_client().head_object("cuts/T001/video1.mp4")
 
 
 def test_boto_read_range_uses_inclusive_byte_range_header():

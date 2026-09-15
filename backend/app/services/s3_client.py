@@ -19,6 +19,7 @@ from typing import Protocol
 import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from app.core.config import settings
 
@@ -28,6 +29,11 @@ class S3ObjectInfo:
     key: str
     size: int
     last_modified: datetime
+
+
+class S3ObjectNotFoundError(Exception):
+    """No object exists at the given key — raised by `head_object`, the
+    sole existence check in this Protocol (see its docstring)."""
 
 
 class S3Client(Protocol):
@@ -41,6 +47,13 @@ class S3Client(Protocol):
     ) -> Iterator[S3ObjectInfo]:
         """Objects under `prefix`. `recursive=False` limits to objects
         directly under `prefix`, like `list_folders` does for folders."""
+        ...
+
+    def head_object(self, key: str) -> S3ObjectInfo:
+        """Metadata (key, size, last-modified) for a single object at
+        `key`, without downloading it — used to size a streaming response
+        (ticket #21) before any bytes are read. Raises S3ObjectNotFoundError
+        if no such object exists."""
         ...
 
     def read_range(self, key: str, start: int, end: int) -> bytes:
@@ -103,6 +116,21 @@ class BotoS3Client:
                 if key.endswith("/"):
                     continue
                 yield S3ObjectInfo(key=key, size=obj["Size"], last_modified=obj["LastModified"])
+
+    def head_object(self, key: str) -> S3ObjectInfo:
+        try:
+            response = self._client.head_object(Bucket=self._bucket_name, Key=key)
+        except ClientError as exc:
+            # HeadObject has no response body, so S3 reports a missing key
+            # as a bare "404" HTTP status rather than a modeled error code
+            # like GetObject's "NoSuchKey" — check the status directly.
+            status_code = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if status_code == 404:
+                raise S3ObjectNotFoundError(key) from None
+            raise
+        return S3ObjectInfo(
+            key=key, size=response["ContentLength"], last_modified=response["LastModified"]
+        )
 
     def read_range(self, key: str, start: int, end: int) -> bytes:
         response = self._client.get_object(
