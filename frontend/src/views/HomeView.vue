@@ -16,6 +16,15 @@ async function handleLogout() {
     <header class="flex items-center justify-between border-b border-border bg-surface px-6 py-4">
       <h1 class="font-serif text-xl text-primary">Hogeschool VIVES</h1>
       <div class="flex items-center gap-4">
+        <!-- Every authenticated Account gets this link (CONTEXT.md's
+             "Media browser — access" decision) — no role gating, unlike
+             Admin below. -->
+        <RouterLink
+          :to="{ name: 'media' }"
+          class="text-sm font-medium text-primary hover:underline"
+        >
+          Media Browser
+        </RouterLink>
         <!-- Only Admins see this link (CONTEXT.md's "Admin page" entry) —
              a User attempting the route directly is redirected away by the
              router guard regardless, this just avoids showing an
