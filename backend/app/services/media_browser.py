@@ -50,11 +50,17 @@ class Cut:
 
 
 def list_test_ids(s3: S3Client) -> list[str]:
-    """Every Test id, for the frontend's fetch-once-then-filter-client-side
-    search (CONTEXT.md's "Media browser — Test discovery" decision)."""
-    return sorted(
-        folder.removeprefix(CUTS_PREFIX).rstrip("/") for folder in s3.list_folders(CUTS_PREFIX)
-    )
+    """Every well-formed Test id, for the frontend's
+    fetch-once-then-filter-client-side search (CONTEXT.md's "Media browser
+    — Test discovery" decision).
+
+    Filtered through the same `_TEST_ID_RE` `list_cuts_for_test` validates
+    against — a stray folder under `cuts/` that isn't shaped like a Test id
+    (e.g. `cuts/T001_backup/`) must never surface as a pickable suggestion,
+    since selecting it would just fail `list_cuts_for_test`'s own check.
+    """
+    ids = (folder.removeprefix(CUTS_PREFIX).rstrip("/") for folder in s3.list_folders(CUTS_PREFIX))
+    return sorted(test_id for test_id in ids if _TEST_ID_RE.match(test_id))
 
 
 def _parse_cut_filename(filename: str) -> tuple[str | None, str | None, str | None]:
