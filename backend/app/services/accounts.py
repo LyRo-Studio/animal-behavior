@@ -112,7 +112,11 @@ def seed_first_admin(db: Session) -> None:
     path exists to fix. It logs a warning and leaves the Admin inactive
     instead, which is the pre-existing (broken) state, not a new one.
     """
-    existing_admin = db.scalar(select(Account).where(Account.role == AccountRole.ADMIN))
+    admins = db.scalars(select(Account).where(Account.role == AccountRole.ADMIN)).all()
+    if len(admins) > 1:
+        logger.warning("seed_first_admin: multiple Admin rows exist; skipping recovery.")
+        return
+    existing_admin = admins[0] if admins else None
     if existing_admin is not None:
         if not existing_admin.is_active:
             conflict = db.scalar(
