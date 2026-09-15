@@ -110,6 +110,34 @@ def test_login_per_email_limit_catches_attempts_distributed_across_ips(
     assert throttled.status_code == 429
 
 
+def test_login_with_correct_password_bypasses_an_exhausted_per_email_budget(
+    client, db_session, monkeypatch
+):
+    """Regression for the account-specific DoS a pre-auth peek on the
+    per-email budget would allow: an attacker distributes wrong-password
+    guesses for the victim's email across many IPs (each comfortably under
+    the per-IP limit) until the shared per-email budget is exhausted. The
+    victim's own *correct* login must still succeed — the per-email budget
+    is only ever consulted after a confirmed authentication failure, never
+    used to reject a request before authentication runs."""
+    monkeypatch.setattr(settings, "login_rate_limit_max_failed_attempts_per_ip", 100)
+    monkeypatch.setattr(settings, "login_rate_limit_max_failed_attempts_per_email", 2)
+    create_account(db_session, email="jan.peeters@vives.be")
+
+    for ip in ("1.1.1.1", "2.2.2.2", "3.3.3.3"):
+        attacker = TestClient(app, client=(ip, 12345))
+        attacker.post(
+            "/auth/login", json={"email": "jan.peeters@vives.be", "password": "wrong"}
+        )
+
+    victim = TestClient(app, client=("9.9.9.9", 12345))
+    response = victim.post(
+        "/auth/login", json={"email": "jan.peeters@vives.be", "password": DEFAULT_PASSWORD}
+    )
+
+    assert response.status_code == 200
+
+
 def test_concurrent_login_failures_never_exceed_the_configured_limit(
     client, db_session, monkeypatch
 ):

@@ -139,10 +139,22 @@ would let the limit be spoofed away; revisit if a proxy is introduced.
   shared IP (e.g. a campus NAT) succeeding normally can never lock each
   other out; only a run of failures (the actual brute-force signal) does.
 - Login tracks failures on two independent dimensions, per client IP *and*
-  per account (email) — safe to do per-account now that only failures
-  count (a real user's occasional typo stays far under the threshold) —
-  closing the gap a pure per-IP limit leaves open against an attacker
-  distributing attempts across several source IPs at one victim account.
+  per account (email), closing the gap a pure per-IP limit leaves open
+  against an attacker distributing attempts across several source IPs at
+  one victim account. The per-IP budget is peeked *before* authentication
+  runs (to skip password verification for an already-exhausted IP) but the
+  per-email budget is only ever `hit` *after* a confirmed failure, never
+  peeked pre-auth — so a correct password always succeeds regardless of
+  the account's recent failure history. Peeking the per-email budget
+  pre-auth (as an earlier version of this code did) turns it into an
+  account-specific denial-of-service gate: an attacker who fails enough
+  distributed, per-IP-budget-evading guesses against one victim email
+  exhausts the shared per-email bucket, and the real owner's *next*
+  attempt — even with the right password — gets rejected by the peek
+  before authentication is ever attempted. Ticket #7 requires throttling
+  not lock out legitimate users, so this asymmetry (peek+hit on the IP
+  dimension, hit-only on the email dimension) is deliberate, not an
+  oversight — don't "fix" it back to symmetric peek-then-hit on both.
 - Refresh is IP-only: there's no account identifier in a refresh request
   to key on (just an opaque token).
 - Forgot-password counts *every* request, not just failures — there's no
