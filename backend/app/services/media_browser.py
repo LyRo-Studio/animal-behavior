@@ -18,10 +18,14 @@ from app.services.s3_client import S3Client
 # a Test id (see `list_cuts_for_test`'s validation).
 CUTS_PREFIX = "cuts/"
 
-# Every Dataset lives under this prefix (see CONTEXT.md's "Dataset" term) —
-# the only prefix `list_dataset_folder` ever resolves keys under, regardless
-# of what a caller supplies as `path` (see `_dataset_prefix_for_path`).
-DATASET_PREFIX = "dataset/"
+# A Dataset lives at its own top-level prefix in the bucket (e.g.
+# "dataset_pose_v0.1/", "dataset_v0.9/") — sibling to "cuts/" and "source/"
+# at the bucket root, not nested under a shared parent prefix (see
+# CONTEXT.md's "Dataset" term). A folder matching this at the bucket root is
+# a Dataset; nothing else there (in particular "cuts/" and "source/") ever
+# surfaces as one, regardless of what a caller supplies as `path` (see
+# `_dataset_key_prefix`).
+DATASET_NAME_RE = re.compile(r"^dataset[\w.-]*$")
 
 # A Test id, e.g. "T001" (CONTEXT.md's "Test" term). Anything not matching
 # this is never a real Test id, so `list_cuts_for_test` rejects it up front
@@ -44,11 +48,11 @@ class TestNotFoundError(Exception):
 
 
 class DatasetNotFoundError(Exception):
-    """No folder exists at the given path under `dataset/` — either the
-    path is malformed (escapes the Datasets prefix) or it's well-formed but
-    has no children in S3 (S3 has no notion of an empty folder, so a
-    Dataset folder's existence *is* having at least one entry under it,
-    same reasoning as `TestNotFoundError`)."""
+    """No folder exists at the given path — either its top-level segment
+    isn't a Dataset-shaped name (see `DATASET_NAME_RE`), some other segment
+    is malformed, or the resolved path has no children in S3 (S3 has no
+    notion of an empty folder, so a Dataset folder's existence *is* having
+    at least one entry under it, same reasoning as `TestNotFoundError`)."""
 
 
 @dataclass(frozen=True)
@@ -127,35 +131,48 @@ def list_cuts_for_test(s3: S3Client, test_id: str) -> list[Cut]:
     return sorted(cuts, key=lambda cut: cut.filename)
 
 
-def _dataset_prefix_for_path(path: str) -> str:
-    """The S3 prefix `path` (a "/"-separated path *relative to* `dataset/`,
-    e.g. "dataset_v1/train") resolves to, or raises DatasetNotFoundError if
-    it doesn't stay under `DATASET_PREFIX`.
+def _dataset_key_prefix(path: str) -> str:
+    """The S3 prefix `path` (a "/"-separated path from the bucket root,
+    e.g. "dataset_v0.9/train") resolves to, or raises DatasetNotFoundError
+    if it doesn't name a Dataset.
 
-    Rejecting a "..", "." or empty segment up front — rather than building
-    the prefix first and checking the result — is what keeps this function
-    from ever resolving a key outside `dataset/`, regardless of what `path`
-    is supplied (mirrors `list_cuts_for_test`'s Test id validation).
+    Rejecting a "..", "." or empty segment, and requiring the first segment
+    to match `DATASET_NAME_RE`, up front — rather than building the prefix
+    first and checking the result — is what keeps this function from ever
+    resolving a key outside a Dataset's own prefix (in particular never
+    "cuts/" or "source/"), regardless of what `path` is supplied (mirrors
+    `list_cuts_for_test`'s Test id validation). Only called for a non-root
+    `path` — the root case (listing the Datasets themselves) is handled
+    directly in `list_dataset_folder`.
     """
-    path = path.strip("/")
-    if path == "":
-        return DATASET_PREFIX
-
     segments = path.split("/")
     if any(segment in ("", ".", "..") for segment in segments):
         raise DatasetNotFoundError(path)
+    if not DATASET_NAME_RE.match(segments[0]):
+        raise DatasetNotFoundError(path)
 
-    return DATASET_PREFIX + "/".join(segments) + "/"
+    return "/".join(segments) + "/"
 
 
 def list_dataset_folder(s3: S3Client, path: str = "") -> list[DatasetEntry]:
-    """The immediate children (folders and files) of the Dataset folder at
-    `path` (relative to `dataset/`; "" for the top level).
+    """The immediate children (folders and files) of the folder at `path`
+    (a "/"-separated path from the bucket root). `path=""` (the top level)
+    lists every Dataset itself, rather than one Dataset's contents.
 
-    Raises DatasetNotFoundError if `path` escapes `dataset/` or resolves to
-    a folder with no children.
+    Raises DatasetNotFoundError if `path` doesn't name a Dataset (or a
+    folder inside one) or resolves to a folder with no children.
     """
-    prefix = _dataset_prefix_for_path(path)
+    path = path.strip("/")
+
+    if path == "":
+        entries = []
+        for folder in s3.list_folders(""):
+            name = folder.rstrip("/")
+            if DATASET_NAME_RE.match(name):
+                entries.append(DatasetEntry(name=name, key=folder, is_folder=True))
+        return sorted(entries, key=lambda entry: entry.name)
+
+    prefix = _dataset_key_prefix(path)
 
     entries = [
         DatasetEntry(name=folder.removeprefix(prefix).rstrip("/"), key=folder, is_folder=True)
@@ -172,7 +189,7 @@ def list_dataset_folder(s3: S3Client, path: str = "") -> list[DatasetEntry]:
         for info in s3.list_objects_info(prefix, recursive=False)
     ]
 
-    if not entries and prefix != DATASET_PREFIX:
+    if not entries:
         raise DatasetNotFoundError(path)
 
     return sorted(entries, key=lambda entry: (not entry.is_folder, entry.name))

@@ -36,7 +36,10 @@ One processed video file under `cuts/<Test>/` in S3, belonging to exactly one Te
 An original, unsplit video under `source/` in S3, before being split into Cuts. Not exposed by the application in the current round — see Decisions.
 
 **Dataset**:
-A versioned collection of files under `dataset/` in S3 (e.g. `dataset_v1`), browsable as a folder tree.
+A versioned collection of files at its own top-level prefix in S3 (e.g.
+`dataset_v0.9/`, `dataset_pose_v0.1/`) — sibling to `cuts/` and `source/`,
+not nested under a shared `dataset/` parent — identified by a name
+starting with `dataset`, browsable as a folder tree.
 _Avoid_: "test" for a Dataset's split subfolder — see Split.
 
 **Split**:
