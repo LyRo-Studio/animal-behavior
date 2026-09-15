@@ -40,6 +40,13 @@ _CUT_FILENAME_RE = re.compile(
     r"^T\d+_(?P<camera>C\d+)_(?P<condition>ME|ZE)_(?P<phase>F\d+)\.[^./]+$"
 )
 
+# A single Cut's key, directly under cuts/<test_id>/ — no nested path.
+# Anything not matching this is never a real Cut key, so `parse_cut_key`
+# (ticket #21: minting/serving a media token for one specific Cut) rejects
+# it up front rather than using it to reach into S3, same shape-defines-
+# existence reasoning as `_TEST_ID_RE` above.
+_CUT_KEY_RE = re.compile(r"^cuts/T\d+/[^/]+$")
+
 
 class TestNotFoundError(Exception):
     """No Cuts exist under the given Test id's prefix — since there's no
@@ -53,6 +60,16 @@ class DatasetNotFoundError(Exception):
     is malformed, or the resolved path has no children in S3 (S3 has no
     notion of an empty folder, so a Dataset folder's existence *is* having
     at least one entry under it, same reasoning as `TestNotFoundError`)."""
+
+
+class CutNotFoundError(Exception):
+    """`key` doesn't name a Cut directly under cuts/<test_id>/ (ticket #21)
+    — either it's shaped wrong (nested path, missing/malformed Test id, or
+    outside cuts/ entirely). Same shape-defines-existence validation as
+    `TestNotFoundError`'s Test id check, applied to one specific key rather
+    than a whole Test's contents: a media token can never be minted for,
+    and the streaming endpoint never resolves, a key outside cuts/,
+    regardless of what `key` is supplied."""
 
 
 @dataclass(frozen=True)
@@ -129,6 +146,19 @@ def list_cuts_for_test(s3: S3Client, test_id: str) -> list[Cut]:
         raise TestNotFoundError(test_id)
 
     return sorted(cuts, key=lambda cut: cut.filename)
+
+
+def parse_cut_key(key: str) -> str:
+    """The filename portion of a well-formed Cut key ("cuts/<test_id>/
+    <filename>", no nested path). Raises CutNotFoundError otherwise —
+    called before minting a media token for `key` and again by the
+    streaming endpoint itself (ticket #21), so a key outside cuts/ can
+    never reach either.
+    """
+    match = _CUT_KEY_RE.match(key)
+    if match is None:
+        raise CutNotFoundError(key)
+    return key.rsplit("/", 1)[-1]
 
 
 def _dataset_key_prefix(path: str) -> str:

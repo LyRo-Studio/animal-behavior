@@ -6,9 +6,12 @@ import {
   listCuts,
   listDatasetFolder,
   listTestIds,
+  mediaStreamUrl,
+  requestMediaToken,
   TestNotFoundError,
   type Cut,
   type DatasetEntry,
+  type MediaTokenAction,
 } from '@/services/mediaBrowser'
 import { session } from '@/stores/session'
 
@@ -106,6 +109,9 @@ async function search(testId: string) {
   notFound.value = false
   cutsError.value = null
   isLoadingCuts.value = true
+  // A new search's Cuts share no relationship with whatever was playing
+  // for the previous Test — never leave a stale player showing.
+  closePlayback()
 
   try {
     const result = await listCuts(session.accessToken.value, trimmed)
@@ -147,6 +153,65 @@ function formatSize(bytes: number): string {
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString()
+}
+
+// Ticket #21: play/download a Cut via a lazily-minted, single-Cut-scoped
+// media token — never minted eagerly for a whole Test's Cuts, only on an
+// actual Play/Download click. Keyed by `${key}:${action}` so a Play click
+// on one Cut never disables a Download click on another (or the other
+// action on the same one) while its own request is in flight.
+const mediaActionInFlight = ref<Record<string, boolean>>({})
+const mediaActionError = ref<string | null>(null)
+const playingCutKey = ref<string | null>(null)
+const playbackUrl = ref<string | null>(null)
+
+function isMediaActionInFlight(cut: Cut, action: MediaTokenAction): boolean {
+  return mediaActionInFlight.value[`${cut.key}:${action}`] === true
+}
+
+async function playCut(cut: Cut) {
+  if (!session.accessToken.value || isMediaActionInFlight(cut, 'play')) return
+  const flightKey = `${cut.key}:play`
+  mediaActionInFlight.value[flightKey] = true
+  mediaActionError.value = null
+
+  try {
+    const token = await requestMediaToken(session.accessToken.value, cut.key, 'play')
+    playingCutKey.value = cut.key
+    playbackUrl.value = mediaStreamUrl(cut.key, 'play', token)
+  } catch (err) {
+    mediaActionError.value = err instanceof Error ? err.message : 'Failed to start playback.'
+  } finally {
+    mediaActionInFlight.value[flightKey] = false
+  }
+}
+
+function closePlayback() {
+  playingCutKey.value = null
+  playbackUrl.value = null
+}
+
+async function downloadCut(cut: Cut) {
+  if (!session.accessToken.value || isMediaActionInFlight(cut, 'download')) return
+  const flightKey = `${cut.key}:download`
+  mediaActionInFlight.value[flightKey] = true
+  mediaActionError.value = null
+
+  try {
+    const token = await requestMediaToken(session.accessToken.value, cut.key, 'download')
+    // A native download the browser's Content-Disposition-driven save
+    // dialog handles — not a fetch, so the SPA never buffers the file.
+    const link = document.createElement('a')
+    link.href = mediaStreamUrl(cut.key, 'download', token)
+    link.rel = 'noreferrer'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  } catch (err) {
+    mediaActionError.value = err instanceof Error ? err.message : 'Failed to start download.'
+  } finally {
+    mediaActionInFlight.value[flightKey] = false
+  }
 }
 
 // The current Dataset folder, as path segments relative to the Datasets
@@ -271,28 +336,73 @@ onMounted(() => {
           No Test found with ID "{{ selectedTestId }}".
         </p>
         <p v-else-if="cutsError" class="mt-2 text-sm text-danger" role="alert">{{ cutsError }}</p>
-        <table v-else-if="cuts" class="mt-4 w-full text-left text-sm">
-          <thead>
-            <tr class="border-b border-border text-muted">
-              <th class="py-2 pr-4 font-medium">Filename</th>
-              <th class="py-2 pr-4 font-medium">Camera</th>
-              <th class="py-2 pr-4 font-medium">Condition</th>
-              <th class="py-2 pr-4 font-medium">Phase</th>
-              <th class="py-2 pr-4 font-medium">Size</th>
-              <th class="py-2 font-medium">Last modified</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="cut in cuts" :key="cut.key" class="border-b border-border">
-              <td class="py-2 pr-4">{{ cut.filename }}</td>
-              <td class="py-2 pr-4">{{ cut.camera ?? '—' }}</td>
-              <td class="py-2 pr-4">{{ cut.condition ?? '—' }}</td>
-              <td class="py-2 pr-4">{{ cut.phase ?? '—' }}</td>
-              <td class="py-2 pr-4">{{ formatSize(cut.size) }}</td>
-              <td class="py-2">{{ formatDate(cut.lastModified) }}</td>
-            </tr>
-          </tbody>
-        </table>
+        <template v-else-if="cuts">
+          <p v-if="mediaActionError" class="mt-2 text-sm text-danger" role="alert">
+            {{ mediaActionError }}
+          </p>
+          <video
+            v-if="playbackUrl"
+            data-testid="cut-player"
+            :src="playbackUrl"
+            controls
+            autoplay
+            class="mt-4 w-full rounded-md border border-border bg-surface"
+          ></video>
+          <button
+            v-if="playbackUrl"
+            type="button"
+            data-testid="close-player"
+            class="mt-2 text-sm font-medium text-primary hover:underline"
+            @click="closePlayback"
+          >
+            Close player
+          </button>
+          <table class="mt-4 w-full text-left text-sm">
+            <thead>
+              <tr class="border-b border-border text-muted">
+                <th class="py-2 pr-4 font-medium">Filename</th>
+                <th class="py-2 pr-4 font-medium">Camera</th>
+                <th class="py-2 pr-4 font-medium">Condition</th>
+                <th class="py-2 pr-4 font-medium">Phase</th>
+                <th class="py-2 pr-4 font-medium">Size</th>
+                <th class="py-2 pr-4 font-medium">Last modified</th>
+                <th class="py-2 font-medium">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="cut in cuts" :key="cut.key" class="border-b border-border">
+                <td class="py-2 pr-4">{{ cut.filename }}</td>
+                <td class="py-2 pr-4">{{ cut.camera ?? '—' }}</td>
+                <td class="py-2 pr-4">{{ cut.condition ?? '—' }}</td>
+                <td class="py-2 pr-4">{{ cut.phase ?? '—' }}</td>
+                <td class="py-2 pr-4">{{ formatSize(cut.size) }}</td>
+                <td class="py-2 pr-4">{{ formatDate(cut.lastModified) }}</td>
+                <td class="py-2">
+                  <div class="flex gap-3">
+                    <button
+                      type="button"
+                      data-testid="play-cut"
+                      class="font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                      :disabled="isMediaActionInFlight(cut, 'play')"
+                      @click="playCut(cut)"
+                    >
+                      Play
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="download-cut"
+                      class="font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                      :disabled="isMediaActionInFlight(cut, 'download')"
+                      @click="downloadCut(cut)"
+                    >
+                      Download
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
       </div>
     </section>
 
