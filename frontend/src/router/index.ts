@@ -4,6 +4,7 @@ import AdminView from '@/views/AdminView.vue'
 import ForgotPasswordView from '@/views/ForgotPasswordView.vue'
 import HomeView from '@/views/HomeView.vue'
 import LoginView from '@/views/LoginView.vue'
+import MediaBrowserView from '@/views/MediaBrowserView.vue'
 import SetPasswordView from '@/views/SetPasswordView.vue'
 import StatusView from '@/views/StatusView.vue'
 import { session } from '@/stores/session'
@@ -30,6 +31,9 @@ const router = createRouter({
     { path: '/set-password', name: 'set-password', component: SetPasswordView },
     { path: '/status', name: 'status', component: StatusView },
     { path: '/', name: 'home', component: HomeView },
+    // Ticket #19: every authenticated Account (User or Admin) gets
+    // identical access — no requiresAdmin meta, unlike /admin.
+    { path: '/media', name: 'media', component: MediaBrowserView },
     { path: '/admin', name: 'admin', component: AdminView, meta: { requiresAdmin: true } },
   ],
 })
