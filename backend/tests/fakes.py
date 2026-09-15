@@ -1,6 +1,10 @@
+from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 
 from app.services.mail import MailMessage
+from app.services.s3_client import S3ObjectInfo
 
 
 @dataclass
@@ -27,3 +31,52 @@ class FailingMailTransport:
 
     def send(self, message: MailMessage) -> None:
         raise RuntimeError("simulated SMTP failure")
+
+
+@dataclass
+class FakeS3Client:
+    """In-memory S3Client double for tests (ticket #18) — see
+    app/services/s3_client.py's `S3Client` protocol and issue #1's testing
+    decisions. Seed `objects` directly rather than via a constructor arg, so
+    a test can mutate it (e.g. add a Cut mid-test) the same way it would
+    with `FakeMailTransport.sent`.
+    """
+
+    objects: dict[str, bytes] = field(default_factory=dict)
+    # Every object reports this same last_modified — nothing in this fake's
+    # seed shape (plain key -> bytes) carries a per-object timestamp, and no
+    # test in this ticket needs one.
+    last_modified: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def list_folders(self, prefix: str = "") -> Iterator[str]:
+        seen: set[str] = set()
+        for key in self.objects:
+            if not key.startswith(prefix):
+                continue
+            rest = key[len(prefix) :]
+            if "/" not in rest:
+                continue
+            folder = prefix + rest.split("/", 1)[0] + "/"
+            if folder not in seen:
+                seen.add(folder)
+                yield folder
+
+    def list_objects_info(
+        self, prefix: str = "", *, recursive: bool = True
+    ) -> Iterator[S3ObjectInfo]:
+        for key, data in self.objects.items():
+            if key.endswith("/") or not key.startswith(prefix):
+                continue
+            rest = key[len(prefix) :]
+            if not recursive and "/" in rest:
+                continue
+            yield S3ObjectInfo(key=key, size=len(data), last_modified=self.last_modified)
+
+    def read_range(self, key: str, start: int, end: int) -> bytes:
+        return self.objects[key][start : end + 1]
+
+    def download_file(self, key: str, local_path: Path) -> Path:
+        local_path = Path(local_path)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(self.objects[key])
+        return local_path

@@ -88,6 +88,18 @@ class Settings(BaseSettings):
     forgot_password_rate_limit_max_attempts_per_email: int = 5
     forgot_password_rate_limit_window_seconds: int = 900
 
+    # Ticket #18 (S3 access foundation, part of #17's media browser): the
+    # bucket holding Tests/Cuts/Datasets — see CONTEXT.md's "Media browser"
+    # decisions and app/services/s3_client.py. Same "safe placeholder for
+    # standalone pytest/ruff" spirit as the settings above — nothing in
+    # this ticket talks to the real bucket, so these are never read by
+    # tests (docker-compose.yml requires the real values explicitly).
+    s3_bucket: str = "animal-behavior-dev"
+    s3_endpoint: str | None = None
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
+    s3_addressing_style: str = "path"
+
     @property
     def cors_origin_list(self) -> list[str]:
         """CORS_ORIGINS as a comma-separated env var, split into a list."""
