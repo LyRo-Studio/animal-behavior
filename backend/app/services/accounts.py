@@ -51,6 +51,17 @@ class DeactivatedAccountExistsError(Exception):
         super().__init__(account_id)
 
 
+def normalize_email(email: str) -> str:
+    """The one normalization rule for an email address across this app:
+    stripped, lower-cased. Used everywhere an email is looked up, stored,
+    or keyed on (accounts, tokens, rate-limit buckets) so two spellings of
+    the same address are always treated as the same address — previously
+    duplicated inline at several call sites, which risked exactly the kind
+    of silent drift a shared helper prevents.
+    """
+    return email.strip().lower()
+
+
 def validate_email_domain(email: str) -> None:
     """Enforce CONTEXT.md's "Allowed email domains" decision (case-insensitive)."""
     domain = email.rsplit("@", 1)[-1].lower()
@@ -80,7 +91,7 @@ def seed_first_admin(db: Session) -> None:
     if existing_admin is not None:
         return
 
-    email = settings.first_admin_email.strip().lower()
+    email = normalize_email(settings.first_admin_email)
     admin = Account(
         email=email,
         password_hash=hash_password(settings.first_admin_password),

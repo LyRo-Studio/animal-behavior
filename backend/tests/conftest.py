@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.main import app
 from app.services.mail import get_mail_transport
+from app.services.rate_limit import RateLimiter, get_rate_limiter
 from tests.fakes import FakeMailTransport
 
 _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
@@ -64,18 +65,34 @@ def mail_transport() -> FakeMailTransport:
 
 
 @pytest.fixture()
+def rate_limiter() -> RateLimiter:
+    """A fresh RateLimiter injected per test.
+
+    The real one (get_rate_limiter's module-level singleton) is a
+    process-lifetime object by design — its state has to persist across
+    requests to mean anything — which would otherwise leak attempt counts
+    between tests within the same pytest run. Same reasoning as
+    mail_transport above.
+    """
+    return RateLimiter()
+
+
+@pytest.fixture()
 def client(
-    db_session: Session, mail_transport: FakeMailTransport
+    db_session: Session, mail_transport: FakeMailTransport, rate_limiter: RateLimiter
 ) -> Generator[TestClient, None, None]:
     """A test client for the FastAPI app, hitting real routes end-to-end.
 
-    The app's own `get_db`/`get_mail_transport` dependencies are overridden
-    to use the per-test transactional session and fake mail transport
-    above, so requests made through this client see (and roll back) the
-    same data a test sets up directly, and never send real email.
+    The app's own `get_db`/`get_mail_transport`/`get_rate_limiter`
+    dependencies are overridden to use the per-test transactional session,
+    fake mail transport, and fresh rate limiter above, so requests made
+    through this client see (and roll back) the same data a test sets up
+    directly, never send real email, and start with a clean rate-limit
+    slate every test.
     """
     app.dependency_overrides[get_db] = lambda: db_session
     app.dependency_overrides[get_mail_transport] = lambda: mail_transport
+    app.dependency_overrides[get_rate_limiter] = lambda: rate_limiter
     try:
         with TestClient(app) as test_client:
             yield test_client

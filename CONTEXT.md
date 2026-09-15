@@ -125,3 +125,41 @@ stays mandatory; only the token *values* configured in it change.
   as grayscale exceptions (no other percentages of any palette color are
   allowed) — so `border` uses 20% zwart and `muted` uses 40% zwart, rather
   than inventing a new gray or reusing the old blue-neutral scale.
+
+**Brute-force throttling (ticket #7):** In-memory, per-process fixed-window
+rate limiting (`backend/app/services/rate_limit.py`) — no Redis/shared
+store, since the app runs as a single backend instance (`docker-compose.yml`
+has no replicas); revisit if that ever changes. No `X-Forwarded-For` (or
+similar) support — there is no reverse proxy in front of the app in any
+current deployment, and trusting such a header from an untrusted client
+would let the limit be spoofed away; revisit if a proxy is introduced.
+
+- Login and refresh count only *failed* attempts — a success never
+  consumes the budget — specifically so many legitimate users behind one
+  shared IP (e.g. a campus NAT) succeeding normally can never lock each
+  other out; only a run of failures (the actual brute-force signal) does.
+- Login tracks failures on two independent dimensions, per client IP *and*
+  per account (email), closing the gap a pure per-IP limit leaves open
+  against an attacker distributing attempts across several source IPs at
+  one victim account. The per-IP budget is peeked *before* authentication
+  runs (to skip password verification for an already-exhausted IP) but the
+  per-email budget is only ever `hit` *after* a confirmed failure, never
+  peeked pre-auth — so a correct password always succeeds regardless of
+  the account's recent failure history. Peeking the per-email budget
+  pre-auth (as an earlier version of this code did) turns it into an
+  account-specific denial-of-service gate: an attacker who fails enough
+  distributed, per-IP-budget-evading guesses against one victim email
+  exhausts the shared per-email bucket, and the real owner's *next*
+  attempt — even with the right password — gets rejected by the peek
+  before authentication is ever attempted. Ticket #7 requires throttling
+  not lock out legitimate users, so this asymmetry (peek+hit on the IP
+  dimension, hit-only on the email dimension) is deliberate, not an
+  oversight — don't "fix" it back to symmetric peek-then-hit on both.
+- Refresh is IP-only: there's no account identifier in a refresh request
+  to key on (just an opaque token).
+- Forgot-password counts *every* request, not just failures — there's no
+  failure/success distinction visible to it, the response is always the
+  same empty 204 — on both per-IP and per-email dimensions. Per-email is
+  safe there in a way it wouldn't be for login if login counted every
+  request too: exceeding it never blocks logging in, only requesting more
+  reset emails for a bit.

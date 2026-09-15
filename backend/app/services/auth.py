@@ -19,6 +19,7 @@ from app.core.security import (
 )
 from app.models.account import Account
 from app.models.refresh_token import RefreshToken
+from app.services.accounts import normalize_email
 
 
 class AuthenticationError(Exception):
@@ -57,7 +58,7 @@ def _issue_token_pair(db: Session, account: Account) -> tuple[str, str]:
 
 def login(db: Session, email: str, password: str) -> tuple[str, str]:
     """Authenticate by email + password, returning a fresh (access, refresh) pair."""
-    normalized_email = email.strip().lower()
+    normalized_email = normalize_email(email)
     account = db.scalar(select(Account).where(Account.email == normalized_email))
 
     # Same generic failure whether the account doesn't exist, the password
