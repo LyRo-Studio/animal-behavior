@@ -1,11 +1,29 @@
+from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-from app.services.s3_client import S3ObjectInfo
+import pytest
+
+import app.services.s3_client as s3_client_module
+from app.services.s3_client import BotoS3Client, S3ObjectInfo, get_s3_client
 from tests.fakes import FakeS3Client
 
-# FakeS3Client is the only S3Client this ticket exercises — the real,
-# boto3-backed BotoS3Client is never touched by any test here (ticket #18's
-# acceptance criteria: "no test in this ticket touches the real bucket").
+# FakeS3Client is the only S3Client the app's own tests exercise through the
+# DI seam — real bucket access is never touched (ticket #18's acceptance
+# criteria: "no test in this ticket touches the real bucket"). BotoS3Client
+# itself is still worth a narrow unit test of its own contract, mocking only
+# the third-party boto3 client it wraps — same pattern as test_mail.py's
+# SmtpMailTransport tests.
+
+
+def _boto_client() -> BotoS3Client:
+    return BotoS3Client(
+        bucket_name="test-bucket",
+        endpoint_url="https://s3.example.com",
+        access_key_id="key",
+        secret_access_key="secret",
+        addressing_style="path",
+    )
 
 
 def test_list_folders_returns_immediate_children_only():
@@ -101,3 +119,135 @@ def test_download_file_writes_object_bytes_and_creates_parent_dirs(tmp_path: Pat
 
     assert result == destination
     assert destination.read_bytes() == b"video-bytes"
+
+
+# --- BotoS3Client: unit tests against a mocked boto3 client -----------------
+
+
+def test_boto_list_folders_paginates_with_delimiter():
+    with patch("app.services.s3_client.boto3.client") as boto_client_factory:
+        mock_client = boto_client_factory.return_value
+        mock_client.get_paginator.return_value.paginate.return_value = [
+            {"CommonPrefixes": [{"Prefix": "cuts/T001/"}, {"Prefix": "cuts/T002/"}]}
+        ]
+
+        folders = list(_boto_client().list_folders(prefix="cuts/"))
+
+        assert folders == ["cuts/T001/", "cuts/T002/"]
+        mock_client.get_paginator.return_value.paginate.assert_called_once_with(
+            Bucket="test-bucket", Prefix="cuts/", Delimiter="/"
+        )
+
+
+def test_boto_list_objects_info_recursive_omits_delimiter_and_filters_folder_markers():
+    last_modified = datetime(2026, 1, 1, tzinfo=UTC)
+    with patch("app.services.s3_client.boto3.client") as boto_client_factory:
+        mock_client = boto_client_factory.return_value
+        mock_client.get_paginator.return_value.paginate.return_value = [
+            {
+                "Contents": [
+                    {"Key": "cuts/T001/", "Size": 0, "LastModified": last_modified},
+                    {"Key": "cuts/T001/video1.mp4", "Size": 5, "LastModified": last_modified},
+                ]
+            }
+        ]
+
+        infos = list(_boto_client().list_objects_info(prefix="cuts/T001/"))
+
+        assert infos == [
+            S3ObjectInfo(key="cuts/T001/video1.mp4", size=5, last_modified=last_modified)
+        ]
+        _, kwargs = mock_client.get_paginator.return_value.paginate.call_args
+        assert "Delimiter" not in kwargs
+
+
+def test_boto_list_objects_info_non_recursive_passes_delimiter():
+    with patch("app.services.s3_client.boto3.client") as boto_client_factory:
+        mock_client = boto_client_factory.return_value
+        mock_client.get_paginator.return_value.paginate.return_value = []
+
+        list(_boto_client().list_objects_info(prefix="cuts/T001/", recursive=False))
+
+        mock_client.get_paginator.return_value.paginate.assert_called_once_with(
+            Bucket="test-bucket", Prefix="cuts/T001/", Delimiter="/"
+        )
+
+
+def test_boto_read_range_uses_inclusive_byte_range_header():
+    with patch("app.services.s3_client.boto3.client") as boto_client_factory:
+        mock_client = boto_client_factory.return_value
+        mock_client.get_object.return_value = {"Body": MagicMock(read=lambda: b"chunk")}
+
+        result = _boto_client().read_range("cuts/T001/video1.mp4", 10, 20)
+
+        assert result == b"chunk"
+        mock_client.get_object.assert_called_once_with(
+            Bucket="test-bucket", Key="cuts/T001/video1.mp4", Range="bytes=10-20"
+        )
+
+
+def test_boto_download_file_downloads_to_temp_path_then_replaces_atomically(tmp_path: Path):
+    destination = tmp_path / "T001" / "video1.mp4"
+
+    with patch("app.services.s3_client.boto3.client") as boto_client_factory:
+        mock_client = boto_client_factory.return_value
+
+        def fake_download(*, Bucket, Key, Filename, Config):
+            # Simulate boto3 writing the transfer to the given temp path —
+            # the real destination must not exist until the rename.
+            Path(Filename).write_bytes(b"video-bytes")
+            assert not destination.exists()
+
+        mock_client.download_file.side_effect = fake_download
+
+        result = _boto_client().download_file("cuts/T001/video1.mp4", destination)
+
+        assert result == destination
+        assert destination.read_bytes() == b"video-bytes"
+        assert not destination.with_name(destination.name + ".part").exists()
+
+
+def test_boto_download_file_leaves_no_partial_file_when_transfer_fails(tmp_path: Path):
+    destination = tmp_path / "T001" / "video1.mp4"
+
+    with patch("app.services.s3_client.boto3.client") as boto_client_factory:
+        mock_client = boto_client_factory.return_value
+
+        def failing_download(*, Bucket, Key, Filename, Config):
+            Path(Filename).write_bytes(b"partial")
+            raise RuntimeError("simulated transfer failure")
+
+        mock_client.download_file.side_effect = failing_download
+
+        with pytest.raises(RuntimeError):
+            _boto_client().download_file("cuts/T001/video1.mp4", destination)
+
+        assert not destination.exists()
+
+
+# --- get_s3_client: fail-closed configuration and singleton caching --------
+
+
+@patch.object(s3_client_module, "_s3_client", None)
+def test_get_s3_client_raises_when_not_configured(monkeypatch):
+    monkeypatch.setattr(s3_client_module.settings, "s3_bucket", None)
+    monkeypatch.setattr(s3_client_module.settings, "s3_endpoint", None)
+    monkeypatch.setattr(s3_client_module.settings, "aws_access_key_id", None)
+    monkeypatch.setattr(s3_client_module.settings, "aws_secret_access_key", None)
+
+    with pytest.raises(RuntimeError):
+        get_s3_client()
+
+
+@patch.object(s3_client_module, "_s3_client", None)
+def test_get_s3_client_returns_the_same_instance_across_calls(monkeypatch):
+    monkeypatch.setattr(s3_client_module.settings, "s3_bucket", "test-bucket")
+    monkeypatch.setattr(s3_client_module.settings, "s3_endpoint", "https://s3.example.com")
+    monkeypatch.setattr(s3_client_module.settings, "aws_access_key_id", "key")
+    monkeypatch.setattr(s3_client_module.settings, "aws_secret_access_key", "secret")
+
+    with patch("app.services.s3_client.boto3.client"):
+        first = get_s3_client()
+        second = get_s3_client()
+
+    assert first is second

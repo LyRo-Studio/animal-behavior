@@ -90,11 +90,14 @@ class Settings(BaseSettings):
 
     # Ticket #18 (S3 access foundation, part of #17's media browser): the
     # bucket holding Tests/Cuts/Datasets — see CONTEXT.md's "Media browser"
-    # decisions and app/services/s3_client.py. Same "safe placeholder for
-    # standalone pytest/ruff" spirit as the settings above — nothing in
-    # this ticket talks to the real bucket, so these are never read by
-    # tests (docker-compose.yml requires the real values explicitly).
-    s3_bucket: str = "animal-behavior-dev"
+    # decisions and app/services/s3_client.py. Unlike database_url/cors_origins
+    # above, these have no placeholder default: an unset value means "S3 not
+    # configured", which `get_s3_client` treats as a hard failure rather than
+    # falling through to boto3's ambient credential chain against whatever
+    # bucket/endpoint ends up resolved — there's no safe "log instead of"
+    # fallback for object storage the way there is for SMTP below.
+    # docker-compose.yml requires all four explicitly via `:?`.
+    s3_bucket: str | None = None
     s3_endpoint: str | None = None
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None

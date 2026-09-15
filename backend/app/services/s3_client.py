@@ -114,12 +114,19 @@ class BotoS3Client:
         local_path = Path(local_path)
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Download to a `.part` sibling and atomically replace the
+        # destination only on success — a failure partway through a
+        # multipart transfer must never leave a truncated file at
+        # `local_path` for a later probe or retry to mistake for the real
+        # Cut. Matches the previous root-level utility's behavior.
+        temp_path = local_path.with_name(local_path.name + ".part")
+
         # Multipart transfer tuned for large files — Cuts are video files
         # (see CONTEXT.md's "Cut" term).
         self._client.download_file(
             Bucket=self._bucket_name,
             Key=key,
-            Filename=str(local_path),
+            Filename=str(temp_path),
             Config=TransferConfig(
                 multipart_threshold=64 * 1024 * 1024,
                 multipart_chunksize=64 * 1024 * 1024,
@@ -127,14 +134,44 @@ class BotoS3Client:
                 use_threads=True,
             ),
         )
+        temp_path.replace(local_path)
         return local_path
 
 
+_s3_client: S3Client | None = None
+
+
 def get_s3_client() -> S3Client:
-    return BotoS3Client(
-        bucket_name=settings.s3_bucket,
-        endpoint_url=settings.s3_endpoint,
-        access_key_id=settings.aws_access_key_id,
-        secret_access_key=settings.aws_secret_access_key,
-        addressing_style=settings.s3_addressing_style,
-    )
+    """The process-lifetime S3 client, built once and reused across
+    requests. A boto3 client owns a real connection pool, so — unlike
+    `get_mail_transport`'s fresh `SmtpMailTransport` per call — constructing
+    one per request would churn connections on every listing/range request,
+    including repeated video seeks. Safe to share: nothing about a Cut's
+    read path is per-request state.
+
+    Fails closed: unlike SMTP's "log instead of send", there's no safe
+    fallback for object storage, so an unconfigured bucket/endpoint/
+    credentials raises here rather than silently falling through to
+    boto3's ambient (process/instance) credential chain against whatever
+    account and bucket that chain happens to resolve.
+    """
+    global _s3_client
+    if _s3_client is None:
+        if not (
+            settings.s3_bucket
+            and settings.s3_endpoint
+            and settings.aws_access_key_id
+            and settings.aws_secret_access_key
+        ):
+            raise RuntimeError(
+                "S3 is not configured — set S3_BUCKET, S3_ENDPOINT, "
+                "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (see .env.example)."
+            )
+        _s3_client = BotoS3Client(
+            bucket_name=settings.s3_bucket,
+            endpoint_url=settings.s3_endpoint,
+            access_key_id=settings.aws_access_key_id,
+            secret_access_key=settings.aws_secret_access_key,
+            addressing_style=settings.s3_addressing_style,
+        )
+    return _s3_client
