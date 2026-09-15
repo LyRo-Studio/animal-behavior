@@ -13,3 +13,13 @@ class CutOut(BaseModel):
     phase: str | None
     size: int
     last_modified: datetime
+
+
+class DatasetEntryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    key: str
+    is_folder: bool
+    size: int | None
+    last_modified: datetime | None

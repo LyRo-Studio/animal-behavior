@@ -1,20 +1,26 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRouter, createWebHistory } from 'vue-router'
 
 import MediaBrowserView from '../MediaBrowserView.vue'
 
 const listTestIdsMock = vi.hoisted(() => vi.fn())
 const listCutsMock = vi.hoisted(() => vi.fn())
+const listDatasetFolderMock = vi.hoisted(() => vi.fn())
 // A real class, not a plain mock: the view does `err instanceof
 // TestNotFoundError`, so the mocked module needs to export the same
 // constructor identity that tests throw instances of.
 const TestNotFoundError = vi.hoisted(() => class TestNotFoundError extends Error {})
+const DatasetFolderNotFoundError = vi.hoisted(
+  () => class DatasetFolderNotFoundError extends Error {},
+)
 
 vi.mock('@/services/mediaBrowser', () => ({
   listTestIds: listTestIdsMock,
   listCuts: listCutsMock,
+  listDatasetFolder: listDatasetFolderMock,
   TestNotFoundError,
+  DatasetFolderNotFoundError,
 }))
 
 vi.mock('@/stores/session', () => ({
@@ -41,9 +47,16 @@ async function mountView() {
 }
 
 describe('MediaBrowserView', () => {
+  beforeEach(() => {
+    // Default: an empty top-level Dataset folder — tests that care about
+    // Dataset browsing specifically override this.
+    listDatasetFolderMock.mockResolvedValue([])
+  })
+
   afterEach(() => {
     listTestIdsMock.mockReset()
     listCutsMock.mockReset()
+    listDatasetFolderMock.mockReset()
   })
 
   it('shows filtered suggestions as the user types', async () => {
@@ -267,5 +280,122 @@ describe('MediaBrowserView', () => {
     await wrapper.find('input#test-search').setValue('T01')
 
     expect(wrapper.findAll('button[data-testid="test-suggestion"]')).toHaveLength(2)
+  })
+
+  it('loads and clearly distinguishes folders from files at the Dataset top level', async () => {
+    listTestIdsMock.mockResolvedValue([])
+    listDatasetFolderMock.mockResolvedValue([
+      {
+        name: 'dataset_v1',
+        key: 'dataset/dataset_v1/',
+        isFolder: true,
+        size: null,
+        lastModified: null,
+      },
+      {
+        name: 'README.md',
+        key: 'dataset/README.md',
+        isFolder: false,
+        size: 42,
+        lastModified: '2026-01-01T12:00:00Z',
+      },
+    ])
+    const wrapper = await mountView()
+
+    expect(listDatasetFolderMock).toHaveBeenCalledWith('a-token', '')
+    const folders = wrapper.findAll('[data-testid="dataset-folder"]')
+    const files = wrapper.findAll('[data-testid="dataset-file"]')
+    expect(folders.map((f) => f.text())).toEqual(['dataset_v1'])
+    expect(files.map((f) => f.text())).toEqual(['README.md'])
+    // A file is never a clickable button — no download action in this ticket.
+    expect(files[0]!.element.tagName).not.toBe('BUTTON')
+  })
+
+  it('navigates into a Dataset folder and updates the breadcrumb', async () => {
+    listTestIdsMock.mockResolvedValue([])
+    listDatasetFolderMock.mockResolvedValueOnce([
+      {
+        name: 'dataset_v1',
+        key: 'dataset/dataset_v1/',
+        isFolder: true,
+        size: null,
+        lastModified: null,
+      },
+    ])
+    listDatasetFolderMock.mockResolvedValueOnce([
+      {
+        name: 'train',
+        key: 'dataset/dataset_v1/train/',
+        isFolder: true,
+        size: null,
+        lastModified: null,
+      },
+    ])
+    const wrapper = await mountView()
+
+    await wrapper.find('[data-testid="dataset-folder"]').trigger('click')
+    await flushPromises()
+
+    expect(listDatasetFolderMock).toHaveBeenLastCalledWith('a-token', 'dataset_v1')
+    expect(wrapper.find('nav[aria-label="Dataset folder path"]').text()).toContain('dataset_v1')
+    expect(wrapper.find('[data-testid="dataset-folder"]').text()).toBe('train')
+  })
+
+  it('returns to a Dataset breadcrumb segment, dropping deeper path segments', async () => {
+    listTestIdsMock.mockResolvedValue([])
+    listDatasetFolderMock.mockResolvedValueOnce([
+      {
+        name: 'dataset_v1',
+        key: 'dataset/dataset_v1/',
+        isFolder: true,
+        size: null,
+        lastModified: null,
+      },
+    ])
+    listDatasetFolderMock.mockResolvedValueOnce([
+      {
+        name: 'train',
+        key: 'dataset/dataset_v1/train/',
+        isFolder: true,
+        size: null,
+        lastModified: null,
+      },
+    ])
+    listDatasetFolderMock.mockResolvedValueOnce([
+      {
+        name: 'dataset_v1',
+        key: 'dataset/dataset_v1/',
+        isFolder: true,
+        size: null,
+        lastModified: null,
+      },
+    ])
+    const wrapper = await mountView()
+
+    await wrapper.find('[data-testid="dataset-folder"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('nav[aria-label="Dataset folder path"] button').trigger('click')
+    await flushPromises()
+
+    expect(listDatasetFolderMock).toHaveBeenLastCalledWith('a-token', '')
+    expect(wrapper.find('nav[aria-label="Dataset folder path"]').text()).not.toContain('train')
+  })
+
+  it('shows a generic error when loading a Dataset folder fails', async () => {
+    listTestIdsMock.mockResolvedValue([])
+    listDatasetFolderMock.mockReset()
+    listDatasetFolderMock.mockRejectedValue(new Error('Failed to load Dataset folder.'))
+    const wrapper = await mountView()
+
+    expect(wrapper.text()).toContain('Failed to load Dataset folder.')
+  })
+
+  it('shows a not-found state when a Dataset folder disappears out from under navigation', async () => {
+    listTestIdsMock.mockResolvedValue([])
+    listDatasetFolderMock.mockReset()
+    listDatasetFolderMock.mockRejectedValue(new DatasetFolderNotFoundError('gone'))
+    const wrapper = await mountView()
+
+    expect(wrapper.find('[data-testid="dataset-not-found"]').exists()).toBe(true)
   })
 })

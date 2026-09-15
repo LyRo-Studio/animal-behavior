@@ -1,8 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps import get_current_account
-from app.schemas.media_browser import CutOut
-from app.services.media_browser import TestNotFoundError, list_cuts_for_test, list_test_ids
+from app.schemas.media_browser import CutOut, DatasetEntryOut
+from app.services.media_browser import (
+    DatasetNotFoundError,
+    TestNotFoundError,
+    list_cuts_for_test,
+    list_dataset_folder,
+    list_test_ids,
+)
 from app.services.s3_client import S3Client, get_s3_client
 
 # Every authenticated Account (User or Admin) gets identical access here —
@@ -26,3 +32,14 @@ def list_cuts(test_id: str, s3: S3Client = Depends(get_s3_client)) -> list[CutOu
             status_code=status.HTTP_404_NOT_FOUND, detail="Test not found."
         ) from None
     return [CutOut.model_validate(cut) for cut in cuts]
+
+
+@router.get("/datasets", response_model=list[DatasetEntryOut])
+def list_datasets(path: str = "", s3: S3Client = Depends(get_s3_client)) -> list[DatasetEntryOut]:
+    try:
+        entries = list_dataset_folder(s3, path)
+    except DatasetNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Dataset folder not found."
+        ) from None
+    return [DatasetEntryOut.model_validate(entry) for entry in entries]
