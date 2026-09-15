@@ -68,3 +68,54 @@ export async function listCuts(accessToken: string, testId: string): Promise<Cut
   const rows: CutResponse[] = await response.json()
   return rows.map(toCut)
 }
+
+export interface DatasetEntry {
+  name: string
+  key: string
+  isFolder: boolean
+  size: number | null
+  lastModified: string | null
+}
+
+interface DatasetEntryResponse {
+  name: string
+  key: string
+  is_folder: boolean
+  size: number | null
+  last_modified: string | null
+}
+
+function toDatasetEntry(row: DatasetEntryResponse): DatasetEntry {
+  return {
+    name: row.name,
+    key: row.key,
+    isFolder: row.is_folder,
+    size: row.size,
+    lastModified: row.last_modified,
+  }
+}
+
+// Thrown by listDatasetFolder specifically for "no such folder" (backend
+// 404) — kept distinct from a generic failure, same reasoning as
+// TestNotFoundError above.
+export class DatasetFolderNotFoundError extends Error {}
+
+export async function listDatasetFolder(
+  accessToken: string,
+  path: string = '',
+): Promise<DatasetEntry[]> {
+  const url = new URL(`${API_BASE_URL}/media/datasets`)
+  if (path) url.searchParams.set('path', path)
+
+  const response = await fetch(url, { headers: authHeaders(accessToken) })
+
+  if (response.status === 404) {
+    throw new DatasetFolderNotFoundError(`Dataset folder "${path}" not found.`)
+  }
+  if (!response.ok) {
+    throw new Error('Failed to load Dataset folder.')
+  }
+
+  const rows: DatasetEntryResponse[] = await response.json()
+  return rows.map(toDatasetEntry)
+}

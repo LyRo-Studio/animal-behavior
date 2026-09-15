@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
-import { listCuts, listTestIds, TestNotFoundError, type Cut } from '@/services/mediaBrowser'
+import {
+  DatasetFolderNotFoundError,
+  listCuts,
+  listDatasetFolder,
+  listTestIds,
+  TestNotFoundError,
+  type Cut,
+  type DatasetEntry,
+} from '@/services/mediaBrowser'
 import { session } from '@/stores/session'
 
 const testIds = ref<string[]>([])
@@ -141,7 +149,67 @@ function formatDate(iso: string): string {
   return new Date(iso).toLocaleString()
 }
 
-onMounted(loadTestIds)
+// The current Dataset folder, as path segments relative to the Datasets
+// root (e.g. ["dataset_v1", "train"]) — [] is the top level. Ticket #20:
+// view/browse only, no download action for individual files or folders.
+const datasetPath = ref<string[]>([])
+const datasetEntries = ref<DatasetEntry[] | null>(null)
+const isLoadingDatasets = ref(true)
+const datasetsError = ref<string | null>(null)
+const datasetNotFound = ref(false)
+
+// Same stale-response guard as `searchToken` above — navigating into a
+// folder before a slower, earlier folder's listing resolves must never
+// leave that later folder's view showing the earlier one's entries.
+let datasetLoadToken = 0
+
+async function loadDatasetFolder() {
+  const currentToken = ++datasetLoadToken
+  isLoadingDatasets.value = true
+  datasetsError.value = null
+  datasetNotFound.value = false
+
+  try {
+    if (!session.accessToken.value) return
+    const result = await listDatasetFolder(session.accessToken.value, datasetPath.value.join('/'))
+    if (currentToken !== datasetLoadToken) return
+    datasetEntries.value = result
+  } catch (err) {
+    if (currentToken !== datasetLoadToken) return
+    datasetEntries.value = null
+    if (err instanceof DatasetFolderNotFoundError) {
+      datasetNotFound.value = true
+    } else {
+      datasetsError.value = err instanceof Error ? err.message : 'Failed to load Dataset folder.'
+    }
+  } finally {
+    if (currentToken === datasetLoadToken) {
+      isLoadingDatasets.value = false
+    }
+  }
+}
+
+function openDatasetFolder(name: string) {
+  datasetPath.value = [...datasetPath.value, name]
+  loadDatasetFolder()
+}
+
+function goToDatasetRoot() {
+  datasetPath.value = []
+  loadDatasetFolder()
+}
+
+// `index` is the breadcrumb segment clicked — keeps everything up to and
+// including it, dropping the rest of the path.
+function goToDatasetSegment(index: number) {
+  datasetPath.value = datasetPath.value.slice(0, index + 1)
+  loadDatasetFolder()
+}
+
+onMounted(() => {
+  loadTestIds()
+  loadDatasetFolder()
+})
 </script>
 
 <template>
@@ -226,6 +294,74 @@ onMounted(loadTestIds)
           </tbody>
         </table>
       </div>
+    </section>
+
+    <section class="mx-auto max-w-3xl px-6 pb-10">
+      <h2 class="text-lg font-medium text-foreground">Browse Datasets</h2>
+
+      <nav
+        class="mt-2 flex flex-wrap items-center gap-1 text-sm text-muted"
+        aria-label="Dataset folder path"
+      >
+        <button type="button" class="hover:text-primary hover:underline" @click="goToDatasetRoot">
+          Datasets
+        </button>
+        <template v-for="(segment, index) in datasetPath" :key="index">
+          <span aria-hidden="true">/</span>
+          <button
+            type="button"
+            class="hover:text-primary hover:underline"
+            @click="goToDatasetSegment(index)"
+          >
+            {{ segment }}
+          </button>
+        </template>
+      </nav>
+
+      <p v-if="isLoadingDatasets" class="mt-2 text-sm text-muted">Loading…</p>
+      <p
+        v-else-if="datasetNotFound"
+        data-testid="dataset-not-found"
+        class="mt-2 text-sm text-muted"
+      >
+        This folder no longer exists.
+      </p>
+      <p v-else-if="datasetsError" class="mt-2 text-sm text-danger" role="alert">
+        {{ datasetsError }}
+      </p>
+      <ul
+        v-else-if="datasetEntries"
+        class="mt-4 divide-y divide-border rounded-md border border-border"
+      >
+        <li v-if="datasetEntries.length === 0" class="px-3 py-2 text-sm text-muted">
+          Empty folder.
+        </li>
+        <li
+          v-for="entry in datasetEntries"
+          :key="entry.key"
+          class="flex items-center gap-3 px-3 py-2 text-sm"
+        >
+          <span
+            class="w-14 shrink-0 text-xs font-medium uppercase tracking-wide"
+            :class="entry.isFolder ? 'text-primary' : 'text-muted'"
+          >
+            {{ entry.isFolder ? 'Folder' : 'File' }}
+          </span>
+          <button
+            v-if="entry.isFolder"
+            type="button"
+            data-testid="dataset-folder"
+            class="text-left font-medium text-foreground hover:text-primary hover:underline"
+            @click="openDatasetFolder(entry.name)"
+          >
+            {{ entry.name }}
+          </button>
+          <span v-else data-testid="dataset-file" class="text-foreground">{{ entry.name }}</span>
+          <span v-if="!entry.isFolder && entry.size !== null" class="ml-auto text-muted">
+            {{ formatSize(entry.size) }}
+          </span>
+        </li>
+      </ul>
     </section>
   </main>
 </template>
