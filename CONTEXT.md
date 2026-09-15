@@ -46,6 +46,16 @@ login screen.
 on startup (Alembic data migration or startup check), matching the
 project's existing `.env`/`.env.example` convention.
 
+**Bootstrap — inactive sole Admin recovery (ticket #13):** Startup seeding
+reactivates the existing Admin row if it's `is_active = false`, rather
+than only checking that an Admin row exists at all. Not reachable through
+the app today (`deactivate_account` refuses to deactivate an Admin, and
+there's no in-app way to create a second one this round), but chosen over
+a separate recovery mechanism (CLI/admin script) so the app self-heals on
+its next restart with zero manual intervention if that state is ever
+reached some other way — consistent with seeding already being a
+zero-touch, idempotent startup step rather than a manual operation.
+
 **Semantic UI colors:** `success`/`warning`/`danger` keep the original
 ENGINEERING-STANDARDS.md hex values (`#16A34A`/`#D97706`/`#DC2626`) as a
 scoped exception to the VIVES-palette styling deviation — the house style

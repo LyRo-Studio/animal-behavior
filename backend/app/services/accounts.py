@@ -2,6 +2,7 @@
 first-Admin seeding (see CONTEXT.md's "Display name" and "Bootstrap" decisions).
 """
 
+import logging
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -11,6 +12,8 @@ from app.core.config import settings
 from app.core.security import hash_password
 from app.models.account import Account, AccountRole
 from app.services.refresh_tokens import revoke_all_refresh_tokens
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_EMAIL_DOMAINS = frozenset({"vives.be", "student.vives.be"})
 
@@ -81,14 +84,56 @@ def derive_display_name(email: str) -> str:
 
 
 def seed_first_admin(db: Session) -> None:
-    """Create the first Admin account from .env credentials, if none exists yet.
+    """Create the first Admin account from .env credentials, if none exists
+    yet — or reactivate it if it exists but is inactive.
 
-    Idempotent: does nothing once any Admin account exists, so repeated
-    application startups never create a second one (CONTEXT.md's
+    Idempotent: does nothing once an *active* Admin account exists, so
+    repeated application startups never create a second one (CONTEXT.md's
     "Bootstrap" decision — there is exactly one Admin this round).
+
+    Reactivates rather than no-ops on an inactive sole Admin: there's no
+    live path to reach that state today (deactivate_account refuses to
+    deactivate an Admin, and this round has no way to create a second one
+    — see CannotDeactivateAdminError), but silently no-op'ing here would
+    otherwise leave the app with zero working Admins and no in-app
+    recovery path if that state were ever reached some other way (e.g. a
+    manual data edit, or a future round loosening either restriction) —
+    see ticket #13 and CONTEXT.md's "Bootstrap" decision.
+
+    Guards against the same email-uniqueness conflict reactivate_account
+    does (Account.email's partial unique index only covers active rows,
+    so an inactive Admin's email can be held by a different, currently-
+    active Account — again only reachable via a manual data edit, the
+    same escape hatch that lets the Admin go inactive in the first
+    place). Unlike reactivate_account, this doesn't raise on a conflict:
+    this function runs unconditionally in the app's startup lifespan with
+    nothing to catch it, so raising would crash the entire app on startup
+    over a single bad row — a worse failure than the one this recovery
+    path exists to fix. It logs a warning and leaves the Admin inactive
+    instead, which is the pre-existing (broken) state, not a new one.
     """
     existing_admin = db.scalar(select(Account).where(Account.role == AccountRole.ADMIN))
     if existing_admin is not None:
+        if not existing_admin.is_active:
+            conflict = db.scalar(
+                select(Account).where(
+                    Account.email == existing_admin.email,
+                    Account.is_active.is_(True),
+                    Account.id != existing_admin.id,
+                )
+            )
+            if conflict is not None:
+                logger.warning(
+                    "seed_first_admin: cannot reactivate inactive sole Admin "
+                    "(id=%s): its email is already held by a different, "
+                    "active Account (id=%s). Leaving it inactive.",
+                    existing_admin.id,
+                    conflict.id,
+                )
+                return
+            existing_admin.is_active = True
+            db.add(existing_admin)
+            db.commit()
         return
 
     email = normalize_email(settings.first_admin_email)
