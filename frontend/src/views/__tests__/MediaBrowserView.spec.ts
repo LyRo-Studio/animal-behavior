@@ -131,4 +131,58 @@ describe('MediaBrowserView', () => {
     expect(wrapper.text()).toContain('Failed to load Cuts.')
     expect(wrapper.find('[data-testid="not-found"]').exists()).toBe(false)
   })
+
+  it('normalizes a typed-and-submitted Test ID to match the case-insensitive suggestions', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([])
+    const wrapper = await mountView()
+
+    await wrapper.find('input#test-search').setValue('t001')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(listCutsMock).toHaveBeenCalledWith('a-token', 'T001')
+  })
+
+  it('discards a slower, earlier search response once a later search has started', async () => {
+    listTestIdsMock.mockResolvedValue(['T001', 'T002'])
+    let resolveFirst!: (cuts: unknown[]) => void
+    listCutsMock.mockImplementationOnce(() => new Promise((resolve) => (resolveFirst = resolve)))
+    listCutsMock.mockResolvedValueOnce([
+      {
+        key: 'cuts/T002/T002_C1_ME_F1.mp4',
+        filename: 'T002_C1_ME_F1.mp4',
+        camera: 'C1',
+        condition: 'ME',
+        phase: 'F1',
+        size: 10,
+        lastModified: '2026-01-01T12:00:00Z',
+      },
+    ])
+    const wrapper = await mountView()
+
+    await wrapper.find('input#test-search').setValue('T001')
+    await wrapper.find('form').trigger('submit') // left pending
+    await wrapper.find('input#test-search').setValue('T002')
+    await wrapper.find('form').trigger('submit') // resolves immediately
+    await flushPromises()
+
+    // The stale T001 response arrives after T002 has already resolved.
+    resolveFirst([
+      {
+        key: 'cuts/T001/T001_C1_ME_F1.mp4',
+        filename: 'T001_C1_ME_F1.mp4',
+        camera: 'C1',
+        condition: 'ME',
+        phase: 'F1',
+        size: 10,
+        lastModified: '2026-01-01T12:00:00Z',
+      },
+    ])
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Cuts for T002')
+    expect(wrapper.text()).toContain('T002_C1_ME_F1.mp4')
+    expect(wrapper.text()).not.toContain('T001_C1_ME_F1.mp4')
+  })
 })

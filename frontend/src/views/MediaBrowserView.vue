@@ -25,11 +25,10 @@ const suggestions = computed(() => {
 })
 
 async function loadTestIds() {
-  if (!session.accessToken.value) return
-
   isLoadingTestIds.value = true
   testIdsError.value = null
   try {
+    if (!session.accessToken.value) return
     testIds.value = await listTestIds(session.accessToken.value)
   } catch {
     testIdsError.value = 'Failed to load Tests.'
@@ -38,10 +37,20 @@ async function loadTestIds() {
   }
 }
 
+// Guards against a slower, earlier search's response overwriting a faster,
+// later one's — e.g. selecting T001 then quickly T002 before T001's
+// request resolves must never leave T002's header paired with T001's Cuts.
+let searchToken = 0
+
 async function search(testId: string) {
-  const trimmed = testId.trim()
+  // Uppercased to match the suggestion list's case-insensitive filtering —
+  // otherwise typing "t001" and pressing Enter (instead of picking the
+  // suggestion) would 404 against the backend's case-sensitive Test id
+  // pattern even though the Test exists.
+  const trimmed = testId.trim().toUpperCase()
   if (!trimmed || !session.accessToken.value) return
 
+  const currentToken = ++searchToken
   selectedTestId.value = trimmed
   cuts.value = null
   notFound.value = false
@@ -49,15 +58,20 @@ async function search(testId: string) {
   isLoadingCuts.value = true
 
   try {
-    cuts.value = await listCuts(session.accessToken.value, trimmed)
+    const result = await listCuts(session.accessToken.value, trimmed)
+    if (currentToken !== searchToken) return
+    cuts.value = result
   } catch (err) {
+    if (currentToken !== searchToken) return
     if (err instanceof TestNotFoundError) {
       notFound.value = true
     } else {
       cutsError.value = err instanceof Error ? err.message : 'Failed to load Cuts.'
     }
   } finally {
-    isLoadingCuts.value = false
+    if (currentToken === searchToken) {
+      isLoadingCuts.value = false
+    }
   }
 }
 
