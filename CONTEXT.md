@@ -25,6 +25,32 @@ _Avoid_: Landing page (conventionally means a public pre-login page, which this 
 **Admin page**:
 A separate page, reachable from a nav link on Home, where an Admin manages User accounts (create, deactivate). Not reachable by a User.
 
+**Test**:
+The unit a user searches for by ID (e.g. `T001`). Backed by the `cuts/<Test>/` prefix in the S3 bucket — one prefix per Test.
+_Avoid_: "test" for anything else, in particular a Dataset's `train`/`valid`/`test` split — see Split.
+
+**Cut**:
+One processed video file under `cuts/<Test>/` in S3, belonging to exactly one Test. The unit a user views, plays, inspects, and downloads after selecting a Test.
+
+**Source Video**:
+An original, unsplit video under `source/` in S3, before being split into Cuts. Not exposed by the application in the current round — see Decisions.
+
+**Dataset**:
+A versioned collection of files under `dataset/` in S3 (e.g. `dataset_v1`), browsable as a folder tree.
+_Avoid_: "test" for a Dataset's split subfolder — see Split.
+
+**Split**:
+A `train`/`valid`/`test` subfolder inside a Dataset. Deliberately not called "Test" — that name is reserved for the `T001`-style unit above.
+
+**Camera**:
+Which physical camera recorded a Cut, encoded as `C1`/`C2` in its filename (e.g. `T001_C1_ME_F1.mp4`).
+
+**Condition**:
+The behavioral condition a Cut was recorded under, encoded as `ME` (Met Eigenaar — with owner) or `ZE` (Zonder Eigenaar — without owner) in its filename.
+
+**Phase**:
+Which segment of a Test a Cut represents, encoded as `F1`–`F8` (Fase 1–8, Dutch for "phase") in its filename — matches "individual test phases," the language already used for how `cuts/` relates to `source/`.
+
 ## Decisions & Approved Deviations
 
 **Scope (this round):** Covers only Account/Admin/User management (login,
@@ -163,3 +189,87 @@ would let the limit be spoofed away; revisit if a proxy is introduced.
   safe there in a way it wouldn't be for login if login counted every
   request too: exceeding it never blocks logging in, only requesting more
   reset emails for a bit.
+
+**Media browser (S3 access) — scope (this round):** Covers Test search →
+Cut listing, playback, inspection, and download, plus read-only Dataset
+browsing. Source Video browsing is explicitly out of scope for this round
+— add later as a separate extension once Test/Cut and Dataset browsing
+are proven out.
+
+**Media browser — access:** Every authenticated Account (User and Admin
+alike) gets full access to this feature — search Tests, play/inspect/
+download Cuts, browse Datasets. No extra per-role gating.
+
+**Media browser — Dataset interaction:** Datasets are view/browse only in
+this round — no per-file download from inside a Dataset yet (unlike
+Cuts, which are downloadable). No whole-folder/zip download either.
+
+**Media browser — S3 client:** `s3_client.py` (previously at the repo
+root; also used outside this repo, e.g. by notebooks) moves into
+`backend/app/services/s3_client.py` and becomes the shared S3-access
+layer for this feature — no parallel client.
+
+**Media browser — no Test/Cut catalog database (for now):** Search and
+browse call S3 live (via `s3_client.py`) rather than reading from a
+database index of Tests/Cuts. At current scale (~450 Tests today, ~30
+Cuts each, per a live bucket check — user's estimate was "around 1000")
+this is fast enough, and it means newly-added Tests/Datasets need no
+ingestion step — they just appear. Kept behind a small set of named
+service functions (e.g. "find a Test", "list a Test's Cuts", "list a
+Dataset folder") so a future catalog database — already wanted, just not
+built yet — can replace the live-S3 implementation later without
+changing the API or frontend.
+
+**Media browser — Cut media-info caching:** A Cut's probed media info
+(duration, resolution, codec — via `ffprobe`) is cached in a small
+database table keyed by the S3 key plus the object's ETag (so a
+replaced file at the same key is re-probed automatically), rather than
+re-probed on every view. This is a metadata cache, distinct from the
+Test/Cut catalog database above — it doesn't tell you what Tests/Cuts
+exist, only caches facts about ones already looked up.
+
+**Media browser — Test discovery:** The full list of Test IDs (~450
+today) is fetched once and filtered client-side as the user types
+(type-to-filter), rather than requiring an exact ID or issuing a
+request per keystroke.
+
+**Media browser — no presigned S3 URLs:** The bucket's S3-compatible
+endpoint sits behind a gateway (its error responses carry a `-kube`
+request/host ID) that rejects every presigned URL tried against it —
+both path-style and virtual-hosted addressing — with `403
+SignatureDoesNotMatch`, while ordinary SDK-authenticated (header-signed)
+calls succeed. Confirmed against the real bucket, not a boto3 config
+issue. So: **the backend proxies Cut bytes itself** for playback and
+download (streaming the S3 object through, forwarding HTTP Range
+requests for video seeking) rather than redirecting the browser to an
+S3-presigned URL. `ffprobe` likewise runs against a temporary local
+download of the Cut (via `s3_client.py`'s existing `download_file`),
+not a presigned URL — reusing existing capability rather than adding a
+Range-over-HTTP probing path. Revisit if the gateway issue is ever fixed
+on the infrastructure side.
+
+**Media browser — media access tokens:** The backend-proxied streaming
+endpoint (above) is reached by the browser's own native `<video src>`
+and download-link requests, which can't carry the app's `Authorization`
+bearer header. It's authenticated instead by a short-lived (15 min),
+single-Cut-scoped token the backend mints on request and the frontend
+embeds as a URL query parameter — a deliberate, narrow exception to
+`ENGINEERING-STANDARDS.md`'s "no auth state in URLs" rule; see
+`docs/adr/0002-media-access-tokens-in-url.md` for the justification.
+Play and download each get their own token, minted lazily — only when
+the user actually clicks Play or Download on a specific Cut, not eagerly
+for every Cut in a Test's listing.
+
+**Media browser — abuse protection:** Media-token issuance is rate
+limited per Account, reusing the `rate_limit.py` machinery built for
+ticket #7 — streaming a Cut is exactly the "expensive operation" that
+`ENGINEERING-STANDARDS.md`'s Denial-of-Service section says must not be
+"triggered repeatedly without appropriate controls." The streaming
+endpoint itself isn't separately rate limited — it can't be reached
+without a valid, already-rate-limited token in the first place.
+
+**Media browser — no access audit trail (for now):** Who viewed/downloaded
+which Cut is not recorded in this round, despite this being research
+footage — nothing in the current scope asked for it, and it's addable
+later without disrupting anything already designed. An explicit choice,
+not an oversight — revisit if a data-governance requirement surfaces.
