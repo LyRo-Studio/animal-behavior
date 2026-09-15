@@ -16,15 +16,8 @@ independent limit.
 
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
-
-# Every this-many `hit`/`peek` calls, sweep out windows that have fully
-# expired. Bounds _windows' memory to roughly one window's worth of
-# distinct keys even against a flood of always-unique keys (e.g. attacker-
-# chosen emails on /auth/forgot-password) — without this, that dict would
-# grow forever, turning the throttle itself into a memory-exhaustion DoS
-# vector.
-_PRUNE_EVERY_N_CALLS = 256
 
 
 @dataclass(frozen=True)
@@ -45,8 +38,15 @@ class RateLimiter:
     """
 
     _windows: dict[str, tuple[float, int, float]] = field(default_factory=dict)
+    # (expire_at, key) in expiry order, one entry pushed each time `hit`
+    # starts a fresh window for a key (see _current_window's `record`).
+    # Never pushed to by `peek`, which never actually stores anything for
+    # `_prune_expired` to need to evict. A key can be renewed (get a new,
+    # further-out expiry) while a stale entry for its previous window is
+    # still queued here; _prune_expired below treats that as fine — see
+    # its docstring.
+    _expiry_queue: deque[tuple[float, str]] = field(default_factory=deque)
     _lock: threading.Lock = field(default_factory=threading.Lock)
-    _calls_since_prune: int = 0
 
     def peek(self, key: str, *, limit: int, window_seconds: float) -> RateLimitResult:
         """A dry run of `hit`: report the verdict recording one more
@@ -62,10 +62,8 @@ class RateLimiter:
         """
         with self._lock:
             now = time.monotonic()
-            self._prune_if_due(now)
-            window_start, count, _ = self._windows.get(key, (now, 0, window_seconds))
-            if now - window_start >= window_seconds:
-                count, window_start = 0, now
+            self._prune_expired(now)
+            window_start, count, _ = self._current_window(key, now, window_seconds, record=False)
             return self._result(count + 1, limit, window_start, window_seconds, now)
 
     def hit(self, key: str, *, limit: int, window_seconds: float) -> RateLimitResult:
@@ -79,16 +77,37 @@ class RateLimiter:
         """
         with self._lock:
             now = time.monotonic()
-            self._prune_if_due(now)
-            window_start, count, _ = self._windows.get(key, (now, 0, window_seconds))
-
-            if now - window_start >= window_seconds:
-                window_start, count = now, 0
+            self._prune_expired(now)
+            window_start, count, _ = self._current_window(key, now, window_seconds, record=True)
 
             count += 1
             self._windows[key] = (window_start, count, window_seconds)
 
             return self._result(count, limit, window_start, window_seconds, now)
+
+    def _current_window(
+        self, key: str, now: float, window_seconds: float, *, record: bool
+    ) -> tuple[float, int, float]:
+        """The (window_start, count, window_seconds) `key` is currently in.
+
+        Read-only with respect to `_windows` itself either way: `hit` is
+        responsible for actually storing the returned window back into it
+        after incrementing `count`; `peek` just reads the verdict without
+        storing anything.
+
+        `record` controls `_expiry_queue`, not `_windows`: pass `True`
+        (from `hit`) when starting a fresh window that a later `hit` call
+        on this same key *will* actually store, so `_prune_expired` has an
+        entry to evict it by; pass `False` (from `peek`) when just
+        computing what the window would be, since nothing gets stored for
+        `_prune_expired` to ever need to evict.
+        """
+        existing = self._windows.get(key)
+        if existing is not None and now - existing[0] < existing[2]:
+            return existing
+        if record:
+            self._expiry_queue.append((now + window_seconds, key))
+        return now, 0, window_seconds
 
     @staticmethod
     def _result(
@@ -97,22 +116,33 @@ class RateLimiter:
         retry_after = max(0.0, window_seconds - (now - window_start))
         return RateLimitResult(allowed=count <= limit, retry_after_seconds=retry_after)
 
-    def _prune_if_due(self, now: float) -> None:
-        """Must be called with `_lock` held. Sweeps out fully-expired
-        entries every `_PRUNE_EVERY_N_CALLS` calls (amortizing the O(n)
-        scan) rather than on every single call."""
-        self._calls_since_prune += 1
-        if self._calls_since_prune < _PRUNE_EVERY_N_CALLS:
-            return
-        self._calls_since_prune = 0
+    def _prune_expired(self, now: float) -> None:
+        """Must be called with `_lock` held. Evicts every `_windows` entry
+        whose window has fully elapsed, in O(1) amortized time per `hit`/
+        `peek` call rather than a periodic full-map scan — the latter's
+        cumulative cost is quadratic in a sustained always-unique-key flood
+        (e.g. attacker-chosen emails on /auth/forgot-password), since scan
+        size grows with the flood while barely anything is yet expired to
+        free, and it holds `_lock` for the whole scan, blocking every other
+        rate-limit check meanwhile.
 
-        expired = [
-            key
-            for key, (window_start, _count, window_seconds) in self._windows.items()
-            if now - window_start >= window_seconds
-        ]
-        for key in expired:
-            del self._windows[key]
+        `_expiry_queue` holds one entry per window a key has started, in
+        expiry order, so popping from the front while due is always
+        correct *or a safe no-op*: if `key`'s window was since renewed
+        (`_current_window` started a fresh, further-out one), the queued
+        expiry here is stale and `window_start + window_seconds` in
+        `_windows` no longer matches it — that's detected below and the
+        entry is discarded without touching `_windows`, since a fresh
+        queue entry for the renewed window already exists further back.
+        """
+        while self._expiry_queue and self._expiry_queue[0][0] <= now:
+            expire_at, key = self._expiry_queue.popleft()
+            entry = self._windows.get(key)
+            if entry is None:
+                continue
+            window_start, _count, window_seconds = entry
+            if window_start + window_seconds <= expire_at:
+                del self._windows[key]
 
 
 def enforce_all(*results: RateLimitResult) -> RateLimitResult | None:

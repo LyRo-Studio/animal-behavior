@@ -146,17 +146,31 @@ def test_concurrent_login_failures_never_exceed_the_configured_limit(
     concurrent requests execute on genuine OS threads, not just
     cooperatively-interleaved coroutines. An unguarded read-modify-write
     would let concurrent requests under-count and slip more than `limit`
-    failures through."""
+    failures through.
+
+    Each worker thread's own exceptions never surface on the main test
+    thread — they'd otherwise just print to stderr and leave that thread's
+    response missing from `statuses`, which could let the final assertion
+    pass "successfully" (e.g. `0 <= limit`) without having genuinely
+    exercised 20 concurrent requests. So every thread's outcome, exception
+    included, is captured and checked before the actual invariant is.
+    """
     limit = 5
     monkeypatch.setattr(settings, "login_rate_limit_max_failed_attempts_per_ip", limit)
     create_account(db_session, email="jan.peeters@vives.be")
     statuses: list[int] = []
+    errors: list[BaseException] = []
     lock = threading.Lock()
 
     def attempt() -> None:
-        response = client.post(
-            "/auth/login", json={"email": "jan.peeters@vives.be", "password": "wrong"}
-        )
+        try:
+            response = client.post(
+                "/auth/login", json={"email": "jan.peeters@vives.be", "password": "wrong"}
+            )
+        except Exception as exc:
+            with lock:
+                errors.append(exc)
+            return
         with lock:
             statuses.append(response.status_code)
 
@@ -165,6 +179,10 @@ def test_concurrent_login_failures_never_exceed_the_configured_limit(
         t.start()
     for t in threads:
         t.join()
+
+    assert not errors, errors
+    assert len(statuses) == 20
+    assert all(code in (401, 429) for code in statuses)
 
     not_throttled = sum(1 for code in statuses if code != 429)
     assert not_throttled <= limit

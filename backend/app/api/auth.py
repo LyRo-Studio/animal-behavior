@@ -161,26 +161,33 @@ def forgot_password(
     for login if login counted every request too: exceeding it never locks
     anyone out of logging in, only out of requesting more reset emails for
     a bit — see app/core/config.py.
+
+    The per-IP budget is checked *first* and short-circuits before the
+    per-email one is ever touched. Unlike login's email (which maps to a
+    fixed, limited set of real accounts), this endpoint's email is an
+    attacker-controlled, unbounded string — without the short-circuit, a
+    caller whose IP is already exhausted could keep submitting fabricated
+    emails and grow the limiter's live-entry count for the rest of the
+    window: a memory/CPU-exhaustion vector inside the very throttle meant
+    to prevent that.
     """
     ip = client_ip(request)
     email_key = f"forgot-password:email:{normalize_email(payload.email)}"
 
-    results: list[RateLimitResult] = []
+    ip_result: RateLimitResult | None = None
     if ip is not None:
-        results.append(
-            limiter.hit(
-                f"forgot-password:ip:{ip}",
-                limit=settings.forgot_password_rate_limit_max_attempts_per_ip,
-                window_seconds=settings.forgot_password_rate_limit_window_seconds,
-            )
-        )
-    results.append(
-        limiter.hit(
-            email_key,
-            limit=settings.forgot_password_rate_limit_max_attempts_per_email,
+        ip_result = limiter.hit(
+            f"forgot-password:ip:{ip}",
+            limit=settings.forgot_password_rate_limit_max_attempts_per_ip,
             window_seconds=settings.forgot_password_rate_limit_window_seconds,
         )
+        raise_if_throttled(enforce_all(ip_result))
+
+    email_result = limiter.hit(
+        email_key,
+        limit=settings.forgot_password_rate_limit_max_attempts_per_email,
+        window_seconds=settings.forgot_password_rate_limit_window_seconds,
     )
-    raise_if_throttled(enforce_all(*results))
+    raise_if_throttled(enforce_all(email_result))
 
     request_password_reset(db, mail_transport, payload.email)
