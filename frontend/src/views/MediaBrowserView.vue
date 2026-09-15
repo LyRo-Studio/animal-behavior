@@ -9,18 +9,53 @@ const isLoadingTestIds = ref(true)
 const testIdsError = ref<string | null>(null)
 
 const query = ref('')
+// Whether the suggestion dropdown may show at all — separate from
+// `suggestions.length > 0` so a fresh selection can close the dropdown
+// even though the now-selected id still matches its own query (e.g.
+// typing "t01" and picking "T014" leaves query="T014", which still
+// self-matches and would otherwise leave the dropdown open on just that
+// one entry). Reopens as soon as the user edits the query again.
+const suggestionsOpen = ref(false)
 const selectedTestId = ref<string | null>(null)
 const cuts = ref<Cut[] | null>(null)
 const isLoadingCuts = ref(false)
 const cutsError = ref<string | null>(null)
 const notFound = ref(false)
 
+// A Test id always starts with "T"/"t" followed only by digits
+// (CONTEXT.md's "Test" term, e.g. "T001") — anything else (e.g. "hallo")
+// can never be typed into the search box in the first place, not even as
+// an intermediate keystroke.
+function sanitizeTestIdInput(value: string): string {
+  let result = ''
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i]!
+    if (i === 0 ? /[Tt]/.test(char) : /[0-9]/.test(char)) {
+      result += char
+    }
+  }
+  return result
+}
+
+function handleQueryInput(event: Event) {
+  const target = event.target as HTMLInputElement
+  const sanitized = sanitizeTestIdInput(target.value)
+  query.value = sanitized
+  // Force the DOM back in sync even when the sanitized value equals the
+  // previous one (e.g. typing "hallo" leaves query unchanged at "") — Vue
+  // skips re-patching :value in that case since nothing reactively
+  // changed, which would otherwise leave the rejected text visible in the
+  // box despite the app already treating it as empty.
+  target.value = sanitized
+  suggestionsOpen.value = true
+}
+
 // Filtered client-side from the once-fetched full list as the user types
 // (CONTEXT.md's "Media browser — Test discovery" decision) — capped so a
 // broad query (e.g. "T") doesn't render all ~450 Tests at once.
 const suggestions = computed(() => {
   const needle = query.value.trim().toUpperCase()
-  if (!needle) return []
+  if (!needle || !suggestionsOpen.value) return []
   return testIds.value.filter((id) => id.toUpperCase().includes(needle)).slice(0, 20)
 })
 
@@ -42,13 +77,20 @@ async function loadTestIds() {
 // request resolves must never leave T002's header paired with T001's Cuts.
 let searchToken = 0
 
+// Same shape sanitizeTestIdInput enforces while typing — guards a
+// programmatic search() call too (e.g. a bare "T" submitted via Enter
+// before any digits are typed) rather than sending an obviously-incomplete
+// id to the backend.
+const COMPLETE_TEST_ID_RE = /^T\d+$/
+
 async function search(testId: string) {
   // Uppercased to match the suggestion list's case-insensitive filtering —
   // otherwise typing "t001" and pressing Enter (instead of picking the
   // suggestion) would 404 against the backend's case-sensitive Test id
   // pattern even though the Test exists.
   const trimmed = testId.trim().toUpperCase()
-  if (!trimmed || !session.accessToken.value) return
+  suggestionsOpen.value = false
+  if (!COMPLETE_TEST_ID_RE.test(trimmed) || !session.accessToken.value) return
 
   const currentToken = ++searchToken
   selectedTestId.value = trimmed
@@ -120,12 +162,13 @@ onMounted(loadTestIds)
           <label class="sr-only" for="test-search">Test ID</label>
           <input
             id="test-search"
-            v-model="query"
+            :value="query"
             type="text"
             :disabled="isLoadingTestIds"
             placeholder="e.g. T001"
             autocomplete="off"
             class="w-full rounded-md border border-border bg-surface px-3 py-2 text-foreground focus:border-primary focus:outline-none"
+            @input="handleQueryInput"
           />
           <ul
             v-if="suggestions.length > 0"

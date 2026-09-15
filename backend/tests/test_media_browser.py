@@ -25,6 +25,19 @@ def test_list_tests_returns_every_test_id(client, db_session, s3_client):
     assert response.json() == ["T001", "T002"]
 
 
+def test_list_tests_excludes_a_malformed_folder_name(client, db_session, s3_client):
+    headers = _user_headers(client, db_session)
+    s3_client.objects["cuts/T001/T001_C1_ME_F1.mp4"] = b"a"
+    # A stray, non-Test-shaped folder must never surface as a pickable Test
+    # id — selecting it would just fail list_cuts_for_test's own check.
+    s3_client.objects["cuts/T001_backup/file.mp4"] = b"b"
+
+    response = client.get("/media/tests", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == ["T001"]
+
+
 def test_list_cuts_parses_camera_condition_phase_and_metadata(client, db_session, s3_client):
     headers = _user_headers(client, db_session)
     s3_client.objects["cuts/T001/T001_C1_ME_F1.mp4"] = b"12345"

@@ -185,4 +185,87 @@ describe('MediaBrowserView', () => {
     expect(wrapper.text()).toContain('T002_C1_ME_F1.mp4')
     expect(wrapper.text()).not.toContain('T001_C1_ME_F1.mp4')
   })
+
+  it('never lets a non Test-ID-shaped value into the search box', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    const wrapper = await mountView()
+    const input = wrapper.find<HTMLInputElement>('input#test-search')
+
+    await input.setValue('hallo')
+
+    expect(input.element.value).toBe('')
+    expect(wrapper.find('[data-testid="test-suggestions"]').exists()).toBe(false)
+
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(listCutsMock).not.toHaveBeenCalled()
+  })
+
+  it('strips invalid characters out of a typed value, keeping only a leading T and digits', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    const wrapper = await mountView()
+    const input = wrapper.find<HTMLInputElement>('input#test-search')
+
+    await input.setValue('T0a0x1')
+
+    expect(input.element.value).toBe('T001')
+  })
+
+  it('does not submit a search for an incomplete Test ID (just "T")', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    const wrapper = await mountView()
+
+    await wrapper.find('input#test-search').setValue('T')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(listCutsMock).not.toHaveBeenCalled()
+  })
+
+  it('closes the suggestion dropdown after picking a suggestion, even though the picked id still self-matches', async () => {
+    listTestIdsMock.mockResolvedValue(['T011', 'T014'])
+    listCutsMock.mockResolvedValue([])
+    const wrapper = await mountView()
+
+    await wrapper.find('input#test-search').setValue('T01')
+    expect(wrapper.findAll('button[data-testid="test-suggestion"]')).toHaveLength(2)
+
+    const t014 = wrapper
+      .findAll('button[data-testid="test-suggestion"]')
+      .find((btn) => btn.text() === 'T014')!
+    await t014.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="test-suggestions"]').exists()).toBe(false)
+  })
+
+  it('closes the suggestion dropdown after a typed-and-submitted search too', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([])
+    const wrapper = await mountView()
+
+    await wrapper.find('input#test-search').setValue('T001')
+    expect(wrapper.find('[data-testid="test-suggestions"]').exists()).toBe(true)
+
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="test-suggestions"]').exists()).toBe(false)
+  })
+
+  it('reopens the suggestion dropdown once the user edits the query again after a selection', async () => {
+    listTestIdsMock.mockResolvedValue(['T011', 'T014'])
+    listCutsMock.mockResolvedValue([])
+    const wrapper = await mountView()
+
+    await wrapper.find('input#test-search').setValue('T014')
+    await wrapper.find('button[data-testid="test-suggestion"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="test-suggestions"]').exists()).toBe(false)
+
+    await wrapper.find('input#test-search').setValue('T01')
+
+    expect(wrapper.findAll('button[data-testid="test-suggestion"]')).toHaveLength(2)
+  })
 })
