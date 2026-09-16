@@ -310,3 +310,55 @@ runner: `lynn-delaere-prod`, running as a systemd service
 (`actions.runner.LyRo-Studio-animal-behavior.lynn-delaere-prod.service`)
 so it survives reboots. See
 `docs/adr/0003-self-hosted-runner-on-production-for-ci-cd.md`.
+
+**CI/CD — deploy.yml (ticket #36):** Triggered by `workflow_run` off
+`ci.yml` completing successfully for `master` (never re-runs the checks),
+plus a `workflow_dispatch` input (`image_tag`) for manual rollback that
+skips build/push and redeploys an already-published tag. Builds and
+pushes `ghcr.io/lyro-studio/animal-behavior-{backend,frontend}` tagged
+both `sha-<short-commit>` (immutable, what rollback targets) and `latest`,
+authenticated with only the workflow's own `GITHUB_TOKEN`
+(`permissions: packages: write`) — no extra secret.
+
+- `docker-compose.prod.yml` is a new override file (`-f docker-compose.yml
+  -f docker-compose.prod.yml`, applied only by the deploy step) that adds
+  `image:` to `backend`/`frontend` on top of the base file's `build:`,
+  read from `BACKEND_IMAGE_REF`/`FRONTEND_IMAGE_REF` env vars the workflow
+  sets. A plain local `docker compose up` never passes `-f`, so it keeps
+  building from source unchanged. Deploy runs
+  `docker compose ... up -d --pull always --no-build --wait` — `--no-build`
+  guarantees the pulled tag is used rather than rebuilt on the box.
+- The frontend image's `VITE_API_BASE_URL` build-arg (baked in at build
+  time, per `frontend/Dockerfile`) is read from the production box's own
+  `.env` rather than duplicated into a GitHub Secret — consistent with
+  `.env` already being the one place production config lives. It isn't a
+  secret itself, so surfacing it via `GITHUB_OUTPUT` is safe; nothing else
+  from `.env` is echoed.
+- Both `ci.yml` and `deploy.yml`'s checkout steps set `clean: false`.
+  `actions/checkout`'s default `git clean -ffdx` removes gitignored files
+  too, which would delete the box's `.env` (shared workspace: the one
+  runner reuses the same checkout directory for every workflow) before
+  `deploy.yml` ever gets to read it. Without this, deploy would silently
+  fail on a fresh/rebuilt runner workspace.
+- **Contradicts ADR-0003 — flagged, not resolved here:** ADR-0003 states
+  "the deploy step already keeps the previous containers running until
+  the new ones pass their health check, so a failed deploy alone never
+  takes production down," and ticket #36's acceptance criteria assume the
+  same. In practice this doesn't hold: `backend`/`frontend` publish fixed
+  host ports, so `docker compose up` must stop the old container before
+  the new one can bind that port — there is no window where old and new
+  run side by side. If a newly deployed image fails its healthcheck,
+  `--wait` fails the workflow (so the failure *is* reported), but the
+  *old* container for that service is already gone by then — production
+  is actually down, not "still serving traffic on the old version" as
+  both documents assert. Worth reopening ADR-0003 if this gap matters in
+  practice (e.g. via a reverse proxy in front of backend/frontend so a new
+  container can be verified healthy on a different port before the proxy
+  cuts over) — out of scope for #36 itself, which only asked for
+  `docker compose up -d --wait` against published images.
+- **Follow-up, out of scope for #36:** nothing prunes superseded
+  GHCR-pulled image layers on the production box after `--pull always`;
+  disk usage grows unbounded over time. Revisit (e.g. a periodic `docker
+  image prune`) if/when this becomes a real problem — not solved
+  proactively here to avoid an unattended job that could prune an image a
+  manual rollback still needs.

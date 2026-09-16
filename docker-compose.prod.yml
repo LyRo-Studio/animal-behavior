@@ -1,0 +1,12 @@
+# Production override for deploy.yml — applied with `-f docker-compose.yml
+# -f docker-compose.prod.yml` on the production box only. Points `backend`/
+# `frontend` at an already-built, already-pushed GHCR image tag instead of
+# the base file's `build:` context, so the deploy step never rebuilds on the
+# box. A plain local `docker compose up` (no `-f` override) never loads this
+# file and keeps building from source unchanged.
+services:
+  backend:
+    image: ${BACKEND_IMAGE_REF:?Set BACKEND_IMAGE_REF (see .github/workflows/deploy.yml)}
+
+  frontend:
+    image: ${FRONTEND_IMAGE_REF:?Set FRONTEND_IMAGE_REF (see .github/workflows/deploy.yml)}

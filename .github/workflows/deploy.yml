@@ -1,0 +1,127 @@
+name: Deploy
+
+on:
+  # Fires once ci.yml finishes on master — never re-runs the checks itself.
+  # `branches: [master]` filters on the branch the completed CI run was
+  # for, so a PR's ci.yml run (head branch = the PR's branch) never
+  # triggers a deploy.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Previously published tag to redeploy, e.g. sha-1a2b3c4 (rollback — skips build/push)"
+        required: true
+        type: string
+
+# Serialize deploys on the one production box/runner — a rollback dispatched
+# mid-deploy, or two master pushes in quick succession, must not race.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  BACKEND_IMAGE: ghcr.io/lyro-studio/animal-behavior-backend
+  FRONTEND_IMAGE: ghcr.io/lyro-studio/animal-behavior-frontend
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: [self-hosted, linux, x64, production]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Deploy the exact commit ci.yml validated, not just whatever
+          # HEAD happens to be when this job starts.
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.ref }}
+          # actions/checkout defaults to `git clean -ffdx`, which deletes
+          # gitignored files too — including this box's own `.env`
+          # (ENGINEERING-STANDARDS.md §2: secrets live in `.env`, never in
+          # committed config). Deploy reads that `.env` below, so it must
+          # survive the checkout.
+          clean: false
+
+      - name: Determine image tag
+        id: image
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            sha="${{ github.event.workflow_run.head_sha }}"
+            echo "tag=sha-${sha:0:7}" >> "$GITHUB_OUTPUT"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Needed both to push the newly built images and to pull an existing
+      # tag back down on a rollback dispatch.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        if: steps.image.outputs.build == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Read production frontend build config
+        if: steps.image.outputs.build == 'true'
+        id: frontend_config
+        # VITE_API_BASE_URL is baked into the frontend bundle at build time
+        # (frontend/Dockerfile) — read from the box's own .env rather than
+        # duplicating it into a GitHub Secret. It's the public API URL, not
+        # a secret, so surfacing just this one value via GITHUB_OUTPUT is
+        # safe; nothing else from .env is echoed or logged.
+        run: |
+          set -a
+          source .env
+          set +a
+          echo "vite_api_base_url=${VITE_API_BASE_URL:-http://localhost:8000}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push backend image
+        if: steps.image.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: |
+            ${{ env.BACKEND_IMAGE }}:${{ steps.image.outputs.tag }}
+            ${{ env.BACKEND_IMAGE }}:latest
+
+      - name: Build and push frontend image
+        if: steps.image.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          build-args: |
+            VITE_API_BASE_URL=${{ steps.frontend_config.outputs.vite_api_base_url }}
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:${{ steps.image.outputs.tag }}
+            ${{ env.FRONTEND_IMAGE }}:latest
+
+      - name: Deploy
+        env:
+          BACKEND_IMAGE_REF: ${{ env.BACKEND_IMAGE }}:${{ steps.image.outputs.tag }}
+          FRONTEND_IMAGE_REF: ${{ env.FRONTEND_IMAGE }}:${{ steps.image.outputs.tag }}
+        # --pull always: always fetch the exact tag from GHCR rather than
+        # trusting whatever local image cache happens to be on the box.
+        # --no-build: docker-compose.prod.yml layers `image:` on top of the
+        # base file's `build:` — this guarantees compose uses the pulled
+        # image rather than rebuilding from source on the box.
+        # --wait: blocks until db/backend/frontend all report healthy (or
+        # fails the step — see docker-compose.yml's healthchecks). Timeout
+        # covers the worst-case sequential health chain (db ~50s -> backend
+        # depends_on db ~55s -> frontend depends_on backend ~55s, ~160s)
+        # plus room for a slow `--pull always` of a freshly pushed image.
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+            up -d --pull always --no-build --wait --wait-timeout 300
