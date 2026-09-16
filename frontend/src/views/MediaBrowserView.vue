@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 
 import {
   DatasetFolderNotFoundError,
+  getCutMediaInfo,
   listCuts,
   listDatasetFolder,
   listTestIds,
@@ -10,6 +11,7 @@ import {
   requestMediaToken,
   TestNotFoundError,
   type Cut,
+  type CutMediaInfo,
   type DatasetEntry,
   type MediaTokenAction,
 } from '@/services/mediaBrowser'
@@ -110,8 +112,10 @@ async function search(testId: string) {
   cutsError.value = null
   isLoadingCuts.value = true
   // A new search's Cuts share no relationship with whatever was playing
-  // for the previous Test — never leave a stale player showing.
+  // (or had its info panel open) for the previous Test — never leave a
+  // stale player or info panel showing.
   closePlayback()
+  openInfoCutKey.value = null
 
   try {
     const result = await listCuts(session.accessToken.value, trimmed)
@@ -189,6 +193,50 @@ async function playCut(cut: Cut) {
 function closePlayback() {
   playingCutKey.value = null
   playbackUrl.value = null
+}
+
+// Ticket #22: a Cut's probed media info (duration, resolution, codec),
+// fetched lazily — only when the user opens a specific Cut's info panel,
+// never eagerly for a whole Test's Cuts (same convention as
+// requestMediaToken above). Fetched at most once per Cut client-side too:
+// reopening an already-loaded panel just reveals the cached result rather
+// than issuing another request (the backend caches server-side regardless,
+// but there's no reason to round-trip again once the answer is in hand).
+const cutMediaInfo = ref<Record<string, CutMediaInfo>>({})
+const cutInfoInFlight = ref<Record<string, boolean>>({})
+const cutInfoError = ref<Record<string, string>>({})
+const openInfoCutKey = ref<string | null>(null)
+
+function isCutInfoOpen(cut: Cut): boolean {
+  return openInfoCutKey.value === cut.key
+}
+
+async function toggleCutInfo(cut: Cut) {
+  if (isCutInfoOpen(cut)) {
+    openInfoCutKey.value = null
+    return
+  }
+  openInfoCutKey.value = cut.key
+
+  if (cutMediaInfo.value[cut.key] || cutInfoInFlight.value[cut.key] || !session.accessToken.value)
+    return
+
+  cutInfoInFlight.value[cut.key] = true
+  delete cutInfoError.value[cut.key]
+  try {
+    cutMediaInfo.value[cut.key] = await getCutMediaInfo(session.accessToken.value, cut.key)
+  } catch (err) {
+    cutInfoError.value[cut.key] = err instanceof Error ? err.message : 'Failed to load media info.'
+  } finally {
+    cutInfoInFlight.value[cut.key] = false
+  }
+}
+
+function formatDuration(totalSeconds: number): string {
+  const rounded = Math.round(totalSeconds)
+  const minutes = Math.floor(rounded / 60)
+  const seconds = rounded % 60
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`
 }
 
 async function downloadCut(cut: Cut) {
@@ -370,36 +418,75 @@ onMounted(() => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="cut in cuts" :key="cut.key" class="border-b border-border">
-                <td class="py-2 pr-4">{{ cut.filename }}</td>
-                <td class="py-2 pr-4">{{ cut.camera ?? '—' }}</td>
-                <td class="py-2 pr-4">{{ cut.condition ?? '—' }}</td>
-                <td class="py-2 pr-4">{{ cut.phase ?? '—' }}</td>
-                <td class="py-2 pr-4">{{ formatSize(cut.size) }}</td>
-                <td class="py-2 pr-4">{{ formatDate(cut.lastModified) }}</td>
-                <td class="py-2">
-                  <div class="flex gap-3">
-                    <button
-                      type="button"
-                      data-testid="play-cut"
-                      class="font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50"
-                      :disabled="isMediaActionInFlight(cut, 'play')"
-                      @click="playCut(cut)"
+              <template v-for="cut in cuts" :key="cut.key">
+                <tr class="border-b border-border">
+                  <td class="py-2 pr-4">{{ cut.filename }}</td>
+                  <td class="py-2 pr-4">{{ cut.camera ?? '—' }}</td>
+                  <td class="py-2 pr-4">{{ cut.condition ?? '—' }}</td>
+                  <td class="py-2 pr-4">{{ cut.phase ?? '—' }}</td>
+                  <td class="py-2 pr-4">{{ formatSize(cut.size) }}</td>
+                  <td class="py-2 pr-4">{{ formatDate(cut.lastModified) }}</td>
+                  <td class="py-2">
+                    <div class="flex gap-3">
+                      <button
+                        type="button"
+                        data-testid="play-cut"
+                        class="font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                        :disabled="isMediaActionInFlight(cut, 'play')"
+                        @click="playCut(cut)"
+                      >
+                        Play
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="download-cut"
+                        class="font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                        :disabled="isMediaActionInFlight(cut, 'download')"
+                        @click="downloadCut(cut)"
+                      >
+                        Download
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="info-cut"
+                        class="font-medium text-primary hover:underline"
+                        @click="toggleCutInfo(cut)"
+                      >
+                        {{ isCutInfoOpen(cut) ? 'Hide info' : 'Info' }}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+                <tr v-if="isCutInfoOpen(cut)" class="border-b border-border">
+                  <td colspan="7" class="bg-background px-2 py-3" data-testid="cut-info-panel">
+                    <p v-if="cutInfoInFlight[cut.key]" class="text-sm text-muted">Loading…</p>
+                    <p v-else-if="cutInfoError[cut.key]" class="text-sm text-danger" role="alert">
+                      {{ cutInfoError[cut.key] }}
+                    </p>
+                    <dl
+                      v-else-if="cutMediaInfo[cut.key]"
+                      class="flex flex-wrap gap-x-8 gap-y-1 text-sm"
                     >
-                      Play
-                    </button>
-                    <button
-                      type="button"
-                      data-testid="download-cut"
-                      class="font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50"
-                      :disabled="isMediaActionInFlight(cut, 'download')"
-                      @click="downloadCut(cut)"
-                    >
-                      Download
-                    </button>
-                  </div>
-                </td>
-              </tr>
+                      <div class="flex gap-2">
+                        <dt class="font-medium text-muted">Duration</dt>
+                        <dd data-testid="cut-info-duration">
+                          {{ formatDuration(cutMediaInfo[cut.key]!.durationSeconds) }}
+                        </dd>
+                      </div>
+                      <div class="flex gap-2">
+                        <dt class="font-medium text-muted">Resolution</dt>
+                        <dd data-testid="cut-info-resolution">
+                          {{ cutMediaInfo[cut.key]!.width }}x{{ cutMediaInfo[cut.key]!.height }}
+                        </dd>
+                      </div>
+                      <div class="flex gap-2">
+                        <dt class="font-medium text-muted">Codec</dt>
+                        <dd data-testid="cut-info-codec">{{ cutMediaInfo[cut.key]!.codec }}</dd>
+                      </div>
+                    </dl>
+                  </td>
+                </tr>
+              </template>
             </tbody>
           </table>
         </template>

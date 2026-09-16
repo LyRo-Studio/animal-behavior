@@ -46,3 +46,18 @@ class MediaTokenRequest(BaseModel):
 class MediaTokenResponse(BaseModel):
     token: str
     expires_in: int
+
+
+class CutMediaInfoOut(BaseModel):
+    """Ticket #22: probed media info for a Cut, alongside the basic info
+    `CutOut` already carries. Raw `width`/`height` rather than a
+    pre-joined "1920x1080" string — same "backend sends raw fields, the
+    frontend formats them for display" convention as `CutOut.size`/
+    `last_modified`."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    duration_seconds: float
+    width: int
+    height: int
+    codec: str

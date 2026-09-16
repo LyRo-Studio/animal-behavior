@@ -61,6 +61,12 @@ services:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID in .env (see .env.example)}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY in .env (see .env.example)}
       S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
+      # Probed media info for a Cut (ticket #22) — see
+      # app/services/media_prober.py. The backend image installs ffmpeg
+      # (providing ffprobe) on PATH, so the bare command name default works
+      # unchanged.
+      FFPROBE_PATH: ${FFPROBE_PATH:-ffprobe}
+      FFPROBE_TIMEOUT_SECONDS: ${FFPROBE_TIMEOUT_SECONDS:-30}
     ports:
       - "8000:8000"
     depends_on:

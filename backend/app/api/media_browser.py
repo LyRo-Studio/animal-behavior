@@ -3,20 +3,24 @@ import re
 from collections.abc import Iterator
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_account, raise_if_throttled
 from app.core.config import settings
 from app.core.security import create_media_token, decode_media_token
+from app.db.session import get_db
 from app.models.account import Account
 from app.schemas.media_browser import (
+    CutMediaInfoOut,
     CutOut,
     DatasetEntryOut,
     MediaTokenAction,
     MediaTokenRequest,
     MediaTokenResponse,
 )
+from app.services.cut_media_info import get_cut_media_info
 from app.services.media_browser import (
     CutNotFoundError,
     DatasetNotFoundError,
@@ -26,6 +30,7 @@ from app.services.media_browser import (
     list_test_ids,
     parse_cut_key,
 )
+from app.services.media_prober import MediaProber, get_media_prober
 from app.services.rate_limit import RateLimiter, enforce_all, get_rate_limiter
 from app.services.s3_client import S3Client, S3ObjectNotFoundError, get_s3_client
 
@@ -79,6 +84,28 @@ def list_datasets(path: str = "", s3: S3Client = Depends(get_s3_client)) -> list
             status_code=status.HTTP_404_NOT_FOUND, detail="Dataset folder not found."
         ) from None
     return [DatasetEntryOut.model_validate(entry) for entry in entries]
+
+
+@router.get("/cuts/info", response_model=CutMediaInfoOut)
+def get_cut_info(
+    key: str = Query(min_length=1, max_length=1024),
+    s3: S3Client = Depends(get_s3_client),
+    prober: MediaProber = Depends(get_media_prober),
+    db: Session = Depends(get_db),
+) -> CutMediaInfoOut:
+    """Probed media info (duration, resolution, codec) for the Cut at
+    `key` (ticket #22), cached by S3 key + ETag — see
+    app/services/cut_media_info.py. The first request for a Cut probes (via
+    a temporary local download) and caches the result; a later request for
+    the same, unchanged Cut reuses the cached row instead of re-probing.
+    """
+    try:
+        result = get_cut_media_info(db, s3, prober, key)
+    except CutNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Cut not found."
+        ) from None
+    return CutMediaInfoOut.model_validate(result)
 
 
 @router.post("/cuts/token", response_model=MediaTokenResponse)

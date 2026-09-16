@@ -1,3 +1,4 @@
+import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -106,8 +107,23 @@ def test_head_object_returns_metadata_for_an_existing_key():
     info = fake.head_object("cuts/T001/video1.mp4")
 
     assert info == S3ObjectInfo(
-        key="cuts/T001/video1.mp4", size=10, last_modified=fake.last_modified
+        key="cuts/T001/video1.mp4",
+        size=10,
+        last_modified=fake.last_modified,
+        etag=hashlib.md5(b"0123456789").hexdigest(),
     )
+
+
+def test_head_object_etag_changes_when_the_object_at_the_same_key_changes():
+    """Ticket #22: a Cut's media-info cache is keyed by S3 key + ETag, so a
+    replaced object at the same key must report a different ETag."""
+    fake = FakeS3Client(objects={"cuts/T001/video1.mp4": b"original"})
+    first_etag = fake.head_object("cuts/T001/video1.mp4").etag
+
+    fake.objects["cuts/T001/video1.mp4"] = b"replaced"
+    second_etag = fake.head_object("cuts/T001/video1.mp4").etag
+
+    assert first_etag != second_etag
 
 
 def test_head_object_raises_not_found_for_a_missing_key():
@@ -198,12 +214,13 @@ def test_boto_head_object_returns_metadata():
         mock_client.head_object.return_value = {
             "ContentLength": 12345,
             "LastModified": last_modified,
+            "ETag": '"abc123"',
         }
 
         info = _boto_client().head_object("cuts/T001/video1.mp4")
 
         assert info == S3ObjectInfo(
-            key="cuts/T001/video1.mp4", size=12345, last_modified=last_modified
+            key="cuts/T001/video1.mp4", size=12345, last_modified=last_modified, etag="abc123"
         )
         mock_client.head_object.assert_called_once_with(
             Bucket="test-bucket", Key="cuts/T001/video1.mp4"

@@ -29,6 +29,13 @@ class S3ObjectInfo:
     key: str
     size: int
     last_modified: datetime
+    # The object's current S3 ETag (unquoted). Ticket #22: `head_object`'s
+    # etag is the cache key (alongside the S3 key itself) for a Cut's
+    # probed media info — a replaced object at the same key gets a new
+    # ETag, which is what tells that cache to re-probe rather than serve a
+    # stale result. Not populated by `list_objects_info` — nothing today
+    # needs a listed object's ETag, only a single head-object lookup's.
+    etag: str | None = None
 
 
 class S3ObjectNotFoundError(Exception):
@@ -129,7 +136,10 @@ class BotoS3Client:
                 raise S3ObjectNotFoundError(key) from None
             raise
         return S3ObjectInfo(
-            key=key, size=response["ContentLength"], last_modified=response["LastModified"]
+            key=key,
+            size=response["ContentLength"],
+            last_modified=response["LastModified"],
+            etag=response["ETag"].strip('"'),
         )
 
     def read_range(self, key: str, start: int, end: int) -> bytes:
