@@ -340,22 +340,15 @@ authenticated with only the workflow's own `GITHUB_TOKEN`
   runner reuses the same checkout directory for every workflow) before
   `deploy.yml` ever gets to read it. Without this, deploy would silently
   fail on a fresh/rebuilt runner workspace.
-- **Contradicts ADR-0003 — flagged, not resolved here:** ADR-0003 states
-  "the deploy step already keeps the previous containers running until
-  the new ones pass their health check, so a failed deploy alone never
-  takes production down," and ticket #36's acceptance criteria assume the
-  same. In practice this doesn't hold: `backend`/`frontend` publish fixed
-  host ports, so `docker compose up` must stop the old container before
-  the new one can bind that port — there is no window where old and new
-  run side by side. If a newly deployed image fails its healthcheck,
-  `--wait` fails the workflow (so the failure *is* reported), but the
-  *old* container for that service is already gone by then — production
-  is actually down, not "still serving traffic on the old version" as
-  both documents assert. Worth reopening ADR-0003 if this gap matters in
-  practice (e.g. via a reverse proxy in front of backend/frontend so a new
-  container can be verified healthy on a different port before the proxy
-  cuts over) — out of scope for #36 itself, which only asked for
-  `docker compose up -d --wait` against published images.
+- **Resolved (ticket #41):** ADR-0003's original claim that a failed
+  deploy "leaves the previous containers running" was wrong — fixed host
+  ports mean `backend`/`frontend`'s old container stops before the new one
+  can bind that port, so a failed healthcheck means a brief real outage
+  for that service, not a silent no-op (`db` is unaffected — same image
+  every deploy, never recreated). Decision: accept this at current scale
+  rather than add a reverse-proxy blue-green cutover; ADR-0003 has been
+  corrected to state this accurately instead of reopened. See the updated
+  ADR-0003 for the full reasoning.
 - **Follow-up, out of scope for #36:** nothing prunes superseded
   GHCR-pulled image layers on the production box after `--pull always`;
   disk usage grows unbounded over time. Revisit (e.g. a periodic `docker
