@@ -280,6 +280,9 @@ ticket #7 — streaming a Cut is exactly the "expensive operation" that
 "triggered repeatedly without appropriate controls." The streaming
 endpoint itself isn't separately rate limited — it can't be reached
 without a valid, already-rate-limited token in the first place.
+`GET /media/cuts/info` (ticket #22) gets the same per-Account limiter — a
+cache miss there does a full S3 download plus an `ffprobe` subprocess
+call, the same expense class as token issuance.
 
 **Media browser — no access audit trail (for now):** Who viewed/downloaded
 which Cut is not recorded in this round, despite this being research

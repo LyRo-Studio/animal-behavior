@@ -2,6 +2,14 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# ffprobe: probes a Cut's duration/resolution/codec (ticket #22) — see
+# app/services/media_prober.py. ffmpeg's package also provides ffmpeg
+# itself, which nothing here uses; ffprobe alone isn't packaged separately
+# on Debian.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 

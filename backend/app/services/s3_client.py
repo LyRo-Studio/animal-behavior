@@ -29,6 +29,13 @@ class S3ObjectInfo:
     key: str
     size: int
     last_modified: datetime
+    # The object's current S3 ETag (unquoted). Ticket #22: `head_object`'s
+    # etag is the cache key (alongside the S3 key itself) for a Cut's
+    # probed media info — a replaced object at the same key gets a new
+    # ETag, which is what tells that cache to re-probe rather than serve a
+    # stale result. Not populated by `list_objects_info` — nothing today
+    # needs a listed object's ETag, only a single head-object lookup's.
+    etag: str | None = None
 
 
 class S3ObjectNotFoundError(Exception):
@@ -64,7 +71,9 @@ class S3Client(Protocol):
 
     def download_file(self, key: str, local_path: Path) -> Path:
         """Download `key` to `local_path`, creating parent directories as
-        needed."""
+        needed. Raises S3ObjectNotFoundError if no such object exists —
+        including if it existed when an earlier `head_object` call checked
+        but was deleted before this call ran."""
         ...
 
 
@@ -129,7 +138,10 @@ class BotoS3Client:
                 raise S3ObjectNotFoundError(key) from None
             raise
         return S3ObjectInfo(
-            key=key, size=response["ContentLength"], last_modified=response["LastModified"]
+            key=key,
+            size=response["ContentLength"],
+            last_modified=response["LastModified"],
+            etag=response["ETag"].strip('"'),
         )
 
     def read_range(self, key: str, start: int, end: int) -> bytes:
@@ -151,17 +163,28 @@ class BotoS3Client:
 
         # Multipart transfer tuned for large files — Cuts are video files
         # (see CONTEXT.md's "Cut" term).
-        self._client.download_file(
-            Bucket=self._bucket_name,
-            Key=key,
-            Filename=str(temp_path),
-            Config=TransferConfig(
-                multipart_threshold=64 * 1024 * 1024,
-                multipart_chunksize=64 * 1024 * 1024,
-                max_concurrency=4,
-                use_threads=True,
-            ),
-        )
+        try:
+            self._client.download_file(
+                Bucket=self._bucket_name,
+                Key=key,
+                Filename=str(temp_path),
+                Config=TransferConfig(
+                    multipart_threshold=64 * 1024 * 1024,
+                    multipart_chunksize=64 * 1024 * 1024,
+                    max_concurrency=4,
+                    use_threads=True,
+                ),
+            )
+        except ClientError as exc:
+            # Same "no modeled error code" situation as head_object's 404
+            # handling above — and the case this actually needs to catch:
+            # the object existed when an earlier head_object call checked,
+            # then was deleted/replaced before this download ran.
+            status_code = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if status_code == 404:
+                temp_path.unlink(missing_ok=True)
+                raise S3ObjectNotFoundError(key) from None
+            raise
         temp_path.replace(local_path)
         return local_path
 

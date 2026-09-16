@@ -9,6 +9,7 @@ const listCutsMock = vi.hoisted(() => vi.fn())
 const listDatasetFolderMock = vi.hoisted(() => vi.fn())
 const requestMediaTokenMock = vi.hoisted(() => vi.fn())
 const mediaStreamUrlMock = vi.hoisted(() => vi.fn())
+const getCutMediaInfoMock = vi.hoisted(() => vi.fn())
 // A real class, not a plain mock: the view does `err instanceof
 // TestNotFoundError`, so the mocked module needs to export the same
 // constructor identity that tests throw instances of.
@@ -16,6 +17,7 @@ const TestNotFoundError = vi.hoisted(() => class TestNotFoundError extends Error
 const DatasetFolderNotFoundError = vi.hoisted(
   () => class DatasetFolderNotFoundError extends Error {},
 )
+const CutInfoNotFoundError = vi.hoisted(() => class CutInfoNotFoundError extends Error {})
 
 vi.mock('@/services/mediaBrowser', () => ({
   listTestIds: listTestIdsMock,
@@ -23,8 +25,10 @@ vi.mock('@/services/mediaBrowser', () => ({
   listDatasetFolder: listDatasetFolderMock,
   requestMediaToken: requestMediaTokenMock,
   mediaStreamUrl: mediaStreamUrlMock,
+  getCutMediaInfo: getCutMediaInfoMock,
   TestNotFoundError,
   DatasetFolderNotFoundError,
+  CutInfoNotFoundError,
 }))
 
 vi.mock('@/stores/session', () => ({
@@ -63,6 +67,7 @@ describe('MediaBrowserView', () => {
     listDatasetFolderMock.mockReset()
     requestMediaTokenMock.mockReset()
     mediaStreamUrlMock.mockReset()
+    getCutMediaInfoMock.mockReset()
   })
 
   it('shows filtered suggestions as the user types', async () => {
@@ -504,5 +509,104 @@ describe('MediaBrowserView', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="cut-player"]').exists()).toBe(false)
+  })
+
+  it("shows a Cut's probed media info after clicking Info", async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([SAMPLE_CUT])
+    getCutMediaInfoMock.mockResolvedValue({
+      durationSeconds: 125,
+      width: 1920,
+      height: 1080,
+      codec: 'h264',
+    })
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    await wrapper.find('[data-testid="info-cut"]').trigger('click')
+    await flushPromises()
+
+    expect(getCutMediaInfoMock).toHaveBeenCalledWith('a-token', SAMPLE_CUT.key)
+    const panel = wrapper.find('[data-testid="cut-info-panel"]')
+    expect(panel.exists()).toBe(true)
+    expect(panel.find('[data-testid="cut-info-duration"]').text()).toBe('2:05')
+    expect(panel.find('[data-testid="cut-info-resolution"]').text()).toBe('1920x1080')
+    expect(panel.find('[data-testid="cut-info-codec"]').text()).toBe('h264')
+  })
+
+  it('toggles the info panel closed without re-fetching, then reopens without a second request', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([SAMPLE_CUT])
+    getCutMediaInfoMock.mockResolvedValue({
+      durationSeconds: 10,
+      width: 640,
+      height: 480,
+      codec: 'vp9',
+    })
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    await wrapper.find('[data-testid="info-cut"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="cut-info-panel"]').exists()).toBe(true)
+
+    await wrapper.find('[data-testid="info-cut"]').trigger('click')
+    expect(wrapper.find('[data-testid="cut-info-panel"]').exists()).toBe(false)
+
+    await wrapper.find('[data-testid="info-cut"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="cut-info-panel"]').exists()).toBe(true)
+    expect(getCutMediaInfoMock).toHaveBeenCalledOnce()
+  })
+
+  it('shows an error in the info panel when loading media info fails', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([SAMPLE_CUT])
+    getCutMediaInfoMock.mockRejectedValue(new Error('Failed to load media info.'))
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    await wrapper.find('[data-testid="info-cut"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="cut-info-panel"]').text()).toContain(
+      'Failed to load media info.',
+    )
+  })
+
+  it('shows a not-found message in the info panel when the Cut no longer exists', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([SAMPLE_CUT])
+    getCutMediaInfoMock.mockRejectedValue(new CutInfoNotFoundError('Cut not found.'))
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    await wrapper.find('[data-testid="info-cut"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="cut-info-panel"]').text()).toContain('Cut not found.')
+  })
+
+  it('closes an open info panel when a new search starts', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([SAMPLE_CUT])
+    getCutMediaInfoMock.mockResolvedValue({
+      durationSeconds: 10,
+      width: 640,
+      height: 480,
+      codec: 'vp9',
+    })
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+    await wrapper.find('[data-testid="info-cut"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="cut-info-panel"]').exists()).toBe(true)
+
+    listCutsMock.mockResolvedValue([])
+    await wrapper.find('input#test-search').setValue('T002')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="cut-info-panel"]').exists()).toBe(false)
   })
 })

@@ -164,3 +164,54 @@ export function mediaStreamUrl(key: string, action: MediaTokenAction, token: str
   url.searchParams.set('token', token)
   return url.toString()
 }
+
+// Ticket #22: a Cut's probed media info (duration, resolution, codec),
+// fetched lazily (like requestMediaToken above, only on request — not
+// eagerly for a whole Test's Cuts) and cached server-side keyed by S3 key
+// + ETag, so a repeated request for the same, unchanged Cut is cheap.
+export interface CutMediaInfo {
+  durationSeconds: number
+  width: number
+  height: number
+  codec: string
+}
+
+interface CutMediaInfoResponse {
+  duration_seconds: number
+  width: number
+  height: number
+  codec: string
+}
+
+function toCutMediaInfo(row: CutMediaInfoResponse): CutMediaInfo {
+  return {
+    durationSeconds: row.duration_seconds,
+    width: row.width,
+    height: row.height,
+    codec: row.codec,
+  }
+}
+
+// Thrown by getCutMediaInfo specifically for "no such Cut" (backend 404) —
+// kept distinct from a generic failure, same reasoning as TestNotFoundError
+// above.
+export class CutInfoNotFoundError extends Error {}
+
+export async function getCutMediaInfo(accessToken: string, key: string): Promise<CutMediaInfo> {
+  const url = new URL(`${API_BASE_URL}/media/cuts/info`)
+  url.searchParams.set('key', key)
+
+  const response = await fetch(url, { headers: authHeaders(accessToken) })
+
+  if (response.status === 404) {
+    throw new CutInfoNotFoundError('Cut not found.')
+  }
+  if (response.status === 429) {
+    throw new Error('Too many requests. Please try again shortly.')
+  }
+  if (!response.ok) {
+    throw new Error('Failed to load media info.')
+  }
+
+  return toCutMediaInfo(await response.json())
+}
