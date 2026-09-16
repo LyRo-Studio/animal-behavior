@@ -38,31 +38,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
-            backend/requirements.txt
-            backend/requirements-dev.txt
-
+      # actions/setup-python can only fetch a prebuilt interpreter for GitHub's
+      # supported runner-OS images — this runner's host (Debian 13) isn't one of
+      # them, so setup-python fails outright here. pyproject.toml only requires
+      # >=3.12, so the system python3 (3.13, already installed on the box) via a
+      # per-run venv works fine and needs no external download.
       - name: Install dependencies
         working-directory: backend
-        run: pip install -r requirements.txt -r requirements-dev.txt
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Lint (ruff check)
         working-directory: backend
-        run: ruff check .
+        run: .venv/bin/ruff check .
 
       - name: Format check (ruff format)
         working-directory: backend
-        run: ruff format --check .
+        run: .venv/bin/ruff format --check .
 
       - name: Test (pytest)
         working-directory: backend
         # Default addopts already excludes the real_bucket-marked smoke test
         # (ticket #23) — no S3 credentials needed here.
-        run: pytest
+        run: .venv/bin/pytest
 
   frontend:
     runs-on: [self-hosted, linux, x64, production]
