@@ -284,6 +284,16 @@ without a valid, already-rate-limited token in the first place.
 cache miss there does a full S3 download plus an `ffprobe` subprocess
 call, the same expense class as token issuance.
 
+**Media browser — real-bucket smoke test (ticket #23):**
+`backend/tests/test_s3_client_real_bucket.py` exercises `BotoS3Client`
+(list/head/range-read) against the actual bucket and its real gateway, to
+catch gateway-level drift the `FakeS3Client`-backed tests can't — this is
+how the "no presigned S3 URLs" gateway behavior above was originally
+found. Marked `real_bucket` and excluded from the default `pytest` run
+(and therefore CI) by `addopts` in `backend/pyproject.toml`; run it
+explicitly with `pytest -m real_bucket`. Skips (not fails) if S3 isn't
+configured, so this is safe to leave selected by accident.
+
 **Media browser — no access audit trail (for now):** Who viewed/downloaded
 which Cut is not recorded in this round, despite this being research
 footage — nothing in the current scope asked for it, and it's addable
