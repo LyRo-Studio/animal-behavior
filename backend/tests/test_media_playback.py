@@ -125,9 +125,7 @@ def test_stream_with_a_download_token_sets_attachment_disposition(client, db_ses
     )
 
     assert response.status_code == 200
-    assert (
-        response.headers["content-disposition"] == 'attachment; filename="T001_C1_ME_F1.mp4"'
-    )
+    assert response.headers["content-disposition"] == 'attachment; filename="T001_C1_ME_F1.mp4"'
 
 
 def test_stream_forwards_a_range_request_as_partial_content(client, db_session, s3_client):

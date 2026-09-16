@@ -58,9 +58,7 @@ def test_navigating_deeper_shows_only_that_splits_children(client, db_session, s
     s3_client.objects["dataset_v0.9/train/img2.png"] = b"b"
     s3_client.objects["dataset_v0.9/valid/img3.png"] = b"c"
 
-    response = client.get(
-        "/media/datasets", params={"path": "dataset_v0.9/train"}, headers=headers
-    )
+    response = client.get("/media/datasets", params={"path": "dataset_v0.9/train"}, headers=headers)
 
     assert response.status_code == 200
     entries = response.json()
