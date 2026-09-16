@@ -71,7 +71,9 @@ class S3Client(Protocol):
 
     def download_file(self, key: str, local_path: Path) -> Path:
         """Download `key` to `local_path`, creating parent directories as
-        needed."""
+        needed. Raises S3ObjectNotFoundError if no such object exists —
+        including if it existed when an earlier `head_object` call checked
+        but was deleted before this call ran."""
         ...
 
 
@@ -161,17 +163,28 @@ class BotoS3Client:
 
         # Multipart transfer tuned for large files — Cuts are video files
         # (see CONTEXT.md's "Cut" term).
-        self._client.download_file(
-            Bucket=self._bucket_name,
-            Key=key,
-            Filename=str(temp_path),
-            Config=TransferConfig(
-                multipart_threshold=64 * 1024 * 1024,
-                multipart_chunksize=64 * 1024 * 1024,
-                max_concurrency=4,
-                use_threads=True,
-            ),
-        )
+        try:
+            self._client.download_file(
+                Bucket=self._bucket_name,
+                Key=key,
+                Filename=str(temp_path),
+                Config=TransferConfig(
+                    multipart_threshold=64 * 1024 * 1024,
+                    multipart_chunksize=64 * 1024 * 1024,
+                    max_concurrency=4,
+                    use_threads=True,
+                ),
+            )
+        except ClientError as exc:
+            # Same "no modeled error code" situation as head_object's 404
+            # handling above — and the case this actually needs to catch:
+            # the object existed when an earlier head_object call checked,
+            # then was deleted/replaced before this download ran.
+            status_code = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if status_code == 404:
+                temp_path.unlink(missing_ok=True)
+                raise S3ObjectNotFoundError(key) from None
+            raise
         temp_path.replace(local_path)
         return local_path
 

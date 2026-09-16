@@ -93,6 +93,8 @@ class FakeS3Client:
         return self.objects[key][start : end + 1]
 
     def download_file(self, key: str, local_path: Path) -> Path:
+        if key not in self.objects:
+            raise S3ObjectNotFoundError(key)
         local_path = Path(local_path)
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_bytes(self.objects[key])

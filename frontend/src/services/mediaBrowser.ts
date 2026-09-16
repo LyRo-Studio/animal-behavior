@@ -192,12 +192,23 @@ function toCutMediaInfo(row: CutMediaInfoResponse): CutMediaInfo {
   }
 }
 
+// Thrown by getCutMediaInfo specifically for "no such Cut" (backend 404) —
+// kept distinct from a generic failure, same reasoning as TestNotFoundError
+// above.
+export class CutInfoNotFoundError extends Error {}
+
 export async function getCutMediaInfo(accessToken: string, key: string): Promise<CutMediaInfo> {
   const url = new URL(`${API_BASE_URL}/media/cuts/info`)
   url.searchParams.set('key', key)
 
   const response = await fetch(url, { headers: authHeaders(accessToken) })
 
+  if (response.status === 404) {
+    throw new CutInfoNotFoundError('Cut not found.')
+  }
+  if (response.status === 429) {
+    throw new Error('Too many requests. Please try again shortly.')
+  }
   if (!response.ok) {
     throw new Error('Failed to load media info.')
   }

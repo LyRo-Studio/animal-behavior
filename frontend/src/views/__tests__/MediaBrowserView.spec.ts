@@ -17,6 +17,7 @@ const TestNotFoundError = vi.hoisted(() => class TestNotFoundError extends Error
 const DatasetFolderNotFoundError = vi.hoisted(
   () => class DatasetFolderNotFoundError extends Error {},
 )
+const CutInfoNotFoundError = vi.hoisted(() => class CutInfoNotFoundError extends Error {})
 
 vi.mock('@/services/mediaBrowser', () => ({
   listTestIds: listTestIdsMock,
@@ -27,6 +28,7 @@ vi.mock('@/services/mediaBrowser', () => ({
   getCutMediaInfo: getCutMediaInfoMock,
   TestNotFoundError,
   DatasetFolderNotFoundError,
+  CutInfoNotFoundError,
 }))
 
 vi.mock('@/stores/session', () => ({
@@ -570,6 +572,19 @@ describe('MediaBrowserView', () => {
     expect(wrapper.find('[data-testid="cut-info-panel"]').text()).toContain(
       'Failed to load media info.',
     )
+  })
+
+  it('shows a not-found message in the info panel when the Cut no longer exists', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([SAMPLE_CUT])
+    getCutMediaInfoMock.mockRejectedValue(new CutInfoNotFoundError('Cut not found.'))
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    await wrapper.find('[data-testid="info-cut"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="cut-info-panel"]').text()).toContain('Cut not found.')
   })
 
   it('closes an open info panel when a new search starts', async () => {

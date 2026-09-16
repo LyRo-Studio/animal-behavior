@@ -89,8 +89,10 @@ def list_datasets(path: str = "", s3: S3Client = Depends(get_s3_client)) -> list
 @router.get("/cuts/info", response_model=CutMediaInfoOut)
 def get_cut_info(
     key: str = Query(min_length=1, max_length=1024),
+    account: Account = Depends(get_current_account),
     s3: S3Client = Depends(get_s3_client),
     prober: MediaProber = Depends(get_media_prober),
+    limiter: RateLimiter = Depends(get_rate_limiter),
     db: Session = Depends(get_db),
 ) -> CutMediaInfoOut:
     """Probed media info (duration, resolution, codec) for the Cut at
@@ -98,14 +100,25 @@ def get_cut_info(
     app/services/cut_media_info.py. The first request for a Cut probes (via
     a temporary local download) and caches the result; a later request for
     the same, unchanged Cut reuses the cached row instead of re-probing.
+
+    Rate limited per Account regardless of outcome — same "hit before
+    processing" shape as /cuts/token above, since a cache miss here is
+    exactly as expensive as issuing a media token, if not more so.
     """
+    result = limiter.hit(
+        f"cut-info:account:{account.id}",
+        limit=settings.cut_info_rate_limit_max_attempts_per_account,
+        window_seconds=settings.cut_info_rate_limit_window_seconds,
+    )
+    raise_if_throttled(enforce_all(result))
+
     try:
-        result = get_cut_media_info(db, s3, prober, key)
+        info = get_cut_media_info(db, s3, prober, key)
     except CutNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Cut not found."
         ) from None
-    return CutMediaInfoOut.model_validate(result)
+    return CutMediaInfoOut.model_validate(info)
 
 
 @router.post("/cuts/token", response_model=MediaTokenResponse)

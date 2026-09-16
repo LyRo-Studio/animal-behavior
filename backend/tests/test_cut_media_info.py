@@ -1,5 +1,8 @@
+from app.core.config import settings
+from app.main import app
 from app.models.account import AccountRole
 from app.services.media_prober import ProbedMediaInfo
+from app.services.s3_client import get_s3_client
 from tests.helpers import create_account, login_headers
 
 # Ticket #22's acceptance criteria: exercised entirely through the HTTP API
@@ -140,3 +143,56 @@ def test_get_info_never_lets_a_dot_dot_filename_escape_the_temp_download_directo
     [probed_path] = media_prober.calls
     assert probed_path.name == "cut"
     assert probed_path.parent.name != "T001"
+
+
+class _VanishingS3Client:
+    """Wraps a FakeS3Client so the object is deleted the moment head_object
+    succeeds — simulating it being deleted/replaced in the real gap between
+    that freshness check and the download that follows it."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def head_object(self, key):
+        info = self._inner.head_object(key)
+        del self._inner.objects[key]
+        return info
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_get_info_returns_not_found_when_the_object_vanishes_between_head_and_download(
+    client, db_session, s3_client, media_prober
+):
+    """Regression test: head_object succeeding is no guarantee the object
+    is still there by the time download_file runs — that gap must surface
+    as the same 404 a never-existed Cut gets, not an unhandled 500."""
+    s3_client.objects[_CUT_KEY] = b"video-bytes"
+    headers = _user_headers(client, db_session)
+    app.dependency_overrides[get_s3_client] = lambda: _VanishingS3Client(s3_client)
+
+    response = client.get("/media/cuts/info", params={"key": _CUT_KEY}, headers=headers)
+
+    assert response.status_code == 404
+    assert len(media_prober.calls) == 0
+
+
+def test_get_info_is_rate_limited_per_account(
+    client, db_session, s3_client, media_prober, monkeypatch
+):
+    """A cache miss here does a full S3 download plus an ffprobe subprocess
+    call — the same expense class as /cuts/token issuance, which is
+    already rate limited (CONTEXT.md's "Media browser — abuse protection"
+    decision)."""
+    monkeypatch.setattr(settings, "cut_info_rate_limit_max_attempts_per_account", 2)
+    headers = _user_headers(client, db_session)
+    s3_client.objects[_CUT_KEY] = b"video-bytes"
+
+    for _ in range(2):
+        response = client.get("/media/cuts/info", params={"key": _CUT_KEY}, headers=headers)
+        assert response.status_code == 200
+
+    throttled = client.get("/media/cuts/info", params={"key": _CUT_KEY}, headers=headers)
+    assert throttled.status_code == 429
+    assert "Retry-After" in throttled.headers

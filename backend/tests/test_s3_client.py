@@ -155,6 +155,13 @@ def test_download_file_writes_object_bytes_and_creates_parent_dirs(tmp_path: Pat
     assert destination.read_bytes() == b"video-bytes"
 
 
+def test_download_file_raises_not_found_for_a_missing_key(tmp_path: Path):
+    fake = FakeS3Client(objects={})
+
+    with pytest.raises(S3ObjectNotFoundError):
+        fake.download_file("cuts/T001/missing.mp4", tmp_path / "video1.mp4")
+
+
 # --- BotoS3Client: unit tests against a mocked boto3 client -----------------
 
 
@@ -298,6 +305,28 @@ def test_boto_download_file_leaves_no_partial_file_when_transfer_fails(tmp_path:
         mock_client.download_file.side_effect = failing_download
 
         with pytest.raises(RuntimeError):
+            _boto_client().download_file("cuts/T001/video1.mp4", destination)
+
+        assert not destination.exists()
+
+
+def test_boto_download_file_raises_not_found_when_the_object_is_gone_by_download_time(
+    tmp_path: Path,
+):
+    """Ticket #22: the object can vanish (deleted/replaced) in the gap
+    between an earlier head_object check and this download — that must
+    surface as the same S3ObjectNotFoundError a missing key always does,
+    not an unhandled ClientError."""
+    destination = tmp_path / "T001" / "video1.mp4"
+
+    with patch("app.services.s3_client.boto3.client") as boto_client_factory:
+        mock_client = boto_client_factory.return_value
+        mock_client.download_file.side_effect = ClientError(
+            {"ResponseMetadata": {"HTTPStatusCode": 404}, "Error": {"Code": "404"}},
+            "GetObject",
+        )
+
+        with pytest.raises(S3ObjectNotFoundError):
             _boto_client().download_file("cuts/T001/video1.mp4", destination)
 
         assert not destination.exists()

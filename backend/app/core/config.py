@@ -121,6 +121,14 @@ class Settings(BaseSettings):
     ffprobe_path: str = "ffprobe"
     ffprobe_timeout_seconds: int = 30
 
+    # A cache miss here does a full S3 download plus an ffprobe subprocess
+    # call — the same class of "expensive operation" media_token issuance
+    # above is rate limited for, and ENGINEERING-STANDARDS.md's DoS section
+    # requires guarding against. Reuses the same rate_limit.py machinery,
+    # keyed per Account like the token endpoint.
+    cut_info_rate_limit_max_attempts_per_account: int = 30
+    cut_info_rate_limit_window_seconds: int = 300
+
     @property
     def cors_origin_list(self) -> list[str]:
         """CORS_ORIGINS as a comma-separated env var, split into a list."""

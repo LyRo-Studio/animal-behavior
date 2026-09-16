@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import {
+  CutInfoNotFoundError,
   DatasetFolderNotFoundError,
   getCutMediaInfo,
   listCuts,
@@ -226,7 +227,12 @@ async function toggleCutInfo(cut: Cut) {
   try {
     cutMediaInfo.value[cut.key] = await getCutMediaInfo(session.accessToken.value, cut.key)
   } catch (err) {
-    cutInfoError.value[cut.key] = err instanceof Error ? err.message : 'Failed to load media info.'
+    cutInfoError.value[cut.key] =
+      err instanceof CutInfoNotFoundError
+        ? 'Cut not found.'
+        : err instanceof Error
+          ? err.message
+          : 'Failed to load media info.'
   } finally {
     cutInfoInFlight.value[cut.key] = false
   }

@@ -9,24 +9,16 @@ about a Cut already looked up there.
 
 import re
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 
+from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models.cut_media_info import CutMediaInfo
 from app.services.media_browser import CutNotFoundError, parse_cut_key
-from app.services.media_prober import MediaProber
+from app.services.media_prober import MediaProber, ProbedMediaInfo
 from app.services.s3_client import S3Client, S3ObjectNotFoundError
-
-
-@dataclass(frozen=True)
-class CutMediaInfoResult:
-    duration_seconds: float
-    width: int
-    height: int
-    codec: str
-
 
 # A safe extension for the local download's filename (see `_local_filename`
 # below) — a plain "." followed by up to 10 letters/digits, nothing else.
@@ -52,14 +44,14 @@ def _local_filename(cut_filename: str) -> str:
     return f"cut{extension}" if _SAFE_EXTENSION_RE.match(extension) else "cut"
 
 
-def get_cut_media_info(
-    db: Session, s3: S3Client, prober: MediaProber, key: str
-) -> CutMediaInfoResult:
+def get_cut_media_info(db: Session, s3: S3Client, prober: MediaProber, key: str) -> ProbedMediaInfo:
     """The probed media info for the Cut at `key`.
 
     Raises CutNotFoundError if `key` isn't a well-formed Cut key under
     cuts/<test_id>/ (same shape-defines-existence validation as
-    `parse_cut_key`'s other callers) or no object currently exists there.
+    `parse_cut_key`'s other callers), or no object currently exists there
+    (whether that's discovered up front or the object vanishes between the
+    freshness check below and the download that follows it).
 
     The first call for a given key+ETag probes — via a temporary local
     download (`S3Client.download_file`) through the injected `prober` — and
@@ -82,7 +74,7 @@ def get_cut_media_info(
 
     cached = db.get(CutMediaInfo, key)
     if cached is not None and cached.etag == info.etag:
-        return CutMediaInfoResult(
+        return ProbedMediaInfo(
             duration_seconds=cached.duration_seconds,
             width=cached.width,
             height=cached.height,
@@ -91,23 +83,32 @@ def get_cut_media_info(
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         local_path = Path(tmp_dir) / _local_filename(filename)
-        s3.download_file(key, local_path)
+        try:
+            s3.download_file(key, local_path)
+        except S3ObjectNotFoundError:
+            raise CutNotFoundError(key) from None
         probed = prober.probe(local_path)
 
-    if cached is None:
-        cached = CutMediaInfo(s3_key=key)
-        db.add(cached)
-
-    cached.etag = info.etag
-    cached.duration_seconds = probed.duration_seconds
-    cached.width = probed.width
-    cached.height = probed.height
-    cached.codec = probed.codec
+    # Upsert rather than get-then-add/update: two concurrent first-time
+    # requests for the same not-yet-cached key both see `cached is None`
+    # above and both reach here, so a plain `db.add` + commit would have the
+    # second raise a primary-key IntegrityError instead of succeeding.
+    # Postgres's atomic ON CONFLICT DO UPDATE resolves that race as a normal
+    # "last probe wins" update. This also refreshes `probed_at` on every
+    # re-probe, which a plain attribute assignment on an existing ORM row
+    # wouldn't — the column's `server_default` only fires on INSERT.
+    values = {
+        "s3_key": key,
+        "etag": info.etag,
+        "duration_seconds": probed.duration_seconds,
+        "width": probed.width,
+        "height": probed.height,
+        "codec": probed.codec,
+        "probed_at": func.now(),
+    }
+    stmt = pg_insert(CutMediaInfo).values(**values)
+    stmt = stmt.on_conflict_do_update(index_elements=[CutMediaInfo.s3_key], set_=values)
+    db.execute(stmt)
     db.commit()
 
-    return CutMediaInfoResult(
-        duration_seconds=probed.duration_seconds,
-        width=probed.width,
-        height=probed.height,
-        codec=probed.codec,
-    )
+    return probed
