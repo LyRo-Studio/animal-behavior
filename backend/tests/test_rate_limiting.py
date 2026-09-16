@@ -126,9 +126,7 @@ def test_login_with_correct_password_bypasses_an_exhausted_per_email_budget(
 
     for ip in ("1.1.1.1", "2.2.2.2", "3.3.3.3"):
         attacker = TestClient(app, client=(ip, 12345))
-        attacker.post(
-            "/auth/login", json={"email": "jan.peeters@vives.be", "password": "wrong"}
-        )
+        attacker.post("/auth/login", json={"email": "jan.peeters@vives.be", "password": "wrong"})
 
     victim = TestClient(app, client=("9.9.9.9", 12345))
     response = victim.post(

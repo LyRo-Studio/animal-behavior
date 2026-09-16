@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  backend:
+    runs-on: [self-hosted, linux, x64, production]
+
+    # Real Postgres, migrated through Alembic — matches backend/tests/conftest.py's
+    # "never SQLite or a mocked ORM" testing decision (issue #1). Published on 5433,
+    # not Postgres's default 5432, so this never collides with the production `db`
+    # container already running on this same box (docker-compose.yml, ADR-0003).
+    # Bound to 127.0.0.1 only — this runner lives on the production box, reachable
+    # over the tailnet; an unbound 0.0.0.0 publish would expose these (trivial,
+    # throwaway) credentials to anything on the tailnet for the job's duration.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: animal_behavior
+          POSTGRES_PASSWORD: animal_behavior
+          POSTGRES_DB: animal_behavior
+        ports:
+          - 127.0.0.1:5433:5432
+        options: >-
+          --health-cmd "pg_isready -U animal_behavior"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://animal_behavior:animal_behavior@localhost:5433/animal_behavior
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff check)
+        working-directory: backend
+        run: ruff check .
+
+      - name: Format check (ruff format)
+        working-directory: backend
+        run: ruff format --check .
+
+      - name: Test (pytest)
+        working-directory: backend
+        # Default addopts already excludes the real_bucket-marked smoke test
+        # (ticket #23) — no S3 credentials needed here.
+        run: pytest
+
+  frontend:
+    runs-on: [self-hosted, linux, x64, production]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint (eslint)
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Format check (prettier)
+        working-directory: frontend
+        run: npm run format
+
+      - name: Typecheck (vue-tsc)
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Test (vitest)
+        working-directory: frontend
+        run: npm run test
+
+      - name: Build
+        working-directory: frontend
+        # vite build only — vue-tsc already ran as the Typecheck step above;
+        # `npm run build` would repeat it a second time for no benefit.
+        run: npx vite build
