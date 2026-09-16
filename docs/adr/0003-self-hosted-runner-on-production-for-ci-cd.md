@@ -38,10 +38,20 @@ outside contributors start opening PRs).
   traceability (redeploy a past `sha-<commit>` tag without rebuilding) and to answer "what's
   running in production right now" precisely. This is a separate decision from the runner
   placement above, but the two were adopted together.
-- Rollback is a manual `workflow_dispatch` step, not automatic — the deploy step already keeps the
-  previous containers running until the new ones pass their health check, so a failed deploy alone
-  never takes production down; automatically redeploying an older tag on top of that was judged
-  more likely to cause churn (e.g. against a transient external failure) than to help.
+- Rollback is a manual `workflow_dispatch` step, not automatic. Note this does *not* rest on a
+  failed deploy leaving production untouched — it doesn't (see below); automatically redeploying an
+  older tag on a failure was judged more likely to cause churn (e.g. against a transient external
+  failure) than to help, independent of whether that failure caused an outage.
+- **A failed deploy causes a brief real outage, not a silent no-op (ticket #41):** `backend`/
+  `frontend` publish fixed host ports, so `docker compose up` must stop each service's old container
+  before the new one can bind that port — there is no window where old and new run side by side.
+  If a newly deployed image fails its healthcheck, `--wait` fails the workflow (so the failure *is*
+  reported), but the affected service's *old* container is already gone by then — production is
+  briefly down for that service, not "still serving traffic on the old version." `db` is unaffected
+  (same image every deploy, so compose never recreates it). Accepted at current scale, consistent
+  with this ADR's own solo-team/low-traffic trade-off above; would need a reverse proxy in front of
+  backend/frontend (health-check a new container on a separate port, then cut traffic over before
+  tearing down the old one) to close this gap — revisit if it becomes unacceptable.
 - No staging environment exists — every merge to `master` deploys straight to production. Revisit
   if this app ever needs to protect real users' uptime expectations the current internal-only
   scope doesn't have.
