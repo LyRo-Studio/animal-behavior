@@ -1,3 +1,4 @@
+import json  # noqa-free deliberate unused import, for CI smoke test
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
