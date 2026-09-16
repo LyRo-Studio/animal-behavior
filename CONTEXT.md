@@ -299,3 +299,14 @@ which Cut is not recorded in this round, despite this being research
 footage — nothing in the current scope asked for it, and it's addable
 later without disrupting anything already designed. An explicit choice,
 not an oversight — revisit if a data-governance requirement surfaces.
+
+**CI/CD — self-hosted runner on production:** CI and CD both run on a
+single self-hosted GitHub Actions runner installed directly on the
+production box (dedicated `gha-runner` service account: Docker-group
+membership only, no root), rather than a GitHub-hosted runner reaching
+into the box over Tailscale — the box has no public IP and this avoids
+exposing SSH publicly or maintaining a tailnet auth key. Registered
+runner: `lynn-delaere-prod`, running as a systemd service
+(`actions.runner.LyRo-Studio-animal-behavior.lynn-delaere-prod.service`)
+so it survives reboots. See
+`docs/adr/0003-self-hosted-runner-on-production-for-ci-cd.md`.
