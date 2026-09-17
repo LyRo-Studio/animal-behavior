@@ -65,6 +65,27 @@ async function logout(): Promise<void> {
   currentAccount.value = null
 }
 
+// Shared by ensureSession and refreshAccessToken below — both end up needing
+// "rotate via the refresh token, or give up and clear the session" once
+// they've already decided the current access token can't be trusted as-is.
+async function rotateViaRefreshToken(): Promise<boolean> {
+  if (!refreshToken.value) {
+    setTokens(null)
+    return false
+  }
+
+  try {
+    const tokens = await refreshTokens(refreshToken.value)
+    setTokens(tokens)
+    currentAccount.value = await fetchCurrentAccount(tokens.accessToken)
+    return true
+  } catch {
+    setTokens(null)
+    currentAccount.value = null
+    return false
+  }
+}
+
 /**
  * Ensure `currentAccount` reflects a valid session, refreshing the access
  * token once via the refresh token if it's stale. Returns false (and clears
@@ -88,21 +109,19 @@ async function ensureSession(): Promise<boolean> {
     // the refresh token before giving up on the session entirely.
   }
 
-  if (!refreshToken.value) {
-    setTokens(null)
-    return false
-  }
+  return rotateViaRefreshToken()
+}
 
-  try {
-    const tokens = await refreshTokens(refreshToken.value)
-    setTokens(tokens)
-    currentAccount.value = await fetchCurrentAccount(tokens.accessToken)
-    return true
-  } catch {
-    setTokens(null)
-    currentAccount.value = null
-    return false
-  }
+/**
+ * Rotate the access token via the refresh token on demand, for a caller that
+ * just got a 401 on its own in-flight request (e.g. AnalysisView's poll)
+ * rather than at route-navigation time. ensureSession() can't be reused for
+ * this: it short-circuits to `true` whenever `currentAccount` is already
+ * cached from an earlier login/navigation, so it would never actually
+ * re-validate or rotate an access token that's gone stale mid-session.
+ */
+async function refreshAccessToken(): Promise<boolean> {
+  return rotateViaRefreshToken()
 }
 
 export const session = {
@@ -111,4 +130,5 @@ export const session = {
   login,
   logout,
   ensureSession,
+  refreshAccessToken,
 }

@@ -21,8 +21,14 @@ vi.mock('@/services/analyses', () => ({
   AnalysisUnauthorizedError,
 }))
 
+// A real, mutable ref-like object (not a fresh `{ value: 'a-token' }` per
+// test) so refreshAccessTokenMock's implementation can simulate a real
+// rotation by writing a new value the view's next getAnalysis call reads.
+const sessionAccessToken = vi.hoisted(() => ({ value: 'a-token' }))
+const refreshAccessTokenMock = vi.hoisted(() => vi.fn())
+
 vi.mock('@/stores/session', () => ({
-  session: { accessToken: { value: 'a-token' } },
+  session: { accessToken: sessionAccessToken, refreshAccessToken: refreshAccessTokenMock },
 }))
 
 function createTestRouter() {
@@ -81,6 +87,8 @@ describe('AnalysisView', () => {
     getAnalysisMock.mockReset()
     cancelAnalysisMock.mockReset()
     downloadAnalysisReportMock.mockReset()
+    refreshAccessTokenMock.mockReset()
+    sessionAccessToken.value = 'a-token'
   })
 
   it("shows a not-found message for an unknown or another Account's job", async () => {
@@ -114,15 +122,21 @@ describe('AnalysisView', () => {
     expect(wrapper.find('[data-testid="status"]').text()).toBe('running')
   })
 
-  it('stops polling and replaces a stale status with a session-expired message on a 401', async () => {
+  it('stops polling and replaces a stale status with a session-expired message when refreshing the token also fails', async () => {
     getAnalysisMock
       .mockResolvedValueOnce(job({ status: 'queued', videos: [video()] }))
       .mockRejectedValue(new AnalysisUnauthorizedError('Not authenticated'))
+    // The refresh token itself is also expired/invalid — there's nothing
+    // left to silently recover with.
+    refreshAccessTokenMock.mockResolvedValue(false)
 
     const wrapper = await mountView()
     expect(wrapper.find('[data-testid="status"]').text()).toBe('queued')
 
     await vi.advanceTimersByTimeAsync(2000)
+    expect(refreshAccessTokenMock).toHaveBeenCalledTimes(1)
+    // A failed rotation means no retry is attempted — just the one 401'd
+    // poll on top of the initial successful load.
     expect(getAnalysisMock).toHaveBeenCalledTimes(2)
     expect(wrapper.find('[data-testid="session-expired"]').exists()).toBe(true)
     // The stale "queued" snapshot from before the token expired must not
@@ -133,6 +147,46 @@ describe('AnalysisView', () => {
     // never become valid again on its own.
     await vi.advanceTimersByTimeAsync(10000)
     expect(getAnalysisMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('silently rotates the access token and retries a 401 without ever showing a message', async () => {
+    getAnalysisMock
+      .mockResolvedValueOnce(job({ status: 'queued', videos: [video()] }))
+      .mockRejectedValueOnce(new AnalysisUnauthorizedError('Not authenticated'))
+      .mockResolvedValueOnce(job({ status: 'running', videos: [video({ status: 'processing' })] }))
+    refreshAccessTokenMock.mockImplementation(async () => {
+      sessionAccessToken.value = 'rotated-token'
+      return true
+    })
+
+    const wrapper = await mountView()
+    await vi.advanceTimersByTimeAsync(2000)
+
+    expect(refreshAccessTokenMock).toHaveBeenCalledTimes(1)
+    // The initial load, the 401'd poll, and the immediate post-rotation
+    // retry — the retry must use the freshly rotated token, not the stale
+    // one that just got rejected.
+    expect(getAnalysisMock).toHaveBeenCalledTimes(3)
+    expect(getAnalysisMock).toHaveBeenNthCalledWith(3, 'rotated-token', 42)
+    expect(wrapper.find('[data-testid="session-expired"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="status"]').text()).toBe('running')
+  })
+
+  it('gives up after one retry if the rotated token also gets a 401, rather than looping', async () => {
+    getAnalysisMock
+      .mockResolvedValueOnce(job({ status: 'queued', videos: [video()] }))
+      .mockRejectedValue(new AnalysisUnauthorizedError('Not authenticated'))
+    refreshAccessTokenMock.mockResolvedValue(true)
+
+    const wrapper = await mountView()
+    await vi.advanceTimersByTimeAsync(2000)
+
+    // Exactly one rotation attempt, not one per retried 401 — a second
+    // rotation attempt on the retry's own 401 would risk looping forever
+    // against a backend that keeps rejecting the "rotated" token.
+    expect(refreshAccessTokenMock).toHaveBeenCalledTimes(1)
+    expect(getAnalysisMock).toHaveBeenCalledTimes(3)
+    expect(wrapper.find('[data-testid="session-expired"]').exists()).toBe(true)
   })
 
   it('never schedules another poll if the component unmounts before an in-flight request resolves', async () => {
