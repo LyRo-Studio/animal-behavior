@@ -11,6 +11,7 @@ const requestMediaTokenMock = vi.hoisted(() => vi.fn())
 const mediaStreamUrlMock = vi.hoisted(() => vi.fn())
 const getCutMediaInfoMock = vi.hoisted(() => vi.fn())
 const createAnalysisMock = vi.hoisted(() => vi.fn())
+const listAnalysesMock = vi.hoisted(() => vi.fn())
 // A real class, not a plain mock: the view does `err instanceof
 // TestNotFoundError`, so the mocked module needs to export the same
 // constructor identity that tests throw instances of.
@@ -34,6 +35,7 @@ vi.mock('@/services/mediaBrowser', () => ({
 
 vi.mock('@/services/analyses', () => ({
   createAnalysis: createAnalysisMock,
+  listAnalyses: listAnalysesMock,
 }))
 
 vi.mock('@/stores/session', () => ({
@@ -72,6 +74,9 @@ describe('MediaBrowserView', () => {
     // Default: an empty top-level Dataset folder — tests that care about
     // Dataset browsing specifically override this.
     listDatasetFolderMock.mockResolvedValue([])
+    // Default: no previous analyses for whichever Test is searched — tests
+    // that care about the inline history panel specifically override this.
+    listAnalysesMock.mockResolvedValue([])
   })
 
   afterEach(() => {
@@ -82,6 +87,7 @@ describe('MediaBrowserView', () => {
     mediaStreamUrlMock.mockReset()
     getCutMediaInfoMock.mockReset()
     createAnalysisMock.mockReset()
+    listAnalysesMock.mockReset()
   })
 
   it('shows filtered suggestions as the user types', async () => {
@@ -761,5 +767,102 @@ describe('MediaBrowserView', () => {
     expect(
       wrapper.find<HTMLButtonElement>('[data-testid="analyze-selected"]').element.disabled,
     ).toBe(true)
+  })
+
+  it("loads and links to that Test's previous analyses (ticket #53)", async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([C2_CUT])
+    listAnalysesMock.mockResolvedValue([
+      { id: 42, testId: 'T001', status: 'completed', createdAt: '2026-01-02T10:00:00Z' },
+    ])
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    expect(listAnalysesMock).toHaveBeenCalledWith('a-token', 'T001')
+    const link = wrapper.find('[data-testid="previous-analysis-link"]')
+    expect(link.exists()).toBe(true)
+    expect(link.attributes('href')).toBe('/analyses/42')
+    expect(wrapper.text()).toContain('completed')
+  })
+
+  it('still shows previous analyses when the Cuts fetch for that Test 404s', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockRejectedValue(new TestNotFoundError('not found'))
+    listAnalysesMock.mockResolvedValue([
+      { id: 42, testId: 'T001', status: 'completed', createdAt: '2026-01-02T10:00:00Z' },
+    ])
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    // A Test's Cuts can go missing (e.g. removed/renamed in S3) after it was
+    // already analyzed — the two fetches are independent, so a Cuts-side
+    // 404 must never hide previously-successful analysis history.
+    expect(wrapper.find('[data-testid="not-found"]').exists()).toBe(true)
+    const link = wrapper.find('[data-testid="previous-analysis-link"]')
+    expect(link.exists()).toBe(true)
+    expect(link.attributes('href')).toBe('/analyses/42')
+  })
+
+  it('still shows previous analyses when the Cuts fetch for that Test fails generically', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockRejectedValue(new Error('boom'))
+    listAnalysesMock.mockResolvedValue([
+      { id: 42, testId: 'T001', status: 'completed', createdAt: '2026-01-02T10:00:00Z' },
+    ])
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    expect(wrapper.find('[role="alert"]').exists()).toBe(true)
+    const link = wrapper.find('[data-testid="previous-analysis-link"]')
+    expect(link.exists()).toBe(true)
+  })
+
+  it('shows an empty state when a Test has no previous analyses', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([C2_CUT])
+    listAnalysesMock.mockResolvedValue([])
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    expect(wrapper.text()).toContain('No previous analyses for this Test.')
+  })
+
+  it('shows an error if loading previous analyses fails, without affecting the Cuts listing', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([C2_CUT])
+    listAnalysesMock.mockRejectedValue(new Error('boom'))
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    expect(wrapper.text()).toContain('Failed to load previous analyses.')
+    expect(wrapper.text()).toContain(C2_CUT.filename)
+  })
+
+  it("discards a slower, earlier Test's previous-analyses response once a later search has started", async () => {
+    listTestIdsMock.mockResolvedValue(['T001', 'T002'])
+    listCutsMock.mockResolvedValue([C2_CUT])
+    let resolveFirst!: (jobs: unknown[]) => void
+    listAnalysesMock.mockImplementationOnce(
+      () => new Promise((resolve) => (resolveFirst = resolve)),
+    )
+    const wrapper = await mountView()
+    await wrapper.find('input#test-search').setValue('T001')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises() // T001's previous-analyses request left pending
+
+    listAnalysesMock.mockResolvedValueOnce([])
+    await wrapper.find('input#test-search').setValue('T002')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    // T001's request resolves after T002 is already showing — must not
+    // resurrect T001's stale analysis into T002's panel.
+    resolveFirst([
+      { id: 1, testId: 'T001', status: 'completed', createdAt: '2026-01-01T00:00:00Z' },
+    ])
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="previous-analysis-link"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('No previous analyses for this Test.')
   })
 })

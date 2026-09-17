@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 import AdminView from '@/views/AdminView.vue'
+import AnalysesHistoryView from '@/views/AnalysesHistoryView.vue'
 import AnalysisView from '@/views/AnalysisView.vue'
 import ForgotPasswordView from '@/views/ForgotPasswordView.vue'
 import HomeView from '@/views/HomeView.vue'
@@ -35,6 +36,13 @@ const router = createRouter({
     // Ticket #19: every authenticated Account (User or Admin) gets
     // identical access — no requiresAdmin meta, unlike /admin.
     { path: '/media', name: 'media', component: MediaBrowserView },
+    // Ticket #53: same "every authenticated Account" access as /media above
+    // — own-jobs-only history, no extra role gating (issue #44's
+    // "Authorization" section). Declared before the `:id` route below so
+    // it isn't shadowed by it — vue-router matches static segments over
+    // dynamic ones regardless of order, but keeping the static route first
+    // reads more naturally alongside it.
+    { path: '/analyses', name: 'analyses-history', component: AnalysesHistoryView },
     // Ticket #52: same "every authenticated Account" access as /media above
     // — issue #44's "Authorization" section gives no extra role gating to
     // starting/viewing/cancelling one's own analyses.
