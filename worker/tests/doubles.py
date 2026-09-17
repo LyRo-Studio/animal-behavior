@@ -11,6 +11,8 @@ from pathlib import Path
 
 from app.services.s3_client import S3ObjectNotFoundError
 
+from worker.dogtrace_runner import ProgressCallback
+
 
 @dataclass
 class FakeS3Client:
@@ -44,32 +46,55 @@ class FakeDogTraceRunner:
     get a `track_report.xlsx` written for them, simulating that video's
     pipeline failing while the rest of the batch still succeeds (mirrors
     dogtrace's own per-video fault isolation). `raises`, if set, is raised
-    instead of ever writing any output at all — simulates a whole-batch
-    failure such as the bundled model failing to load.
+    after `raises_after_videos` videos have already been fully progressed
+    (started + a terminal event) — `raises_after_videos=0` (the default)
+    means before any video is attempted at all, simulating a whole-batch
+    failure such as the bundled model failing to load; a higher value
+    simulates DogTrace crashing partway through an otherwise-successful
+    batch (e.g. a transient CUDA error), leaving the remaining videos
+    without ever calling `progress` for them.
     """
 
     version: str = "1.0.0-fake"
     failing_video_stems: frozenset[str] = field(default_factory=frozenset)
     raises: Exception | None = None
+    raises_after_videos: int = 0
     calls: list[list[Path]] = field(default_factory=list)
 
-    def run_reporting(self, video_paths: list[Path], *, output_dir: Path) -> None:
+    def run_reporting(
+        self,
+        video_paths: list[Path],
+        *,
+        output_dir: Path,
+        progress: ProgressCallback | None = None,
+    ) -> None:
         self.calls.append(list(video_paths))
-        if self.raises is not None:
+        if self.raises is not None and self.raises_after_videos == 0:
             raise self.raises
 
         succeeded_any = False
-        for video_path in video_paths:
+        for index, video_path in enumerate(video_paths):
+            if self.raises is not None and index == self.raises_after_videos:
+                raise self.raises
+
+            if progress is not None:
+                progress(video_path, "started")
+
             stem = Path(video_path).stem
             # Mirrors dogtrace.reporting_v24.VideoReport.from_video, which
             # creates this directory up front for every video regardless of
-            # whether it goes on to succeed — see orchestrator.py's
-            # `_video_produced_output` docstring for why that matters.
+            # whether it goes on to succeed — its mere existence can't be
+            # used to infer success (that's exactly why ticket #48 moved to
+            # a progress callback instead of globbing for it).
             report_dir = output_dir / stem / "20260101_00h00"
             report_dir.mkdir(parents=True, exist_ok=True)
             if stem not in self.failing_video_stems:
                 (report_dir / "track_report.xlsx").write_bytes(b"fake-track-report")
                 succeeded_any = True
+                if progress is not None:
+                    progress(video_path, "succeeded")
+            elif progress is not None:
+                progress(video_path, "failed")
 
         if succeeded_any:
             (output_dir / "casiop_report.xlsx").write_bytes(b"fake-combined-report")

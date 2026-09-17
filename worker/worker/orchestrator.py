@@ -11,6 +11,7 @@ GPU-dependent `dogtrace` package.
 
 import logging
 import shutil
+from collections import defaultdict
 from pathlib import Path
 
 from app.models.analysis_job import AnalysisJob, AnalysisJobVideo, AnalysisJobVideoStatus
@@ -18,7 +19,7 @@ from app.services.analyses import claim_next_queued_job, finalize_analysis_job
 from app.services.s3_client import S3Client, S3ObjectNotFoundError
 from sqlalchemy.orm import Session
 
-from worker.dogtrace_runner import DogTraceRunner
+from worker.dogtrace_runner import DogTraceRunner, ProgressCallback
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,12 @@ logger = logging.getLogger(__name__)
 _DOWNLOAD_FAILURE_REASON = "The source video could not be retrieved from storage."
 _PIPELINE_FAILURE_REASON = "The analysis did not produce a result for this video."
 _BATCH_FAILURE_REASON = "The analysis could not be completed for this video."
+
+# A video not yet at a terminal status — still eligible to be moved by a
+# progress event or a fallback sweep. Shared between `_make_progress_callback`
+# (which never resurrects a video outside this set) and `_run_claimed_job`'s
+# two fallback sweeps below, so a future status can't be added to only one.
+_OPEN_STATUSES = (AnalysisJobVideoStatus.PENDING, AnalysisJobVideoStatus.PROCESSING)
 
 
 def process_next_job(
@@ -137,12 +144,21 @@ def _run_claimed_job(
         # `create_analysis_job` (ticket #45) doesn't reject a request that
         # names the same Cut key twice — dedupe here so a video is never
         # handed to `run_reporting` more than once (wasted GPU work, and an
-        # untested input shape for DogTrace itself). Every AnalysisJobVideo
-        # row, duplicates included, still gets its own status below from
-        # whether *its* video_stem produced output.
+        # untested input shape for DogTrace itself). `_on_progress` below
+        # still updates every matching AnalysisJobVideo row, duplicates
+        # included, from the single progress callback for their shared path.
         unique_local_paths = list(dict.fromkeys(local_paths))
+
+        videos_by_stem: dict[str, list[AnalysisJobVideo]] = defaultdict(list)
+        for video in job.videos:
+            videos_by_stem[Path(video.cut_key).stem].append(video)
+
         try:
-            dogtrace_runner.run_reporting(unique_local_paths, output_dir=output_dir)
+            dogtrace_runner.run_reporting(
+                unique_local_paths,
+                output_dir=output_dir,
+                progress=_make_progress_callback(db, videos_by_stem),
+            )
         except Exception:
             logger.exception(
                 "analysis_id=%s account_id=%s test_id=%s run_reporting failed "
@@ -151,26 +167,42 @@ def _run_claimed_job(
                 job.requested_by,
                 job.test_id,
             )
-            # Coarse by design (ticket #47: no progress callback yet) — a
-            # video already resolved (e.g. a download failure above) keeps
-            # its own specific reason; everything still `pending` when the
+            # A video already resolved (e.g. a download failure above, or a
+            # progress callback that already reached a terminal status)
+            # keeps its own specific reason; anything still open when the
             # whole call blew up gets this generic one instead of being
             # left stuck.
             for video in job.videos:
-                if video.status == AnalysisJobVideoStatus.PENDING:
+                if video.status in _OPEN_STATUSES:
                     video.status = AnalysisJobVideoStatus.FAILED
                     video.failure_reason = _BATCH_FAILURE_REASON
                     db.add(video)
         else:
+            # Defensive fallback, not the primary mechanism (that's
+            # `_make_progress_callback` above): `dogtrace_runner` is a
+            # separate, externally-versioned dependency whose contract is
+            # "a terminal progress event for every requested video" (see
+            # `DogTraceRunner.run_reporting`'s docstring) but isn't
+            # enforced by the type system. If it's ever violated — a video
+            # silently left without its terminal event despite
+            # `run_reporting` returning without raising — this still
+            # terminalizes it here, rather than leaving that
+            # AnalysisJobVideo stuck `pending`/`processing` forever under
+            # an otherwise-finished job with no recovery path (unlike a
+            # `running` job, which `requeue_stuck_running_jobs` can retry).
             for video in job.videos:
-                if video.status != AnalysisJobVideoStatus.PENDING:
-                    continue
-                if _video_produced_output(output_dir, Path(video.cut_key).stem):
-                    video.status = AnalysisJobVideoStatus.SUCCEEDED
-                else:
+                if video.status in _OPEN_STATUSES:
+                    logger.warning(
+                        "analysis_id=%s account_id=%s test_id=%s cut_key=%s never "
+                        "reached a terminal status from dogtrace's progress callback",
+                        job.id,
+                        job.requested_by,
+                        job.test_id,
+                        video.cut_key,
+                    )
                     video.status = AnalysisJobVideoStatus.FAILED
                     video.failure_reason = _PIPELINE_FAILURE_REASON
-                db.add(video)
+                    db.add(video)
 
     db.commit()
     db.refresh(job)
@@ -208,20 +240,47 @@ def _download_video(
     return local_path
 
 
-def _video_produced_output(output_dir: Path, video_stem: str) -> bool:
-    """Whether DogTrace produced a per-video result for `video_stem`.
+def _make_progress_callback(
+    db: Session, videos_by_stem: dict[str, list[AnalysisJobVideo]]
+) -> ProgressCallback:
+    """Build the `progress` callback passed into `dogtrace_runner.run_reporting`
+    (ticket #48) that updates `analysis_job_videos.status` in near-real-time
+    as each video starts and finishes, replacing ticket #47's coarse,
+    post-hoc inference from output artifacts.
 
-    There's no return value or progress callback from `run_reporting` yet
-    that reports this directly (ticket #47's "coarse status... based on
-    which output artifacts exist per video"). `dogtrace.reporting_v24`'s
-    `VideoReport.from_video` creates `output_dir/<video_stem>/<timestamp>/`
-    up front, before that video is even attempted, so the directory's mere
-    existence can't distinguish success from failure — `track_report.xlsx`
-    is only ever written by `VideoReport.run()` once that video's pipeline
-    has actually finished, so its presence is the real per-video completion
-    marker.
+    Commits after every event, not just at the end of the job, so `GET
+    /analyses/{id}` observes each video's status as soon as DogTrace reports
+    it — not only once the whole job reaches a terminal state.
+
+    Looks videos up by `Path(video_path).stem` and updates every matching
+    row (there can be more than one for a duplicate Cut key — see
+    `_run_claimed_job`'s dedup comment), skipping any row already terminal
+    (e.g. failed to download) so this can never resurrect it.
     """
-    return any(output_dir.glob(f"{video_stem}/*/track_report.xlsx"))
+
+    def _on_progress(video_path: Path, event: str) -> None:
+        if event not in ("started", "succeeded", "failed"):
+            # An event outside dogtrace's documented vocabulary (see
+            # `DogTraceRunner.run_reporting`'s docstring) — treated as a
+            # failure below, same as "failed" itself, but logged since it
+            # means the upstream contract was violated rather than this
+            # video genuinely failing.
+            logger.warning("unrecognized dogtrace progress event %r for %s", event, video_path)
+
+        for video in videos_by_stem.get(Path(video_path).stem, []):
+            if video.status not in _OPEN_STATUSES:
+                continue
+            if event == "started":
+                video.status = AnalysisJobVideoStatus.PROCESSING
+            elif event == "succeeded":
+                video.status = AnalysisJobVideoStatus.SUCCEEDED
+            else:
+                video.status = AnalysisJobVideoStatus.FAILED
+                video.failure_reason = _PIPELINE_FAILURE_REASON
+            db.add(video)
+        db.commit()
+
+    return _on_progress
 
 
 def _upload_artifacts(s3_client: S3Client, output_dir: Path, job: AnalysisJob) -> str | None:
