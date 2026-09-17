@@ -46,10 +46,9 @@ function createTestRouter() {
     routes: [
       { path: '/media', name: 'media', component: MediaBrowserView },
       { path: '/', name: 'home', component: { template: '<div>home</div>' } },
-      // Ticket #52 delivers the real page — this stub is only so
-      // navigation after a successful analysis creation has somewhere to
-      // land in tests, same pattern as SetPasswordView.spec.ts stubbing
-      // its post-submit "login" target.
+      // A stub, not the real AnalysisView — keeps this file's tests from
+      // depending on AnalysisView's own implementation, same pattern as
+      // SetPasswordView.spec.ts stubbing its post-submit "login" target.
       {
         path: '/analyses/:id',
         name: 'analysis-detail',

@@ -19,6 +19,7 @@ import {
   type MediaTokenAction,
 } from '@/services/mediaBrowser'
 import { session } from '@/stores/session'
+import { triggerBrowserDownload } from '@/utils/download'
 
 const router = useRouter()
 
@@ -99,14 +100,13 @@ async function analyzeSelected() {
       selectedTestId.value,
       Array.from(selectedCutKeys.value),
     )
-    // Ticket #52 delivers the actual "analysis-detail" route/page — until
-    // it exists, this push simply has nowhere to land, and Vue Router can
-    // throw synchronously (not just reject) for an unmatched named route.
-    // Caught either way: the analysis job itself was already created
-    // successfully, so a missing destination page must never be reported
-    // as if starting the analysis had failed. Navigated to unconditionally
-    // (not gated on currentToken) — the job was created for whichever Test
-    // was selected at click time regardless of what's since been searched.
+    // Ticket #52's AnalysisView. Navigated to unconditionally (not gated on
+    // currentToken) — the job was created for whichever Test was selected
+    // at click time regardless of what's since been searched. Wrapped in
+    // its own try/catch: the analysis job itself was already created
+    // successfully at this point, so a navigation failure (e.g. a router
+    // guard rejecting it) must never be reported as if starting the
+    // analysis had failed — the two are unrelated outcomes.
     try {
       await router.push({ name: 'analysis-detail', params: { id: job.id } })
     } catch {
@@ -347,13 +347,10 @@ async function downloadCut(cut: Cut) {
   try {
     const token = await requestMediaToken(session.accessToken.value, cut.key, 'download')
     // A native download the browser's Content-Disposition-driven save
-    // dialog handles — not a fetch, so the SPA never buffers the file.
-    const link = document.createElement('a')
-    link.href = mediaStreamUrl(cut.key, 'download', token)
-    link.rel = 'noreferrer'
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
+    // dialog handles — not a fetch, so the SPA never buffers the file. No
+    // filename override: the stream URL is a real navigable request, so the
+    // backend's own Content-Disposition header already names it.
+    triggerBrowserDownload(mediaStreamUrl(cut.key, 'download', token))
   } catch (err) {
     mediaActionError.value = err instanceof Error ? err.message : 'Failed to start download.'
   } finally {

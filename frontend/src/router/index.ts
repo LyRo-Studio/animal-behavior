@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 import AdminView from '@/views/AdminView.vue'
+import AnalysisView from '@/views/AnalysisView.vue'
 import ForgotPasswordView from '@/views/ForgotPasswordView.vue'
 import HomeView from '@/views/HomeView.vue'
 import LoginView from '@/views/LoginView.vue'
@@ -34,6 +35,10 @@ const router = createRouter({
     // Ticket #19: every authenticated Account (User or Admin) gets
     // identical access — no requiresAdmin meta, unlike /admin.
     { path: '/media', name: 'media', component: MediaBrowserView },
+    // Ticket #52: same "every authenticated Account" access as /media above
+    // — issue #44's "Authorization" section gives no extra role gating to
+    // starting/viewing/cancelling one's own analyses.
+    { path: '/analyses/:id', name: 'analysis-detail', component: AnalysisView },
     { path: '/admin', name: 'admin', component: AdminView, meta: { requiresAdmin: true } },
   ],
 })
