@@ -10,6 +10,7 @@ const listDatasetFolderMock = vi.hoisted(() => vi.fn())
 const requestMediaTokenMock = vi.hoisted(() => vi.fn())
 const mediaStreamUrlMock = vi.hoisted(() => vi.fn())
 const getCutMediaInfoMock = vi.hoisted(() => vi.fn())
+const createAnalysisMock = vi.hoisted(() => vi.fn())
 // A real class, not a plain mock: the view does `err instanceof
 // TestNotFoundError`, so the mocked module needs to export the same
 // constructor identity that tests throw instances of.
@@ -31,6 +32,10 @@ vi.mock('@/services/mediaBrowser', () => ({
   CutInfoNotFoundError,
 }))
 
+vi.mock('@/services/analyses', () => ({
+  createAnalysis: createAnalysisMock,
+}))
+
 vi.mock('@/stores/session', () => ({
   session: { accessToken: { value: 'a-token' } },
 }))
@@ -41,6 +46,15 @@ function createTestRouter() {
     routes: [
       { path: '/media', name: 'media', component: MediaBrowserView },
       { path: '/', name: 'home', component: { template: '<div>home</div>' } },
+      // Ticket #52 delivers the real page — this stub is only so
+      // navigation after a successful analysis creation has somewhere to
+      // land in tests, same pattern as SetPasswordView.spec.ts stubbing
+      // its post-submit "login" target.
+      {
+        path: '/analyses/:id',
+        name: 'analysis-detail',
+        component: { template: '<div>analysis</div>' },
+      },
     ],
   })
 }
@@ -68,6 +82,7 @@ describe('MediaBrowserView', () => {
     requestMediaTokenMock.mockReset()
     mediaStreamUrlMock.mockReset()
     getCutMediaInfoMock.mockReset()
+    createAnalysisMock.mockReset()
   })
 
   it('shows filtered suggestions as the user types', async () => {
@@ -608,5 +623,144 @@ describe('MediaBrowserView', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="cut-info-panel"]').exists()).toBe(false)
+  })
+
+  const C1_CUT = SAMPLE_CUT
+  const C2_CUT = {
+    key: 'cuts/T001/T001_C2_ME_F1.mp4',
+    filename: 'T001_C2_ME_F1.mp4',
+    camera: 'C2',
+    condition: 'ME',
+    phase: 'F1',
+    size: 4096,
+    lastModified: '2026-01-01T12:00:00Z',
+  }
+
+  it('disables a C1 Cut checkbox with an explanatory note, leaving a C2 Cut checkable', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([C1_CUT, C2_CUT])
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    const checkboxes = wrapper.findAll<HTMLInputElement>('input[data-testid="select-cut"]')
+    expect(checkboxes[0]!.element.disabled).toBe(true)
+    expect(checkboxes[1]!.element.disabled).toBe(false)
+    const notes = wrapper.findAll('[data-testid="cut-not-analyzable"]')
+    expect(notes).toHaveLength(1)
+  })
+
+  it('leaves "Analyze selected" disabled until a C2 Cut is checked', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([C1_CUT, C2_CUT])
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    const button = wrapper.find<HTMLButtonElement>('[data-testid="analyze-selected"]')
+    expect(button.element.disabled).toBe(true)
+
+    await wrapper.findAll('input[data-testid="select-cut"]')[1]!.setValue(true)
+
+    expect(button.element.disabled).toBe(false)
+  })
+
+  it('clicking a C1 checkbox never selects it', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([C1_CUT])
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    const checkbox = wrapper.find<HTMLInputElement>('input[data-testid="select-cut"]')
+    await checkbox.trigger('change')
+
+    expect(
+      wrapper.find<HTMLButtonElement>('[data-testid="analyze-selected"]').element.disabled,
+    ).toBe(true)
+  })
+
+  it('starts an analysis for the selected C2 Cuts and navigates to its detail page', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([C1_CUT, C2_CUT])
+    createAnalysisMock.mockResolvedValue({ id: 42, testId: 'T001' })
+    const router = createTestRouter()
+    router.push('/media')
+    await router.isReady()
+    const wrapper = mount(MediaBrowserView, { global: { plugins: [router] } })
+    await flushPromises()
+    await searchForSampleCut(wrapper)
+
+    await wrapper.findAll('input[data-testid="select-cut"]')[1]!.setValue(true)
+    await wrapper.find('[data-testid="analyze-selected"]').trigger('click')
+    await flushPromises()
+
+    expect(createAnalysisMock).toHaveBeenCalledWith('a-token', 'T001', [C2_CUT.key])
+    expect(router.currentRoute.value.name).toBe('analysis-detail')
+    expect(router.currentRoute.value.params.id).toBe('42')
+  })
+
+  it('shows the backend validation message when starting an analysis fails', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([C2_CUT])
+    createAnalysisMock.mockRejectedValue(
+      new Error('One or more selected Cuts are not valid C2 analysis input for this Test.'),
+    )
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    await wrapper.find('input[data-testid="select-cut"]').setValue(true)
+    await wrapper.find('[data-testid="analyze-selected"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain(
+      'One or more selected Cuts are not valid C2 analysis input for this Test.',
+    )
+  })
+
+  it('discards a late-failing analysis request from a Test the user has since navigated away from', async () => {
+    listTestIdsMock.mockResolvedValue(['T001', 'T002'])
+    listCutsMock.mockResolvedValueOnce([C2_CUT])
+    let rejectFirst!: (err: Error) => void
+    createAnalysisMock.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => (rejectFirst = reject)),
+    )
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+    await wrapper.find('input[data-testid="select-cut"]').setValue(true)
+    await wrapper.find('[data-testid="analyze-selected"]').trigger('click') // left pending
+
+    listCutsMock.mockResolvedValueOnce([C2_CUT])
+    await wrapper.find('input#test-search').setValue('T002')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    // The stale T001 analysis request fails only after T002 is already showing.
+    rejectFirst(
+      new Error('One or more selected Cuts are not valid C2 analysis input for this Test.'),
+    )
+    await flushPromises()
+
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(
+      wrapper.find<HTMLButtonElement>('[data-testid="analyze-selected"]').element.disabled,
+    ).toBe(true)
+  })
+
+  it('clears the Cut selection when a new search starts', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([C2_CUT])
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+    await wrapper.find('input[data-testid="select-cut"]').setValue(true)
+    expect(
+      wrapper.find<HTMLButtonElement>('[data-testid="analyze-selected"]').element.disabled,
+    ).toBe(false)
+
+    listCutsMock.mockResolvedValue([C2_CUT])
+    await wrapper.find('input#test-search').setValue('T002')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(
+      wrapper.find<HTMLButtonElement>('[data-testid="analyze-selected"]').element.disabled,
+    ).toBe(true)
   })
 })
