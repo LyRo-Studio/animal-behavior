@@ -1,11 +1,11 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.models.account import Account, AccountRole
 from app.models.analysis_job import AnalysisJob, AnalysisJobStatus, AnalysisJobVideoStatus
 from app.services.analyses import create_analysis_job
 
 from tests.doubles import FakeDogTraceRunner, FakeS3Client
+from tests.helpers import create_account
 from worker.dogtrace_runner import ProgressCallback
 from worker.orchestrator import _make_progress_callback, process_next_job
 
@@ -15,24 +15,10 @@ from worker.orchestrator import _make_progress_callback, process_next_job
 # testing strategy).
 
 
-def _create_account(db_session) -> Account:
-    account = Account(
-        email="jan.peeters@vives.be",
-        password_hash=None,
-        display_name="Jan",
-        role=AccountRole.USER,
-        is_active=True,
-    )
-    db_session.add(account)
-    db_session.commit()
-    db_session.refresh(account)
-    return account
-
-
 def _create_job(
     db_session, *, test_id="T001", cuts=("cuts/T001/T001_C2_ME_F1.mp4",)
 ) -> AnalysisJob:
-    account = _create_account(db_session)
+    account = create_account(db_session)
     return create_analysis_job(
         db_session, requested_by=account.id, test_id=test_id, cut_keys=list(cuts)
     )
@@ -239,7 +225,7 @@ def test_process_next_job_survives_an_unhandled_error_and_fails_only_that_job(
 
 def test_process_next_job_processes_only_one_job_at_a_time(db_session, work_root):
     first_job = _create_job(db_session, test_id="T001")
-    account = _create_account_for_second_job(db_session)
+    account = create_account(db_session, email="other@vives.be", display_name="Other")
     second_job = create_analysis_job(
         db_session,
         requested_by=account.id,
@@ -426,17 +412,3 @@ class _SilentDogTraceRunner:
         progress: ProgressCallback | None = None,
     ) -> None:
         pass
-
-
-def _create_account_for_second_job(db_session) -> Account:
-    account = Account(
-        email="other@vives.be",
-        password_hash=None,
-        display_name="Other",
-        role=AccountRole.USER,
-        is_active=True,
-    )
-    db_session.add(account)
-    db_session.commit()
-    db_session.refresh(account)
-    return account

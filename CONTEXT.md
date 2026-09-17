@@ -457,6 +457,24 @@ boundary).
   only mean a previous process died mid-job, never a second worker
   legitimately still owning it, so retrying automatically is safe and
   loses the user's request less often than failing it outright would.
+  **Resolved (ticket #50):** this policy and its DB-level transition
+  (`requeue_stuck_running_jobs`) already shipped as part of #47, but had no
+  test coverage for the worker-process-specific half of recovery — removing
+  a recovered job's now-orphaned temp directory. `worker/worker/__main__.py`'s
+  `requeue_orphaned_jobs` (renamed from the previously-private
+  `_requeue_orphaned_jobs`, matching `process_next_job`'s own
+  not-underscore-prefixed, directly-tested-seam convention) now takes an
+  injected `db: Session` and keyword-only `work_root` instead of opening its
+  own `SessionLocal()` internally, so `worker/tests/test_startup_recovery.py`
+  can exercise it directly against a real (Alembic-migrated) DB and a fake
+  work root. This incidentally fixed a real latent bug, not just added test
+  coverage: the previous version closed its own DB session *before* reading
+  `job.id` in its cleanup loop, and `SessionLocal`'s default
+  `expire_on_commit=True` plus `requeue_stuck_running_jobs`'s internal
+  commit meant that read would have raised `DetachedInstanceError` the
+  first time a real crash ever left a job orphaned — recovery itself would
+  have crashed on the worker's next startup. Never triggered before, since
+  nothing previously exercised this function with an actual stuck job.
 - **Worker build context is the repo root**, not `worker/` — needed so its
   Dockerfile can `COPY` files out of `backend/app` (see "Source reuse"
   above). A new root-level `.dockerignore` keeps that context from
