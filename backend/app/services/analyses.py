@@ -27,6 +27,12 @@ from app.services.media_browser import CutNotFoundError, parse_cut_key
 # analysis input.
 _DOGTRACE_C2_FILENAME_RE = re.compile(r"^T\d{3}_C2_(ME|ZE)_F\d+\.mp4$", re.IGNORECASE)
 
+# The only artifact exposed as a download in v1 (issue #44's "Report
+# persistence" decision) — every other file the worker uploads alongside it
+# under the same `report_s3_prefix` (track_report.xlsx/csv, .pkl files,
+# config.json, trace images) stays un-surfaced.
+REPORT_FILENAME = "casiop_report.xlsx"
+
 
 class EmptyCutSelectionError(Exception):
     """Raised when a request selects zero Cuts — there's nothing to analyze.
@@ -169,6 +175,37 @@ def cancel_analysis_job(db: Session, *, requested_by: int, analysis_id: int) -> 
     db.commit()
     db.refresh(job)
     return job
+
+
+class AnalysisReportNotAvailableError(Exception):
+    """Raised when `analysis_id`'s job hasn't reached a terminal state with
+    at least one succeeded video (ticket #49's acceptance criteria).
+    Equivalent to checking `job.status not in {COMPLETED,
+    COMPLETED_WITH_ERRORS}` — `finalize_analysis_job` only ever reaches one
+    of those two statuses when at least one video succeeded, so no separate
+    per-video count is needed here."""
+
+
+def get_analysis_report_key(db: Session, *, requested_by: int, analysis_id: int) -> str:
+    """The S3 key of `requested_by`'s own `analysis_id` job's combined
+    report (ticket #49), or raise if it isn't downloadable yet.
+
+    Raises AnalysisJobNotFoundError for a nonexistent id or one owned by a
+    different Account (same scoping as `get_analysis_job` — a job's
+    existence and its report's availability must be equally invisible to
+    another Account). Raises AnalysisReportNotAvailableError for a job not
+    yet in a terminal state with an uploaded report — `report_s3_prefix`
+    is checked directly (rather than trusting `status` alone) since it's
+    the one field `finalize_analysis_job` guarantees is only set once
+    something was actually uploaded.
+    """
+    job = get_analysis_job(db, requested_by=requested_by, analysis_id=analysis_id)
+    if (
+        job.status not in (AnalysisJobStatus.COMPLETED, AnalysisJobStatus.COMPLETED_WITH_ERRORS)
+        or job.report_s3_prefix is None
+    ):
+        raise AnalysisReportNotAvailableError(job.status)
+    return f"{job.report_s3_prefix}{REPORT_FILENAME}"
 
 
 def claim_next_queued_job(db: Session, *, dogtrace_version: str) -> AnalysisJob | None:

@@ -212,6 +212,29 @@ class BotoS3Client:
         )
 
 
+# A response's body is read from S3 this many bytes at a time via
+# `iter_object_range`, so a caller never materializes more than one chunk of
+# an object in memory at once — regardless of how large the requested range
+# is, including "the whole object" (ENGINEERING-STANDARDS.md's DoS-
+# protection guidance: "avoid unbounded... processing of unbounded input").
+# Shared by media_browser's Cut streaming (ticket #21) and the analysis
+# report download (ticket #49) — the two current callers.
+STREAM_CHUNK_BYTES = 1 * 1024 * 1024
+
+
+def iter_object_range(s3: S3Client, key: str, start: int, end: int) -> Iterator[bytes]:
+    """Yield `key`'s bytes in [start, end] (inclusive) as successive
+    `STREAM_CHUNK_BYTES`-sized reads from S3 — the actual no-full-buffering
+    guarantee: true regardless of how large [start, end] is, including the
+    entire object.
+    """
+    position = start
+    while position <= end:
+        chunk_end = min(position + STREAM_CHUNK_BYTES - 1, end)
+        yield s3.read_range(key, position, chunk_end)
+        position = chunk_end + 1
+
+
 _s3_client: S3Client | None = None
 
 
