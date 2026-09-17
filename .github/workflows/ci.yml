@@ -74,6 +74,60 @@ jobs:
         # (ticket #23) — no S3 credentials needed here.
         run: .venv/bin/pytest
 
+  worker:
+    runs-on: [self-hosted, linux, x64, production]
+
+    # Its own throwaway Postgres, same reasoning as the backend job's above
+    # — a different port (5434) so the two jobs never collide even if this
+    # runner ever runs them concurrently.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: animal_behavior
+          POSTGRES_PASSWORD: animal_behavior
+          POSTGRES_DB: animal_behavior
+        ports:
+          - 127.0.0.1:5434:5432
+        options: >-
+          --health-cmd "pg_isready -U animal_behavior"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://animal_behavior:animal_behavior@localhost:5434/animal_behavior
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # See the backend job's checkout step above — same shared-workspace
+          # reasoning.
+          clean: false
+
+      - name: Install dependencies
+        working-directory: worker
+        # worker/pyproject.toml's `pythonpath` points `app.*` straight at
+        # ../backend's own source (ticket #47's "reuse, not a package
+        # install" decision) — this venv only needs worker/requirements*.txt
+        # installed, never backend's.
+        run: |
+          rm -rf .venv
+          python3 -m venv .venv
+          .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff check)
+        working-directory: worker
+        run: .venv/bin/ruff check .
+
+      - name: Format check (ruff format)
+        working-directory: worker
+        run: .venv/bin/ruff format --check .
+
+      - name: Test (pytest)
+        working-directory: worker
+        run: .venv/bin/pytest
+
   frontend:
     runs-on: [self-hosted, linux, x64, production]
 

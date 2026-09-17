@@ -171,6 +171,107 @@ def cancel_analysis_job(db: Session, *, requested_by: int, analysis_id: int) -> 
     return job
 
 
+def claim_next_queued_job(db: Session, *, dogtrace_version: str) -> AnalysisJob | None:
+    """Atomically claim the oldest still-`queued` AnalysisJob for the
+    worker (ticket #47) to run, or None if the queue is empty.
+
+    `SELECT ... FOR UPDATE SKIP LOCKED` (issue #44's "Queue: Postgres
+    itself" decision) — with exactly one worker process this never
+    actually contends, but it's what makes the design safe to later run
+    more than one worker without double-processing a job, and it's also
+    the row lock `cancel_analysis_job` documents racing against: either
+    that transaction commits the cancellation first (this then simply
+    finds no queued row) or this commits the claim first (cancel then
+    sees `status=running` and correctly refuses).
+
+    Sets `status=running`, `started_at`, and `dogtrace_version` as part of
+    the same claim (ticket #47: "On claiming a job: status -> running,
+    started_at set, dogtrace_version recorded") so a claimed job is never
+    observably `queued` with no owner.
+    """
+    job = db.scalar(
+        select(AnalysisJob)
+        .where(AnalysisJob.status == AnalysisJobStatus.QUEUED)
+        .order_by(AnalysisJob.created_at.asc())
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+    if job is None:
+        return None
+
+    job.status = AnalysisJobStatus.RUNNING
+    job.started_at = datetime.now(UTC)
+    job.dogtrace_version = dogtrace_version
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def finalize_analysis_job(
+    db: Session, job: AnalysisJob, *, report_s3_prefix: str | None
+) -> AnalysisJob:
+    """Set `job`'s terminal status from its videos' already-recorded final
+    statuses (issue #44's job state machine): `completed` if every video
+    succeeded, `completed_with_errors` if at least one succeeded and at
+    least one failed, `failed` if none succeeded (including a job that
+    errored before any video could be attempted, per ticket #47 — the
+    caller marks every such video `failed` before calling this).
+
+    Call only after any produced artifacts are already durably uploaded —
+    `report_s3_prefix` (and thus `AnalysisJob.report_available`) must never
+    point at an S3 prefix that doesn't actually hold anything yet.
+    """
+    video_statuses = {video.status for video in job.videos}
+    if video_statuses <= {AnalysisJobVideoStatus.SUCCEEDED}:
+        job.status = AnalysisJobStatus.COMPLETED
+    elif AnalysisJobVideoStatus.SUCCEEDED in video_statuses:
+        job.status = AnalysisJobStatus.COMPLETED_WITH_ERRORS
+    else:
+        job.status = AnalysisJobStatus.FAILED
+
+    job.report_s3_prefix = report_s3_prefix
+    job.finished_at = datetime.now(UTC)
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def requeue_stuck_running_jobs(db: Session) -> list[AnalysisJob]:
+    """Reset every AnalysisJob still `running` back to `queued` (and its
+    videos back to `pending`, clearing any failure_reason), returning the
+    jobs that were reset.
+
+    Meant to be called once, before the worker (ticket #47) starts polling.
+    Exactly one worker instance ever processes jobs (issue #44's
+    concurrency strategy), so an AnalysisJob still `running` at worker
+    startup can only mean a previous worker process crashed or was
+    restarted mid-job, never a different, still-active worker legitimately
+    owning it. Requeuing (rather than marking `failed`) means the user's
+    request is retried automatically instead of silently lost — see
+    CONTEXT.md's "Analysis worker" decision on this choice; issue #44
+    explicitly left the exact policy open. The caller is responsible for
+    removing each returned job's now-orphaned temp directory, since this
+    module has no opinion on worker filesystem layout.
+    """
+    jobs = list(
+        db.scalars(select(AnalysisJob).where(AnalysisJob.status == AnalysisJobStatus.RUNNING))
+    )
+    for job in jobs:
+        job.status = AnalysisJobStatus.QUEUED
+        job.started_at = None
+        job.dogtrace_version = None
+        db.add(job)
+        for video in job.videos:
+            video.status = AnalysisJobVideoStatus.PENDING
+            video.failure_reason = None
+            db.add(video)
+    if jobs:
+        db.commit()
+    return jobs
+
+
 def list_analysis_jobs(
     db: Session, *, requested_by: int, test_id: str | None = None
 ) -> list[AnalysisJob]:

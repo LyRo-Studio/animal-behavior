@@ -355,3 +355,89 @@ authenticated with only the workflow's own `GITHUB_TOKEN`
   image prune`) if/when this becomes a real problem — not solved
   proactively here to avoid an unattended job that could prune an image a
   manual rollback still needs.
+
+**Analysis worker (ticket #47, part of #44):** the `worker` Docker service
+that claims a `queued` `AnalysisJob`, runs it through DogTrace, and
+persists the result — see issue #44 for the full design (job state
+machine, S3 input flow, report persistence, DogTrace integration
+boundary).
+
+- **Source reuse, not a package install:** `worker/Dockerfile` builds
+  `FROM lynndelaere/dogtrace:1.0.0` and `COPY`s specific files out of
+  `backend/app` (core config, db, models, and the FastAPI-free service
+  modules `s3_client.py`/`media_browser.py`/`analyses.py`) directly into
+  the image, rather than installing the backend as a package or
+  reimplementing S3/DB access a second time — same "no parallel client"
+  principle as `s3_client.py`'s own move into the backend. The worker's
+  `requirements.txt` deliberately excludes `fastapi`, `argon2-cffi`, and
+  `pyjwt` — nothing it imports needs them (backend's `app/api` and
+  `app/main.py` are never copied in). Locally/in tests (outside that
+  image), `worker/pyproject.toml`'s `pythonpath` points straight at
+  `../backend` instead, so `app.*` resolves to the exact same source with
+  no duplicated copy on disk either way.
+- **Job-lifecycle DB transitions live in `backend/app/services/analyses.py`**
+  (`claim_next_queued_job`, `finalize_analysis_job`,
+  `requeue_stuck_running_jobs`), alongside `create_analysis_job`/
+  `cancel_analysis_job` from tickets #45/#46 — one module owns the whole
+  `AnalysisJob` state machine regardless of whether the API or the worker
+  drives a given transition, rather than splitting job-state logic across
+  two places that could drift.
+- **Per-video success/failure is inferred from output artifacts, not a
+  return value:** `dogtrace.runner.run_reporting` has no progress callback
+  yet (ticket #48, blocked on an upstream DogTrace change) and only
+  returns a whole-batch int. `dogtrace.reporting_v24.VideoReport.from_video`
+  creates `output_dir/<video_stem>/<timestamp>/` up front for every video
+  regardless of outcome, so that directory's mere existence can't signal
+  success — `track_report.xlsx` is only written once that video's own
+  pipeline run actually completes, so the worker globs for
+  `<video_stem>/*/track_report.xlsx` as the real per-video completion
+  marker (see `worker/orchestrator.py`'s `_video_produced_output`).
+- **A Cut missing from S3 at download time fails only that video, not the
+  whole job** — Cut keys are validated for shape at request time
+  (`POST /analyses`) but never checked against S3 until the worker
+  downloads them (see `InvalidCutSelectionError`'s docstring), so a Cut
+  deleted in the interim is treated the same as any other per-video
+  pipeline failure: that video is marked `failed`, the rest of the job's
+  videos still run.
+- **`report_s3_prefix` is only set if something was actually uploaded:**
+  the worker uploads every file under the job's output directory (not
+  just `casiop_report.xlsx`) to `reports/<test_id>/<analysis_id>/`, but
+  leaves `report_s3_prefix` (and thus `AnalysisJob.report_available`)
+  `null` if that directory was empty or never created — e.g. every
+  requested Cut failed to download, so DogTrace was never even invoked.
+  `report_available` must never point at an S3 prefix with nothing in it.
+- **Crash recovery: requeue, not fail.** Issue #44 explicitly left the
+  exact policy for a job orphaned `running` by a crashed/restarted worker
+  open ("to be finalized during implementation"). Chosen: on worker
+  startup, any `AnalysisJob` still `running` is reset to `queued` (and its
+  videos back to `pending`) rather than marked `failed` — with exactly one
+  worker instance ever processing jobs, a `running` row at startup can
+  only mean a previous process died mid-job, never a second worker
+  legitimately still owning it, so retrying automatically is safe and
+  loses the user's request less often than failing it outright would.
+- **Worker build context is the repo root**, not `worker/` — needed so its
+  Dockerfile can `COPY` files out of `backend/app` (see "Source reuse"
+  above). A new root-level `.dockerignore` keeps that context from
+  pulling in `.git`, `.env`, `backend/.venv`, `frontend/node_modules`, etc.
+  (`backend`'s and `frontend`'s own Dockerfiles keep their existing scoped
+  contexts and `.dockerignore` files unchanged).
+- **`docker-compose.yml` only** (not `docker-compose.prod.yml`) gets the
+  new `worker` service this ticket — a prod image-override entry mirroring
+  `backend`/`frontend`'s pattern is deferred to the Docker/CI/CD wiring
+  phase issue #44 describes separately.
+- **`worker` sits behind a Compose profile (`profiles: ["worker"]`)** —
+  its GPU device reservation means a bare `docker compose up` would
+  otherwise fail outright on any machine without an NVIDIA GPU +
+  nvidia-container-toolkit (e.g. a contributor's laptop), taking
+  db/backend/frontend down with it even though none of them need a GPU.
+  `docker compose --profile worker up` opts in explicitly; the production
+  box (which has the GPU) is expected to always pass that flag.
+- **Follow-up, not fixed here:** if the worker crashes mid-job after
+  partially uploading output but before `finalize_analysis_job` commits,
+  `requeue_stuck_running_jobs` retries the job on restart, but nothing
+  deletes the first attempt's already-uploaded files first — DogTrace's
+  own per-video timestamp subfolder means the retry's output tree won't
+  exactly overwrite the first attempt's, so stray files can accumulate
+  under that job's `reports/<test_id>/<analysis_id>/` prefix. `S3Client`
+  has no delete capability today; adding one just for this is deferred
+  until it's an actual problem, not speculatively built into this ticket.

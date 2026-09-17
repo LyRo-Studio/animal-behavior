@@ -129,6 +129,19 @@ class Settings(BaseSettings):
     cut_info_rate_limit_max_attempts_per_account: int = 30
     cut_info_rate_limit_window_seconds: int = 300
 
+    # Ticket #47 (Analysis worker, part of #44): polling interval and the
+    # job-scoped temp-file root for the separate `worker` Docker service —
+    # see CONTEXT.md's "Analysis worker" decisions. Settings is reused as-is
+    # by the worker (no FastAPI dependency of its own), same as
+    # database_url/s3_* above; these two are meaningless to the backend
+    # process itself. The default lives under `/data` — the one directory
+    # the `lynndelaere/dogtrace:1.0.0` base image's own non-root `dogtrace`
+    # user (uid 10001, which the worker container runs as) already owns;
+    # `/var/lib/...` or similar would need an extra chown step to be
+    # writable by that user at all.
+    analysis_worker_poll_interval_seconds: float = 5.0
+    analysis_worker_work_dir: str = "/data/analysis-worker"
+
     @property
     def cors_origin_list(self) -> list[str]:
         """CORS_ORIGINS as a comma-separated env var, split into a list."""
