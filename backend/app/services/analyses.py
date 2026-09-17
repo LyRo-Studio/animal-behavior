@@ -5,11 +5,17 @@ actually claims and runs it.
 """
 
 import re
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.analysis_job import AnalysisJob, AnalysisJobVideo, AnalysisJobVideoStatus
+from app.models.analysis_job import (
+    AnalysisJob,
+    AnalysisJobStatus,
+    AnalysisJobVideo,
+    AnalysisJobVideoStatus,
+)
 from app.services.media_browser import CutNotFoundError, parse_cut_key
 
 # DogTrace only ever processes camera C2, and only a filename matching this
@@ -111,6 +117,57 @@ def get_analysis_job(db: Session, *, requested_by: int, analysis_id: int) -> Ana
     )
     if job is None:
         raise AnalysisJobNotFoundError(analysis_id)
+    return job
+
+
+class AnalysisJobNotCancellableError(Exception):
+    """Raised when cancelling an AnalysisJob that isn't `queued` — a
+    `running` job cannot be cancelled in v1 (issue #44's "Functional
+    requirements": "A queued (not yet started) job can be cancelled. A
+    running job cannot be cancelled in v1."), and cancelling an already-
+    terminal job (`completed`/`completed_with_errors`/`failed`/`cancelled`)
+    makes no sense either."""
+
+
+def cancel_analysis_job(db: Session, *, requested_by: int, analysis_id: int) -> AnalysisJob:
+    """Cancel `requested_by`'s own `queued` AnalysisJob `analysis_id`.
+
+    Raises AnalysisJobNotFoundError for a nonexistent id or one owned by a
+    different Account (same scoping as `get_analysis_job`), and
+    AnalysisJobNotCancellableError if it's not currently `queued` — in
+    particular, a `running` job is left untouched, not cancelled out from
+    under the worker processing it. A `queued` job never had a temp
+    directory created (issue #44's "S3 input flow" step 5), so there's
+    nothing to clean up here.
+
+    `SELECT ... FOR UPDATE` rather than plain `get_analysis_job`: this is a
+    read-then-write against the same row the worker (ticket #47) claims via
+    its own `SELECT ... FOR UPDATE SKIP LOCKED`. Locking here means the two
+    can never race to completion on the same row — either this transaction
+    commits the cancellation first (the worker's claim then simply finds no
+    queued row), or the worker's claim commits first (this blocks until it
+    does, then sees `status=running` and correctly refuses to cancel).
+    """
+    job = db.scalar(
+        select(AnalysisJob)
+        .where(AnalysisJob.id == analysis_id, AnalysisJob.requested_by == requested_by)
+        .with_for_update()
+    )
+    if job is None:
+        raise AnalysisJobNotFoundError(analysis_id)
+    if job.status != AnalysisJobStatus.QUEUED:
+        raise AnalysisJobNotCancellableError(job.status)
+
+    job.status = AnalysisJobStatus.CANCELLED
+    # Cancellation is a terminal state (issue #44's "Job state machine":
+    # `queued` -> `cancelled` alongside the `running` -> {completed, ...}
+    # terminal transitions) — finished_at marks *any* terminal state, not
+    # just a worker-run one, so callers can't tell "cancelled" and
+    # "never finished" apart by a null finished_at.
+    job.finished_at = datetime.now(UTC)
+    db.add(job)
+    db.commit()
+    db.refresh(job)
     return job
 
 
