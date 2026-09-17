@@ -538,3 +538,28 @@ serves `<report_s3_prefix>casiop_report.xlsx` — the only artifact of
   never gets fully buffered in memory (`ENGINEERING-STANDARDS.md`'s DoS
   guidance), same mechanism as Cut streaming just without the Range-parsing
   half of it.
+
+**Analysis detail/progress view (ticket #52):** `AnalysisView.vue`
+(`/analyses/:id`), reached from `MediaBrowserView`'s "Analyze selected"
+button. Polls `GET /analyses/{id}` every 2s while `status` is
+`queued`/`running` (stops once terminal/cancelled — nothing left to
+change), same `setTimeout`-based poll/retry shape as `StatusView.vue`'s
+health check.
+
+- **Report download is `fetch` + `Blob` + a synthetic `<a download>` click,
+  not a plain `<a href>`:** the frontend half of the #49 decision above —
+  since the endpoint is bearer-authenticated (not a token-in-URL the
+  browser's own navigation can carry), `analyses.ts`'s
+  `downloadAnalysisReport` fetches the file with the normal
+  `Authorization` header and returns a `Blob`; the view turns that into an
+  object URL only long enough to trigger the save, then revokes it.
+- **Download button gated on `job.reportAvailable` alone**, not a
+  client-side "terminal && ≥1 succeeded" recomputation — the backend field
+  already means exactly that (see `AnalysisJob.report_available`'s
+  docstring), so re-deriving it here would just be a second, driftable copy
+  of the same rule.
+- **"Processed" count, not "succeeded" count, drives the running-state
+  progress text:** `{{ processedCount }}/{{ totalCount }} videos` counts
+  every non-`pending` video (succeeded *and* failed), matching the ticket's
+  own "2/5 videos, current: ..." example read as "how far through the
+  batch", not "how many have succeeded so far".

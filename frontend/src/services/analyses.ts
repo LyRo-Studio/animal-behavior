@@ -86,3 +86,93 @@ export async function createAnalysis(
 
   return toAnalysisJob(await response.json())
 }
+
+// Thrown by getAnalysis/cancelAnalysis specifically for "no such job, or not
+// this Account's" (backend 404 — the two are deliberately indistinguishable,
+// see AnalysisJobNotFoundError's docstring) — kept distinct from a generic
+// failure, same reasoning as TestNotFoundError in mediaBrowser.ts. Not
+// thrown by downloadAnalysisReport below: its 404 has a second, different
+// cause with its own backend-provided message (see that function).
+export class AnalysisNotFoundError extends Error {}
+
+// Thrown by getAnalysis/cancelAnalysis when the access token has expired or
+// is otherwise invalid (backend/app/api/deps.py's get_current_account always
+// returns 401 "Not authenticated" for this — never anything else, per its
+// own docstring). Kept distinct from a generic failure so AnalysisView can
+// stop polling and point the user at logging in again instead of retrying
+// forever against a token that will never become valid on its own — no view
+// in this app currently rotates the access token mid-session (that only
+// happens once, in the router guard, via session.ensureSession()).
+export class AnalysisUnauthorizedError extends Error {}
+
+// Shared by getAnalysis/cancelAnalysis, whose 404 always means the same
+// thing ("no such job, or not this Account's") — downloadAnalysisReport
+// below does its own request/response handling instead, since its 404
+// doesn't share that single meaning.
+async function requestAnalysisJob(
+  url: string,
+  init: RequestInit,
+  fallback: string,
+): Promise<AnalysisJob> {
+  const response = await fetch(url, init)
+
+  if (response.status === 404) {
+    throw new AnalysisNotFoundError('Analysis not found.')
+  }
+  if (response.status === 401) {
+    throw new AnalysisUnauthorizedError('Not authenticated')
+  }
+  if (!response.ok) {
+    throw await errorFromResponse(response, fallback)
+  }
+
+  return toAnalysisJob(await response.json())
+}
+
+// Ticket #52: polled by AnalysisView while a job is queued/running.
+export async function getAnalysis(accessToken: string, id: number): Promise<AnalysisJob> {
+  return requestAnalysisJob(
+    `${API_BASE_URL}/analyses/${id}`,
+    { headers: authHeaders(accessToken) },
+    'Failed to load analysis.',
+  )
+}
+
+// Ticket #46's POST /analyses/{id}/cancel rejects (409) with a user-safe
+// `detail` string ("Only a queued analysis can be cancelled.") when the job
+// isn't queued anymore — surfaced as-is via errorFromResponse (inside
+// requestAnalysisJob), same as createAnalysis's 400 above; no dedicated
+// error class needed since the view just shows it inline, same treatment as
+// any other action error.
+export async function cancelAnalysis(accessToken: string, id: number): Promise<AnalysisJob> {
+  return requestAnalysisJob(
+    `${API_BASE_URL}/analyses/${id}/cancel`,
+    { method: 'POST', headers: authHeaders(accessToken) },
+    'Failed to cancel analysis.',
+  )
+}
+
+// Ticket #49's GET /analyses/{id}/report is a plain bearer-authenticated
+// download (CONTEXT.md's "Analysis report download" decision) — unlike
+// mediaBrowser.ts's media-token-authenticated streaming, there's no native
+// <a>/<video> request involved, so this fetches the file directly (with the
+// normal Authorization header) and hands back a Blob for the caller to save
+// via a synthetic download link.
+export async function downloadAnalysisReport(accessToken: string, id: number): Promise<Blob> {
+  const response = await fetch(`${API_BASE_URL}/analyses/${id}/report`, {
+    headers: authHeaders(accessToken),
+  })
+
+  if (!response.ok) {
+    // Unlike getAnalysis/cancelAnalysis, this endpoint's 404 has two
+    // distinct causes with two distinct backend-provided messages
+    // (backend/app/api/analyses.py's download_analysis_report): "Analysis
+    // not found" for an unknown/another Account's job id, vs "Report not
+    // found" for a report_available job whose S3 object went missing
+    // regardless. The backend already picked the right one — surfaced as-is
+    // rather than collapsed into a single hardcoded message here.
+    throw await errorFromResponse(response, 'Failed to download report.')
+  }
+
+  return response.blob()
+}
