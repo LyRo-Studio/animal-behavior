@@ -76,6 +76,13 @@ class S3Client(Protocol):
         but was deleted before this call ran."""
         ...
 
+    def upload_file(self, local_path: Path, key: str) -> None:
+        """Upload the local file at `local_path` to `key`, creating it (or
+        overwriting whatever already exists there) — the analysis worker's
+        report-persistence step (ticket #47, part of #44), the only current
+        caller."""
+        ...
+
 
 class BotoS3Client:
     """Real S3Client, backed by boto3. Works with S3-compatible storage
@@ -187,6 +194,22 @@ class BotoS3Client:
             raise
         temp_path.replace(local_path)
         return local_path
+
+    def upload_file(self, local_path: Path, key: str) -> None:
+        # Same multipart tuning as download_file — report artifacts can
+        # include the rendered/annotated videos DogTrace produces, not just
+        # small report files.
+        self._client.upload_file(
+            Filename=str(local_path),
+            Bucket=self._bucket_name,
+            Key=key,
+            Config=TransferConfig(
+                multipart_threshold=64 * 1024 * 1024,
+                multipart_chunksize=64 * 1024 * 1024,
+                max_concurrency=4,
+                use_threads=True,
+            ),
+        )
 
 
 _s3_client: S3Client | None = None

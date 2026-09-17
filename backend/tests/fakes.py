@@ -100,6 +100,9 @@ class FakeS3Client:
         local_path.write_bytes(self.objects[key])
         return local_path
 
+    def upload_file(self, local_path: Path, key: str) -> None:
+        self.objects[key] = Path(local_path).read_bytes()
+
 
 @dataclass
 class FakeMediaProber:

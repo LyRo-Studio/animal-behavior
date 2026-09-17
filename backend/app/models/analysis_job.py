@@ -78,9 +78,10 @@ class AnalysisJob(Base):
     @property
     def report_available(self) -> bool:
         """Whether `GET /analyses/{id}/report` (ticket #49) has something to
-        serve. Until the worker exists (ticket #47), this is always False —
-        exposing this derived flag rather than `report_s3_prefix` itself
-        keeps the API from leaking the internal S3 layout to the frontend."""
+        serve. True once the worker (ticket #47) has uploaded at least one
+        artifact for this job — exposing this derived flag rather than
+        `report_s3_prefix` itself keeps the API from leaking the internal S3
+        layout to the frontend."""
         return self.report_s3_prefix is not None
 
 

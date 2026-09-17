@@ -1,0 +1,20 @@
+# Applies to any build using the repo root as its context — currently only
+# worker/Dockerfile (docker-compose.yml's `worker` service), which needs
+# repo-root context to reuse backend/app source (see worker/Dockerfile).
+# backend/Dockerfile and frontend/Dockerfile use their own scoped contexts
+# and .dockerignore files instead.
+.git
+.env
+.env.*
+!.env.example
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+backend/.venv
+backend/tests
+worker/.venv
+worker/tests
+frontend/node_modules
+frontend/dist
+companystyle

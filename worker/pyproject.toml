@@ -1,0 +1,18 @@
+[project]
+name = "animal-behavior-worker"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+# `../backend` resolves `app.*` to the backend's own source (see
+# worker/Dockerfile's COPY steps for the runtime equivalent) — never a
+# duplicated copy on disk for tests.
+pythonpath = [".", "../backend"]
+testpaths = ["tests"]
