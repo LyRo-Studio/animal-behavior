@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.accounts import router as accounts_router
 from app.api.admin import router as admin_router
+from app.api.analyses import router as analyses_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.api.media_browser import public_router as media_stream_router
@@ -47,3 +48,4 @@ app.include_router(accounts_router)
 app.include_router(admin_router)
 app.include_router(media_browser_router)
 app.include_router(media_stream_router)
+app.include_router(analyses_router)
