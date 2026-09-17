@@ -1,4 +1,4 @@
-import { API_BASE_URL } from '@/services/apiBase'
+import { API_BASE_URL, authHeaders, errorFromResponse } from '@/services/apiBase'
 
 export type AdminAccountRole = 'admin' | 'user'
 
@@ -40,18 +40,6 @@ export class DeactivatedAccountExistsError extends Error {
     this.name = 'DeactivatedAccountExistsError'
     this.existingAccountId = existingAccountId
   }
-}
-
-async function errorFromResponse(response: Response, fallback: string): Promise<Error> {
-  // The backend gives a specific reason (bad domain, duplicate email, admin
-  // account, unknown id, ...) for these Admin-only endpoints — unlike
-  // login, there's no reason to hide it.
-  const body = await response.json().catch(() => null)
-  return new Error(typeof body?.detail === 'string' ? body.detail : fallback)
-}
-
-function authHeaders(accessToken: string): HeadersInit {
-  return { Authorization: `Bearer ${accessToken}` }
 }
 
 export async function listAccounts(accessToken: string): Promise<AdminAccount[]> {

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 
+import { createAnalysis } from '@/services/analyses'
 import {
   CutInfoNotFoundError,
   DatasetFolderNotFoundError,
@@ -17,6 +19,8 @@ import {
   type MediaTokenAction,
 } from '@/services/mediaBrowser'
 import { session } from '@/stores/session'
+
+const router = useRouter()
 
 const testIds = ref<string[]>([])
 const isLoadingTestIds = ref(true)
@@ -35,6 +39,88 @@ const cuts = ref<Cut[] | null>(null)
 const isLoadingCuts = ref(false)
 const cutsError = ref<string | null>(null)
 const notFound = ref(false)
+
+// Ticket #51: which of the current search's Cuts are checked for analysis.
+// A Set (not a per-Cut boolean map) so "any selected?" is a single
+// `.size` check rather than scanning every Cut. Reset on every new search
+// (see `search`) — a selection never survives past the Cuts it was made
+// against, same "never leaves a stale ... showing" rule the player/info
+// panel already follow.
+const selectedCutKeys = ref<Set<string>>(new Set())
+const isCreatingAnalysis = ref(false)
+const analysisError = ref<string | null>(null)
+
+// Only a C2 Cut is ever valid DogTrace analysis input (CONTEXT.md's
+// "DogTrace integration boundary" decision) — this is the one rule that
+// decides both whether a Cut's checkbox is selectable at all and whether
+// it shows the "not analyzable" note.
+function isAnalyzable(cut: Cut): boolean {
+  return cut.camera === 'C2'
+}
+
+function isCutSelected(cut: Cut): boolean {
+  return selectedCutKeys.value.has(cut.key)
+}
+
+function toggleCutSelection(cut: Cut) {
+  if (!isAnalyzable(cut)) return
+  const next = new Set(selectedCutKeys.value)
+  if (next.has(cut.key)) {
+    next.delete(cut.key)
+  } else {
+    next.add(cut.key)
+  }
+  selectedCutKeys.value = next
+}
+
+// Same stale-response guard as `searchToken`/`datasetLoadToken` above,
+// bumped by `search()` too — an analysis request left in flight when the
+// user starts searching a different Test must never write its eventual
+// error (or clear the new search's spinner state) into that new Test's
+// now-unrelated context.
+let analysisToken = 0
+
+async function analyzeSelected() {
+  if (
+    selectedCutKeys.value.size === 0 ||
+    !selectedTestId.value ||
+    !session.accessToken.value ||
+    isCreatingAnalysis.value
+  ) {
+    return
+  }
+
+  const currentToken = ++analysisToken
+  isCreatingAnalysis.value = true
+  analysisError.value = null
+  try {
+    const job = await createAnalysis(
+      session.accessToken.value,
+      selectedTestId.value,
+      Array.from(selectedCutKeys.value),
+    )
+    // Ticket #52 delivers the actual "analysis-detail" route/page — until
+    // it exists, this push simply has nowhere to land, and Vue Router can
+    // throw synchronously (not just reject) for an unmatched named route.
+    // Caught either way: the analysis job itself was already created
+    // successfully, so a missing destination page must never be reported
+    // as if starting the analysis had failed. Navigated to unconditionally
+    // (not gated on currentToken) — the job was created for whichever Test
+    // was selected at click time regardless of what's since been searched.
+    try {
+      await router.push({ name: 'analysis-detail', params: { id: job.id } })
+    } catch {
+      // See above.
+    }
+  } catch (err) {
+    if (currentToken !== analysisToken) return
+    analysisError.value = err instanceof Error ? err.message : 'Failed to start analysis.'
+  } finally {
+    if (currentToken === analysisToken) {
+      isCreatingAnalysis.value = false
+    }
+  }
+}
 
 // A Test id always starts with "T"/"t" followed only by digits
 // (CONTEXT.md's "Test" term, e.g. "T001") — anything else (e.g. "hallo")
@@ -113,10 +199,17 @@ async function search(testId: string) {
   cutsError.value = null
   isLoadingCuts.value = true
   // A new search's Cuts share no relationship with whatever was playing
-  // (or had its info panel open) for the previous Test — never leave a
-  // stale player or info panel showing.
+  // (or had its info panel open, or selected for analysis) for the
+  // previous Test — never leave a stale player, info panel, or selection
+  // showing. Bumping analysisToken orphans any analyzeSelected() call
+  // still in flight for the old Test, so its eventual error can't land
+  // here either.
   closePlayback()
   openInfoCutKey.value = null
+  selectedCutKeys.value = new Set()
+  analysisError.value = null
+  isCreatingAnalysis.value = false
+  analysisToken++
 
   try {
     const result = await listCuts(session.accessToken.value, trimmed)
@@ -394,6 +487,9 @@ onMounted(() => {
           <p v-if="mediaActionError" class="mt-2 text-sm text-danger" role="alert">
             {{ mediaActionError }}
           </p>
+          <p v-if="analysisError" class="mt-2 text-sm text-danger" role="alert">
+            {{ analysisError }}
+          </p>
           <video
             v-if="playbackUrl"
             data-testid="cut-player"
@@ -414,6 +510,9 @@ onMounted(() => {
           <table class="mt-4 w-full text-left text-sm">
             <thead>
               <tr class="border-b border-border text-muted">
+                <th class="py-2 pr-4 font-medium">
+                  <span class="sr-only">Select for analysis</span>
+                </th>
                 <th class="py-2 pr-4 font-medium">Filename</th>
                 <th class="py-2 pr-4 font-medium">Camera</th>
                 <th class="py-2 pr-4 font-medium">Condition</th>
@@ -426,6 +525,25 @@ onMounted(() => {
             <tbody>
               <template v-for="cut in cuts" :key="cut.key">
                 <tr class="border-b border-border">
+                  <td class="py-2 pr-4">
+                    <input
+                      type="checkbox"
+                      data-testid="select-cut"
+                      :aria-label="`Select ${cut.filename} for analysis`"
+                      :checked="isCutSelected(cut)"
+                      :disabled="!isAnalyzable(cut)"
+                      class="disabled:cursor-not-allowed disabled:opacity-50"
+                      @change="toggleCutSelection(cut)"
+                    />
+                    <span
+                      v-if="!isAnalyzable(cut)"
+                      data-testid="cut-not-analyzable"
+                      class="mt-1 block text-xs text-muted"
+                      title="CASOP only ever analyzes C2 recordings."
+                    >
+                      Not analyzable
+                    </span>
+                  </td>
                   <td class="py-2 pr-4">{{ cut.filename }}</td>
                   <td class="py-2 pr-4">{{ cut.camera ?? '—' }}</td>
                   <td class="py-2 pr-4">{{ cut.condition ?? '—' }}</td>
@@ -464,7 +582,7 @@ onMounted(() => {
                   </td>
                 </tr>
                 <tr v-if="isCutInfoOpen(cut)" class="border-b border-border">
-                  <td colspan="7" class="bg-background px-2 py-3" data-testid="cut-info-panel">
+                  <td colspan="8" class="bg-background px-2 py-3" data-testid="cut-info-panel">
                     <p v-if="cutInfoInFlight[cut.key]" class="text-sm text-muted">Loading…</p>
                     <p v-else-if="cutInfoError[cut.key]" class="text-sm text-danger" role="alert">
                       {{ cutInfoError[cut.key] }}
@@ -495,6 +613,15 @@ onMounted(() => {
               </template>
             </tbody>
           </table>
+          <button
+            type="button"
+            data-testid="analyze-selected"
+            class="mt-4 rounded-md bg-primary px-4 py-2 font-medium text-white hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="selectedCutKeys.size === 0 || isCreatingAnalysis"
+            @click="analyzeSelected"
+          >
+            {{ isCreatingAnalysis ? 'Starting analysis…' : 'Analyze selected' }}
+          </button>
         </template>
       </div>
     </section>
