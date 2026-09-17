@@ -8,7 +8,13 @@ from app.db.base import Base
 
 # Import every model module so it registers on Base.metadata before
 # autogenerate inspects it.
-from app.models import account, account_action_token, cut_media_info, refresh_token  # noqa: F401
+from app.models import (  # noqa: F401
+    account,
+    account_action_token,
+    analysis_job,
+    cut_media_info,
+    refresh_token,
+)
 
 # Alembic Config object, giving access to values in alembic.ini.
 config = context.config
