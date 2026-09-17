@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 
 import {
   AnalysisNotFoundError,
+  AnalysisUnauthorizedError,
   cancelAnalysis,
   downloadAnalysisReport,
   getAnalysis,
@@ -19,6 +20,7 @@ const job = ref<AnalysisJob | null>(null)
 const isLoading = ref(true)
 const loadError = ref<string | null>(null)
 const notFound = ref(false)
+const sessionExpired = ref(false)
 
 // Frequent enough that "2/5 videos, current: ..." feels live (issue #52's
 // acceptance criteria) without hammering the backend — same shape as
@@ -57,6 +59,17 @@ async function loadJob() {
       // Non-transient — this Account will never be able to see this job id,
       // so there's nothing to retry (unlike the generic-error branch below).
       notFound.value = true
+    } else if (err instanceof AnalysisUnauthorizedError) {
+      // Non-transient in the same sense as AnalysisNotFoundError above — an
+      // expired/invalid access token never becomes valid again on its own,
+      // so retrying every 2s would just spam the backend with 401s forever
+      // (as it did before this branch existed) while the page kept showing
+      // a now-stale job snapshot alongside the error. Replacing the whole
+      // view with a dedicated message (rather than layering it onto
+      // loadError, which renders next to the stale status) makes the stale
+      // snapshot disappear too.
+      sessionExpired.value = true
+      job.value = null
     } else {
       loadError.value = err instanceof Error ? err.message : 'Failed to load analysis.'
       pollTimer = setTimeout(loadJob, POLL_INTERVAL_MS)
@@ -172,6 +185,18 @@ async function downloadReport() {
     <section class="mx-auto max-w-2xl px-6 py-10">
       <p v-if="isLoading" class="text-sm text-muted">Loading…</p>
       <p v-else-if="notFound" class="text-sm text-danger" role="alert">Analysis not found.</p>
+
+      <div v-else-if="sessionExpired" data-testid="session-expired">
+        <p class="text-sm text-danger" role="alert">
+          Your session has expired. Log in again to keep watching this analysis.
+        </p>
+        <RouterLink
+          :to="{ name: 'login', query: { redirect: route.fullPath } }"
+          class="mt-3 inline-block text-sm font-medium text-primary hover:underline"
+        >
+          Log in again
+        </RouterLink>
+      </div>
 
       <template v-else-if="job">
         <h2 class="text-lg font-medium text-foreground">Test {{ job.testId }}</h2>

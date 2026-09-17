@@ -11,12 +11,14 @@ const downloadAnalysisReportMock = vi.hoisted(() => vi.fn())
 // AnalysisNotFoundError`, so the mocked module needs to export the same
 // constructor identity that tests throw instances of.
 const AnalysisNotFoundError = vi.hoisted(() => class AnalysisNotFoundError extends Error {})
+const AnalysisUnauthorizedError = vi.hoisted(() => class AnalysisUnauthorizedError extends Error {})
 
 vi.mock('@/services/analyses', () => ({
   getAnalysis: getAnalysisMock,
   cancelAnalysis: cancelAnalysisMock,
   downloadAnalysisReport: downloadAnalysisReportMock,
   AnalysisNotFoundError,
+  AnalysisUnauthorizedError,
 }))
 
 vi.mock('@/stores/session', () => ({
@@ -29,6 +31,7 @@ function createTestRouter() {
     routes: [
       { path: '/analyses/:id', name: 'analysis-detail', component: AnalysisView },
       { path: '/media', name: 'media', component: { template: '<div>media</div>' } },
+      { path: '/login', name: 'login', component: { template: '<div>login</div>' } },
     ],
   })
 }
@@ -109,6 +112,27 @@ describe('AnalysisView', () => {
 
     expect(getAnalysisMock).toHaveBeenCalledTimes(2)
     expect(wrapper.find('[data-testid="status"]').text()).toBe('running')
+  })
+
+  it('stops polling and replaces a stale status with a session-expired message on a 401', async () => {
+    getAnalysisMock
+      .mockResolvedValueOnce(job({ status: 'queued', videos: [video()] }))
+      .mockRejectedValue(new AnalysisUnauthorizedError('Not authenticated'))
+
+    const wrapper = await mountView()
+    expect(wrapper.find('[data-testid="status"]').text()).toBe('queued')
+
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(getAnalysisMock).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('[data-testid="session-expired"]').exists()).toBe(true)
+    // The stale "queued" snapshot from before the token expired must not
+    // still be on screen next to the new message.
+    expect(wrapper.find('[data-testid="status"]').exists()).toBe(false)
+
+    // Must not keep hammering the backend with an access token that will
+    // never become valid again on its own.
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(getAnalysisMock).toHaveBeenCalledTimes(2)
   })
 
   it('never schedules another poll if the component unmounts before an in-flight request resolves', async () => {
