@@ -7,9 +7,11 @@ from app.models.account import Account
 from app.models.analysis_job import AnalysisJob
 from app.schemas.analyses import AnalysisJobOut, CreateAnalysisRequest
 from app.services.analyses import (
+    AnalysisJobNotCancellableError,
     AnalysisJobNotFoundError,
     EmptyCutSelectionError,
     InvalidCutSelectionError,
+    cancel_analysis_job,
     create_analysis_job,
     get_analysis_job,
     list_analysis_jobs,
@@ -56,6 +58,25 @@ def get_analysis(
     except AnalysisJobNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found."
+        ) from None
+
+
+@router.post("/{analysis_id}/cancel", response_model=AnalysisJobOut)
+def cancel_analysis(
+    analysis_id: int,
+    account: Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+) -> AnalysisJob:
+    try:
+        return cancel_analysis_job(db, requested_by=account.id, analysis_id=analysis_id)
+    except AnalysisJobNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found."
+        ) from None
+    except AnalysisJobNotCancellableError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only a queued analysis can be cancelled.",
         ) from None
 
 
