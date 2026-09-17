@@ -483,3 +483,40 @@ boundary).
   under that job's `reports/<test_id>/<analysis_id>/` prefix. `S3Client`
   has no delete capability today; adding one just for this is deferred
   until it's an actual problem, not speculatively built into this ticket.
+
+**Analysis report download (ticket #49):** `GET /analyses/{id}/report`
+serves `<report_s3_prefix>casiop_report.xlsx` — the only artifact of
+`reports/<test_id>/<analysis_id>/` exposed as a download in v1, per issue
+#44's "Report persistence" decision.
+
+- **Plain bearer-authenticated download, not the media-token pattern:**
+  unlike Cut streaming (`docs/adr/0002-media-access-tokens-in-url.md`),
+  this endpoint is never reached by a browser's native `<video src>` or
+  bare `<a href>` request that can't carry an `Authorization` header — the
+  frontend (ticket #52) triggers it via an ordinary authenticated fetch, so
+  it lives on `analyses.py`'s existing bearer-authenticated `router` like
+  every other `/analyses` endpoint, with no URL-embedded token and no new
+  exception to `ENGINEERING-STANDARDS.md`'s "no auth state in URLs" rule.
+  Resolves the "confirm during implementation" question issue #44/#49 left
+  open.
+- **Availability check is `status` *and* `report_s3_prefix`, not
+  `report_available` alone:** `get_analysis_report_key`
+  (`app/services/analyses.py`) requires `status` in `{completed,
+  completed_with_errors}` and `report_s3_prefix is not None` before
+  returning a key. The two are expected to always agree (`finalize_analysis_job`
+  only reaches one of those two statuses when at least one video
+  succeeded), but checking both directly is cheap defense against a
+  worker-contract violation leaving them mismatched, rather than trusting
+  `report_available` as if it specifically meant "casiop_report.xlsx
+  exists" (it only means "the worker uploaded *something* to this
+  prefix" — see `AnalysisJob.report_available`'s docstring).
+- **No Range/seek support and no separate rate limit:** unlike Cut
+  streaming, this is a one-shot whole-file download (no native player
+  seeking to support), and it isn't a repeatable expensive operation in the
+  same sense as media-token issuance or `/cuts/info` (no `ffprobe`
+  subprocess, no S3 download-then-probe) — it's a `head_object` plus a
+  streamed read of a file the worker already produced once. Streams via
+  `read_range` in fixed-size chunks regardless, so a large report still
+  never gets fully buffered in memory (`ENGINEERING-STANDARDS.md`'s DoS
+  guidance), same mechanism as Cut streaming just without the Range-parsing
+  half of it.

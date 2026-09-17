@@ -166,7 +166,7 @@ def test_stream_honors_a_full_open_ended_range_via_several_bounded_s3_reads(
     correct — no artificial truncation), but the backend must never pull
     more than _STREAM_CHUNK_BYTES from S3 in a single call, so a large Cut
     is never materialized in memory all at once."""
-    from app.api.media_browser import _STREAM_CHUNK_BYTES
+    from app.services.s3_client import STREAM_CHUNK_BYTES as _STREAM_CHUNK_BYTES
 
     total_size = int(_STREAM_CHUNK_BYTES * 2.5)
     s3_client.objects[_CUT_KEY] = b"x" * total_size
@@ -192,7 +192,7 @@ def test_stream_with_no_range_header_streams_a_large_download_in_bounded_chunks(
     """The download flow (a plain <a> click, no Range header) must be just
     as memory-bounded as a Range-based play request — this is the common
     path for "Download", not an edge case."""
-    from app.api.media_browser import _STREAM_CHUNK_BYTES
+    from app.services.s3_client import STREAM_CHUNK_BYTES as _STREAM_CHUNK_BYTES
 
     total_size = int(_STREAM_CHUNK_BYTES * 2.5)
     s3_client.objects[_CUT_KEY] = b"x" * total_size
@@ -210,7 +210,7 @@ def test_stream_with_no_range_header_streams_a_large_download_in_bounded_chunks(
 
 
 def test_stream_suffix_range_streams_in_bounded_chunks(client, db_session, s3_client):
-    from app.api.media_browser import _STREAM_CHUNK_BYTES
+    from app.services.s3_client import STREAM_CHUNK_BYTES as _STREAM_CHUNK_BYTES
 
     total_size = int(_STREAM_CHUNK_BYTES * 2.5)
     s3_client.objects[_CUT_KEY] = b"x" * total_size

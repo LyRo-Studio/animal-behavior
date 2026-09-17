@@ -1,6 +1,5 @@
 import mimetypes
 import re
-from collections.abc import Iterator
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -33,6 +32,7 @@ from app.services.media_browser import (
 from app.services.media_prober import MediaProber, get_media_prober
 from app.services.rate_limit import RateLimiter, enforce_all, get_rate_limiter
 from app.services.s3_client import S3Client, S3ObjectNotFoundError, get_s3_client
+from app.services.s3_client import iter_object_range as _iter_range
 
 # Every authenticated Account (User or Admin) gets identical access here —
 # no extra role gating (CONTEXT.md's "Media browser — access" decision).
@@ -47,14 +47,12 @@ router = APIRouter(
 # lives on a separate router without `router`'s bearer-auth dependency.
 public_router = APIRouter(prefix="/media", tags=["media-browser"])
 
-# A response's body is read from S3 (and handed to the client) this many
-# bytes at a time via `_iter_range`/StreamingResponse, so this endpoint
-# never materializes more than one chunk of a Cut in memory at once —
-# regardless of how large the requested range is, including "the whole
-# object" for a plain (no-Range) download (CONTEXT.md's "backend proxies
-# Cut bytes itself" decision + ENGINEERING-STANDARDS.md's DoS-protection
-# guidance: "avoid unbounded... processing of unbounded input").
-_STREAM_CHUNK_BYTES = 1 * 1024 * 1024
+# `_iter_range` is `app.services.s3_client.iter_object_range` (imported
+# above under its original private name) — this endpoint never materializes
+# more than one chunk of a Cut in memory at once, regardless of how large
+# the requested range is, including "the whole object" for a plain
+# (no-Range) download (CONTEXT.md's "backend proxies Cut bytes itself"
+# decision).
 
 _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
@@ -207,19 +205,6 @@ def _resolve_range(range_header: str, total_size: int) -> tuple[int, int] | None
     return start, end
 
 
-def _iter_range(s3: S3Client, key: str, start: int, end: int) -> Iterator[bytes]:
-    """Yield `key`'s bytes in [start, end] (inclusive) as successive
-    `_STREAM_CHUNK_BYTES`-sized reads from S3 — the actual no-full-
-    buffering guarantee for the response built from this: true regardless
-    of how large [start, end] is, including the entire object.
-    """
-    position = start
-    while position <= end:
-        chunk_end = min(position + _STREAM_CHUNK_BYTES - 1, end)
-        yield s3.read_range(key, position, chunk_end)
-        position = chunk_end + 1
-
-
 def _content_disposition(disposition: str, filename: str) -> str:
     """A `Content-Disposition` header value with `filename` as a properly
     escaped quoted-string (RFC 6266 / RFC 7230 §3.2.6: a `"` or `\\` inside
@@ -246,9 +231,9 @@ def stream_cut(
     Forwards an incoming Range request through to S3 as a correct 206
     partial-content response, so the browser can seek during playback;
     with no (or a malformed — RFC 7233 §2.1) Range header, returns the
-    whole object as 200 OK. Either way the body streams from S3 in
-    `_STREAM_CHUNK_BYTES` chunks (`_iter_range`), never buffering a whole
-    Cut in memory regardless of the range's size. `action=play` serves
+    whole object as 200 OK. Either way the body streams from S3 in fixed-
+    size chunks (`_iter_range`), never buffering a whole Cut in memory
+    regardless of the range's size. `action=play` serves
     inline; `action=download` sets Content-Disposition so the browser
     saves it under its original filename rather than displaying it.
     """
