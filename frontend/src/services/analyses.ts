@@ -95,6 +95,16 @@ export async function createAnalysis(
 // cause with its own backend-provided message (see that function).
 export class AnalysisNotFoundError extends Error {}
 
+// Thrown by getAnalysis/cancelAnalysis when the access token has expired or
+// is otherwise invalid (backend/app/api/deps.py's get_current_account always
+// returns 401 "Not authenticated" for this — never anything else, per its
+// own docstring). Kept distinct from a generic failure so AnalysisView can
+// stop polling and point the user at logging in again instead of retrying
+// forever against a token that will never become valid on its own — no view
+// in this app currently rotates the access token mid-session (that only
+// happens once, in the router guard, via session.ensureSession()).
+export class AnalysisUnauthorizedError extends Error {}
+
 // Shared by getAnalysis/cancelAnalysis, whose 404 always means the same
 // thing ("no such job, or not this Account's") — downloadAnalysisReport
 // below does its own request/response handling instead, since its 404
@@ -108,6 +118,9 @@ async function requestAnalysisJob(
 
   if (response.status === 404) {
     throw new AnalysisNotFoundError('Analysis not found.')
+  }
+  if (response.status === 401) {
+    throw new AnalysisUnauthorizedError('Not authenticated')
   }
   if (!response.ok) {
     throw await errorFromResponse(response, fallback)
