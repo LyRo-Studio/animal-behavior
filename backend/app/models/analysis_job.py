@@ -23,10 +23,9 @@ class AnalysisJobStatus(str, enum.Enum):
 
 class AnalysisJobVideoStatus(str, enum.Enum):
     """One AnalysisJobVideo's progress through the worker's per-video loop
-    (ticket #47) — `pending` until the worker starts it, `processing`
-    while it's running (once ticket #48's progress callback lands; until
-    then this is set together with the terminal status), then `succeeded`
-    or `failed`."""
+    (ticket #47) — `pending` until the worker starts it, `processing` while
+    it's running (set live from DogTrace's own progress callback, ticket
+    #48), then `succeeded` or `failed`."""
 
     PENDING = "pending"
     PROCESSING = "processing"

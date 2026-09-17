@@ -1,9 +1,13 @@
+from dataclasses import dataclass
+from pathlib import Path
+
 from app.models.account import Account, AccountRole
 from app.models.analysis_job import AnalysisJob, AnalysisJobStatus, AnalysisJobVideoStatus
 from app.services.analyses import create_analysis_job
 
 from tests.doubles import FakeDogTraceRunner, FakeS3Client
-from worker.orchestrator import process_next_job
+from worker.dogtrace_runner import ProgressCallback
+from worker.orchestrator import _make_progress_callback, process_next_job
 
 # Ticket #47's acceptance criteria, exercised end-to-end against a real
 # (Alembic-migrated) database plus a fake S3 client and a fake
@@ -256,6 +260,172 @@ def test_process_next_job_processes_only_one_job_at_a_time(db_session, work_root
     db_session.refresh(second_job)
     assert first_job.status == AnalysisJobStatus.COMPLETED
     assert second_job.status == AnalysisJobStatus.QUEUED
+
+
+def test_process_next_job_commits_progress_incrementally(db_session, work_root):
+    # Ticket #48's acceptance criterion: status updates in near-real-time,
+    # not only once the job reaches a terminal state — asserted here by
+    # counting `db_session.commit()` calls rather than just the end state,
+    # since a single end-of-job commit would also produce the right final
+    # statuses without satisfying "near-real-time".
+    _create_job(
+        db_session,
+        cuts=("cuts/T001/T001_C2_ME_F1.mp4", "cuts/T001/T001_C2_ME_F2.mp4"),
+    )
+    s3_client = FakeS3Client()
+    _seed_cut(s3_client, "cuts/T001/T001_C2_ME_F1.mp4")
+    _seed_cut(s3_client, "cuts/T001/T001_C2_ME_F2.mp4")
+    dogtrace_runner = FakeDogTraceRunner()
+
+    commit_calls = 0
+    original_commit = db_session.commit
+
+    def _counting_commit():
+        nonlocal commit_calls
+        commit_calls += 1
+        return original_commit()
+
+    db_session.commit = _counting_commit
+
+    process_next_job(
+        db_session, s3_client=s3_client, dogtrace_runner=dogtrace_runner, work_root=work_root
+    )
+
+    # 2 videos * (started + succeeded) = 4 progress-driven commits, on top
+    # of claim_next_queued_job's and finalize_analysis_job's own.
+    assert commit_calls >= 4 + 2
+
+
+def test_progress_callback_sets_processing_before_terminal_status(db_session, work_root):
+    # Direct unit test of `_make_progress_callback` itself: PROCESSING on
+    # "started" is the intermediate state `GET /analyses/{id}` is meant to
+    # observe while a video is running, before its terminal status lands.
+    job = _create_job(db_session)
+    video = job.videos[0]
+    callback = _make_progress_callback(db_session, {Path(video.cut_key).stem: [video]})
+
+    callback(Path(video.cut_key), "started")
+    assert video.status == AnalysisJobVideoStatus.PROCESSING
+
+    callback(Path(video.cut_key), "succeeded")
+    assert video.status == AnalysisJobVideoStatus.SUCCEEDED
+    assert video.failure_reason is None
+
+
+def test_progress_callback_failed_records_a_user_safe_reason(db_session, work_root):
+    job = _create_job(db_session)
+    video = job.videos[0]
+    callback = _make_progress_callback(db_session, {Path(video.cut_key).stem: [video]})
+
+    callback(Path(video.cut_key), "started")
+    callback(Path(video.cut_key), "failed")
+
+    assert video.status == AnalysisJobVideoStatus.FAILED
+    assert video.failure_reason
+
+
+def test_progress_callback_updates_every_row_sharing_a_duplicate_cut_key(db_session, work_root):
+    duplicate_cut = "cuts/T001/T001_C2_ME_F1.mp4"
+    job = _create_job(db_session, cuts=(duplicate_cut, duplicate_cut))
+    stem = Path(duplicate_cut).stem
+    callback = _make_progress_callback(db_session, {stem: list(job.videos)})
+
+    callback(Path(duplicate_cut), "started")
+    assert all(video.status == AnalysisJobVideoStatus.PROCESSING for video in job.videos)
+
+    callback(Path(duplicate_cut), "succeeded")
+    assert all(video.status == AnalysisJobVideoStatus.SUCCEEDED for video in job.videos)
+
+
+def test_progress_callback_never_resurrects_an_already_terminal_video(db_session, work_root):
+    # A video that already failed to download (see `_download_video`) must
+    # never be touched by a progress event for a same-named video it never
+    # actually reached — defensive, since in practice a download failure
+    # and a shared stem can't currently co-occur (same Cut key downloads
+    # the same way for every row), but the callback shouldn't rely on that.
+    job = _create_job(db_session)
+    video = job.videos[0]
+    video.status = AnalysisJobVideoStatus.FAILED
+    video.failure_reason = "The source video could not be retrieved from storage."
+    callback = _make_progress_callback(db_session, {Path(video.cut_key).stem: [video]})
+
+    callback(Path(video.cut_key), "started")
+
+    assert video.status == AnalysisJobVideoStatus.FAILED
+    assert video.failure_reason == "The source video could not be retrieved from storage."
+
+
+def test_process_next_job_batch_failure_after_partial_progress_keeps_prior_success(
+    db_session, work_root
+):
+    # Regression test for the except-branch guard in `_run_claimed_job`:
+    # a whole-batch failure partway through must fail only videos still
+    # `pending`/`processing`, never overwrite one the progress callback
+    # already marked `succeeded` before the crash.
+    job = _create_job(
+        db_session,
+        cuts=("cuts/T001/T001_C2_ME_F1.mp4", "cuts/T001/T001_C2_ME_F2.mp4"),
+    )
+    s3_client = FakeS3Client()
+    _seed_cut(s3_client, "cuts/T001/T001_C2_ME_F1.mp4")
+    _seed_cut(s3_client, "cuts/T001/T001_C2_ME_F2.mp4")
+    dogtrace_runner = FakeDogTraceRunner(
+        raises=RuntimeError("crashed after the first video"), raises_after_videos=1
+    )
+
+    process_next_job(
+        db_session, s3_client=s3_client, dogtrace_runner=dogtrace_runner, work_root=work_root
+    )
+
+    db_session.refresh(job)
+    videos_by_key = {video.cut_key: video for video in job.videos}
+    assert videos_by_key["cuts/T001/T001_C2_ME_F1.mp4"].status == AnalysisJobVideoStatus.SUCCEEDED
+    second_video = videos_by_key["cuts/T001/T001_C2_ME_F2.mp4"]
+    assert second_video.status == AnalysisJobVideoStatus.FAILED
+    assert second_video.failure_reason
+    assert job.status == AnalysisJobStatus.COMPLETED_WITH_ERRORS
+
+
+def test_process_next_job_video_never_terminalized_by_progress_is_failed_as_fallback(
+    db_session, work_root
+):
+    # Regression test for the `else` fallback sweep in `_run_claimed_job`:
+    # if `run_reporting` returns without raising but never calls `progress`
+    # with a terminal event for some video (a violation of its documented
+    # contract), that video must still end up `failed`, not stuck `pending`/
+    # `processing` forever under an otherwise-terminal job.
+    job = _create_job(db_session)
+    s3_client = FakeS3Client()
+    _seed_cut(s3_client, "cuts/T001/T001_C2_ME_F1.mp4")
+    dogtrace_runner = _SilentDogTraceRunner()
+
+    process_next_job(
+        db_session, s3_client=s3_client, dogtrace_runner=dogtrace_runner, work_root=work_root
+    )
+
+    db_session.refresh(job)
+    assert job.videos[0].status == AnalysisJobVideoStatus.FAILED
+    assert job.videos[0].failure_reason
+    assert job.status == AnalysisJobStatus.FAILED
+
+
+@dataclass
+class _SilentDogTraceRunner:
+    """Returns successfully without ever calling `progress` at all —
+    simulates a `dogtrace_runner` that violates its documented callback
+    contract, exercising `_run_claimed_job`'s fallback sweep.
+    """
+
+    version: str = "1.0.0-fake"
+
+    def run_reporting(
+        self,
+        video_paths: list[Path],
+        *,
+        output_dir: Path,
+        progress: ProgressCallback | None = None,
+    ) -> None:
+        pass
 
 
 def _create_account_for_second_job(db_session) -> Account:

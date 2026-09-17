@@ -3,7 +3,7 @@
 # source directly (CONTEXT.md's "Analysis worker" decision) rather than
 # reimplementing it, the same way `s3_client.py` is already shared within
 # the backend itself.
-FROM lynndelaere/dogtrace:1.0.0
+FROM lynndelaere/dogtrace:1.1.1
 
 WORKDIR /worker
 

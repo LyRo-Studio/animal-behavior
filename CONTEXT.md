@@ -363,7 +363,7 @@ machine, S3 input flow, report persistence, DogTrace integration
 boundary).
 
 - **Source reuse, not a package install:** `worker/Dockerfile` builds
-  `FROM lynndelaere/dogtrace:1.0.0` and `COPY`s specific files out of
+  `FROM lynndelaere/dogtrace:1.1.1` and `COPY`s specific files out of
   `backend/app` (core config, db, models, and the FastAPI-free service
   modules `s3_client.py`/`media_browser.py`/`analyses.py`) directly into
   the image, rather than installing the backend as a package or
@@ -382,16 +382,58 @@ boundary).
   `AnalysisJob` state machine regardless of whether the API or the worker
   drives a given transition, rather than splitting job-state logic across
   two places that could drift.
-- **Per-video success/failure is inferred from output artifacts, not a
-  return value:** `dogtrace.runner.run_reporting` has no progress callback
-  yet (ticket #48, blocked on an upstream DogTrace change) and only
-  returns a whole-batch int. `dogtrace.reporting_v24.VideoReport.from_video`
-  creates `output_dir/<video_stem>/<timestamp>/` up front for every video
-  regardless of outcome, so that directory's mere existence can't signal
-  success — `track_report.xlsx` is only written once that video's own
-  pipeline run actually completes, so the worker globs for
-  `<video_stem>/*/track_report.xlsx` as the real per-video completion
-  marker (see `worker/orchestrator.py`'s `_video_produced_output`).
+- **Per-video status comes from a live progress callback, not post-hoc
+  inference (ticket #48):** `dogtrace.runner.run_reporting` (upstream
+  `dogtrace-core`, bumped to 1.1.1 — a separate, externally-versioned repo
+  at `github.com:vanniew/dogtrace-core`, published as the
+  `lynndelaere/dogtrace` Docker Hub image) now accepts an optional
+  `progress: Callable[[Path, str], None]` invoked twice per video: once
+  with `"started"` right before it's attempted, once more with
+  `"succeeded"` or `"failed"` once its outcome is known — mirroring its
+  own per-video loop, which still catches each video's own exception and
+  keeps going (fault isolation unchanged). `worker/orchestrator.py`'s
+  `_make_progress_callback` maps these onto `analysis_job_videos.status`
+  (`processing`, then `succeeded`/`failed`) and commits after every event,
+  so `GET /analyses/{id}` observes each video's progress in near-real-time
+  while the job is still `running`, not only once it reaches a terminal
+  state. This replaced ticket #47's coarse mechanism (glob for
+  `<video_stem>/*/track_report.xlsx` under the output dir once the whole
+  call returned) — removed along with the now-unused `_video_produced_output`.
+  A whole-batch failure (e.g. the model failing to load, raised before any
+  video's `"started"` fires) still fails every video still `pending`/
+  `processing`, exactly as ticket #47 already did, just extended to cover
+  `processing` too now that a video can be in that state when the crash
+  happens.
+- **Model loaded once per job, not once per video (ticket #48):**
+  `dogtrace.runner.run_reporting` also now loads the YOLO model once
+  itself (before its per-video loop) and passes it to `CASIOP(...,
+  model=...)`, which threads it through instead of each video's
+  `VideoReport.from_video` implicitly reloading it. This is entirely
+  internal to the upstream `run_reporting` call — the worker doesn't load
+  or pass a model itself, it just calls the updated `run_reporting` (via
+  `dogtrace_runner.run_reporting`'s existing seam) and gets the reuse for
+  free.
+- **`progress` is called outside `run_reporting`'s own per-video
+  `try`/`except` (dogtrace-core 1.1.1, a same-day patch on top of 1.1.0):**
+  if `progress` itself raises (e.g. `_make_progress_callback`'s `db.commit()`
+  hitting a transient DB error) from inside that `try`, it would otherwise
+  be caught by dogtrace's own exception handler and misreported as that
+  video's pipeline having failed, masking a real infrastructure error as an
+  ordinary per-video failure. Calling `progress` only after the `try`/except
+  resolves (with the outcome captured in a local, not decided by the
+  callback) means such an error propagates straight out of `run_reporting`
+  instead, correctly surfacing as the whole-batch failure it is.
+- **Worker fallback if a video is never given a terminal progress event
+  (ticket #48):** `_run_claimed_job`'s `else` branch (paired with the
+  `try` around `dogtrace_runner.run_reporting`) sweeps any video still
+  `pending`/`processing` to `failed` after a *successful* return, not just
+  after a raised exception. `dogtrace_runner` is a separate, externally-
+  versioned dependency (`dogtrace-core`) whose "always call `progress` with
+  a terminal event per video" contract isn't enforced by the type system —
+  without this sweep, a violation of that contract would leave an
+  `AnalysisJobVideo` stuck non-terminal forever under an otherwise-finished
+  job, with no recovery path (`requeue_stuck_running_jobs` only rescues a
+  job still `running`, not one already terminal with a stuck video row).
 - **A Cut missing from S3 at download time fails only that video, not the
   whole job** — Cut keys are validated for shape at request time
   (`POST /analyses`) but never checked against S3 until the worker
