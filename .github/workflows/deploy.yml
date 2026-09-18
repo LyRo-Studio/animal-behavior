@@ -50,13 +50,25 @@ jobs:
 
       - name: Determine image tag
         id: image
+        # Passed through `env:`, never `${{ }}`-interpolated into the script:
+        # `image_tag` is free text typed by whoever dispatches the workflow,
+        # so interpolating it would let it inject shell into a job that runs
+        # on the production box with Docker access. It also flows into
+        # multi-line `tags:` inputs below, hence the charset check.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if ! [[ "$INPUT_IMAGE_TAG" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+              echo "::error::image_tag must be a valid Docker tag (letters, digits, . _ -; max 128 chars)"
+              exit 1
+            fi
+            echo "tag=$INPUT_IMAGE_TAG" >> "$GITHUB_OUTPUT"
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
-            sha="${{ github.event.workflow_run.head_sha }}"
-            echo "tag=sha-${sha:0:7}" >> "$GITHUB_OUTPUT"
+            echo "tag=sha-${HEAD_SHA:0:7}" >> "$GITHUB_OUTPUT"
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
