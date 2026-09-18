@@ -667,3 +667,68 @@ compose override, and actually starting `worker` on deploy.
   already-stale tags right after merge, not an ongoing risk — not worth
   the added complexity of detecting per-tag image existence for a
   self-resolving, one-time gap.
+
+**Test DB isolation: `db_session` joins its per-test transaction via a
+SAVEPOINT, not a bare `begin()` (ticket #60):** `backend/tests/conftest.py`
+and `worker/tests/conftest.py`'s `db_session` fixture previously bound its
+`Session` straight to a connection-level `db_connection.begin()`, then
+relied on rolling that same transaction back at teardown. Most
+service-layer functions (`create_analysis_job`, `claim_next_queued_job`,
+`finalize_analysis_job`, `create_account`, ...) call `session.commit()`
+themselves — filed as a risk that an internal commit ends the outer
+transaction early, leaving the fixture's own `transaction.rollback()`
+nothing left to undo, so committed test rows would persist for real in a
+long-lived local Postgres instance and corrupt later runs.
+
+- **Fix:** both fixtures now call `session.begin_nested()` (a SAVEPOINT)
+  right after creating the session, plus a `session`-scoped
+  `after_transaction_end` event listener that restarts the SAVEPOINT every
+  time it ends — SQLAlchemy's own documented pattern for "joining a session
+  into an external transaction" (`docs.sqlalchemy.org`'s
+  `session_transaction.html`). An internal `commit()` now only ends the
+  SAVEPOINT, never the connection-level `transaction`, regardless of how
+  many times a test (or the code it calls) commits.
+- **Could not reproduce the described leak directly** against a fresh,
+  throwaway Postgres 16 container with the exact installed versions
+  (SQLAlchemy 2.0.54, `psycopg[binary]` v3): a `Session` bound to a
+  `Connection` that already has `.begin()` called on it does not appear to
+  issue a real `COMMIT` on `session.commit()` in this combination (verified
+  with SQLAlchemy engine echo logging and direct `psql` checks across
+  repeated full-suite runs of both `backend/tests` and `worker/tests`).
+  Applied the fix anyway — it's the correct, strictly-safer, standard
+  pattern for this exact scenario regardless of whether this specific
+  environment happens to already avoid the symptom, and guards against a
+  future SQLAlchemy/psycopg point-release changing that incidental
+  behavior.
+- **Two new `test_db_session_isolation.py` files** (`backend/tests/`,
+  `worker/tests/`) guard this going forward: each commits a row via a real
+  service-layer call (`create_account`/`create_analysis_job`, not a raw ORM
+  `add`), then checks it's gone through a completely independent
+  connection. Self-contained within one test each — an earlier version
+  split this across two tests relying on definition order (caught in
+  review: running only the "did it leak" test in isolation, e.g. while
+  debugging, passed trivially since nothing had committed a row yet).
+  Instead, the test drives `db_session`'s actual fixture generator manually
+  (via `__wrapped__`, since pytest fixture functions refuse to be called
+  directly otherwise) so the real teardown this ticket is about runs
+  inside the one test, before it checks the post-teardown database state.
+- **Not de-duplicated between `backend/tests/conftest.py` and
+  `worker/tests/conftest.py`:** both now carry the identical SAVEPOINT-join
+  fixture body (already true of the fixture before this fix — worker's
+  copy's docstring already said "same as backend/tests/conftest.py's
+  identical fixture"). Flagged in review as duplication; not changed,
+  because `worker/tests/doubles.py`'s own docstring documents *why* this is
+  deliberate: neither `tests/` directory is a real package (no
+  `__init__.py`), and both sit on `sys.path` during a worker test run
+  (`pythonpath = [".", "../backend"]`) — Python treats them as one merged
+  namespace package, so `from tests.conftest import ...` from worker/tests
+  would resolve ambiguously (likely to worker's own `conftest.py`, by
+  `sys.path` order) rather than reliably reaching backend's. Duplicating
+  the small fixture body is safer than a cross-suite import that could
+  silently resolve to the wrong module.
+- **Not done here (per the ticket's own "Also clean up" note):** manually
+  truncating/resetting the actual long-lived local/production Postgres
+  `db` container's tables. That's a destructive action against shared,
+  real data outside this repo's version control — needs the project
+  owner's own explicit go-ahead and timing, not something to run
+  unilaterally as part of landing this fix.

@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Connection
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, SessionTransaction, sessionmaker
 
 from alembic import command
 from alembic.config import Config
@@ -49,12 +49,33 @@ def db_session(db_connection: Connection) -> Generator[Session, None, None]:
 
     Keeps tests isolated from each other without needing to drop/recreate
     the schema between every test.
+
+    Most service-layer functions (`create_analysis_job`, `claim_next_queued_job`,
+    `finalize_analysis_job`, account creation, ...) call `session.commit()`
+    themselves. A session bound directly to `db_connection` with nothing
+    else in play would let that internal commit end the outer `transaction`
+    early, leaving the `transaction.rollback()` below with nothing left to
+    undo (ticket #60). SQLAlchemy's own documented fix for "joining a
+    session into an external transaction" is used instead: start a
+    SAVEPOINT (`begin_nested`) and restart it every time it ends, via the
+    `after_transaction_end` event — so an internal `commit()` only ends the
+    SAVEPOINT, never `transaction` itself, which the `finally` block below
+    can then always roll back for real.
     """
     transaction = db_connection.begin()
     session = sessionmaker(bind=db_connection)()
+    session.begin_nested()
+
+    @event.listens_for(session, "after_transaction_end")
+    def _restart_savepoint(session: Session, session_transaction: SessionTransaction) -> None:
+        if session_transaction.nested and not session_transaction._parent.nested:
+            session.expire_all()
+            session.begin_nested()
+
     try:
         yield session
     finally:
+        event.remove(session, "after_transaction_end", _restart_savepoint)
         session.close()
         transaction.rollback()
 
