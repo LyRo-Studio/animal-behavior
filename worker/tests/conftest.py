@@ -6,9 +6,9 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from app.core.config import settings
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Connection
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, SessionTransaction, sessionmaker
 
 # Same real-Postgres, real-Alembic-migrations testing convention as
 # backend/tests/conftest.py (issue #1's testing decisions) — the worker
@@ -50,13 +50,25 @@ def db_connection() -> Generator[Connection, None, None]:
 def db_session(db_connection: Connection) -> Generator[Session, None, None]:
     """A session bound to a per-test transaction, rolled back afterward —
     keeps tests isolated without dropping/recreating the schema between
-    every test, same as backend/tests/conftest.py's identical fixture.
+    every test, same as backend/tests/conftest.py's identical fixture
+    (ticket #60's SAVEPOINT-join fix applies here too — orchestrator.py's
+    `process_next_job` commits internally multiple times per job, same
+    class of problem as the backend's own service-layer functions).
     """
     transaction = db_connection.begin()
     session = sessionmaker(bind=db_connection)()
+    session.begin_nested()
+
+    @event.listens_for(session, "after_transaction_end")
+    def _restart_savepoint(session: Session, session_transaction: SessionTransaction) -> None:
+        if session_transaction.nested and not session_transaction._parent.nested:
+            session.expire_all()
+            session.begin_nested()
+
     try:
         yield session
     finally:
+        event.remove(session, "after_transaction_end", _restart_savepoint)
         session.close()
         transaction.rollback()
 
