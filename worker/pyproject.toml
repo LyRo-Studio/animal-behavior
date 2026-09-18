@@ -16,3 +16,10 @@ select = ["E", "F", "I", "UP", "B"]
 # duplicated copy on disk for tests.
 pythonpath = [".", "../backend"]
 testpaths = ["tests"]
+# Ticket #54: the real-GPU/real-image smoke test opts in via `-m real_gpu`
+# (which overrides this default), so a plain `pytest` run — and CI, which
+# has no GPU — never needs one or the real `dogtrace` package installed.
+addopts = "-m \"not real_gpu\""
+markers = [
+    "real_gpu: exercises the real dogtrace package against a real CUDA GPU and the real S3 bucket (opt-in — run with `pytest -m real_gpu`)",
+]
