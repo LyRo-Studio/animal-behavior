@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { createAnalysis } from '@/services/analyses'
+import { createAnalysis, listAnalyses, type AnalysisJob } from '@/services/analyses'
 import {
   CutInfoNotFoundError,
   DatasetFolderNotFoundError,
@@ -19,6 +19,7 @@ import {
   type MediaTokenAction,
 } from '@/services/mediaBrowser'
 import { session } from '@/stores/session'
+import { formatDate } from '@/utils/date'
 import { triggerBrowserDownload } from '@/utils/download'
 
 const router = useRouter()
@@ -50,6 +51,15 @@ const notFound = ref(false)
 const selectedCutKeys = ref<Set<string>>(new Set())
 const isCreatingAnalysis = ref(false)
 const analysisError = ref<string | null>(null)
+
+// Ticket #53: inline "previous analyses for this Test" panel, scoped to the
+// current Account's own jobs (the backend already enforces that — see
+// listAnalyses). `null` (not loaded yet) is distinct from `[]` (loaded,
+// none exist), same "loading vs. genuinely empty" distinction `cuts` above
+// already makes.
+const previousAnalyses = ref<AnalysisJob[] | null>(null)
+const isLoadingPreviousAnalyses = ref(false)
+const previousAnalysesError = ref<string | null>(null)
 
 // Only a C2 Cut is ever valid DogTrace analysis input (CONTEXT.md's
 // "DogTrace integration boundary" decision) — this is the one rule that
@@ -183,6 +193,28 @@ let searchToken = 0
 // id to the backend.
 const COMPLETE_TEST_ID_RE = /^T\d+$/
 
+// Guarded by `searchToken` (not a token of its own) — it's started from
+// within `search()` for the same Test switch, so sharing that guard is
+// enough to discard a stale response from a Test the user has since
+// searched away from, same as `cuts`/`notFound`/`cutsError` above.
+async function loadPreviousAnalyses(testId: string, token: number) {
+  if (!session.accessToken.value) return
+
+  isLoadingPreviousAnalyses.value = true
+  try {
+    const result = await listAnalyses(session.accessToken.value, testId)
+    if (token !== searchToken) return
+    previousAnalyses.value = result
+  } catch {
+    if (token !== searchToken) return
+    previousAnalysesError.value = 'Failed to load previous analyses.'
+  } finally {
+    if (token === searchToken) {
+      isLoadingPreviousAnalyses.value = false
+    }
+  }
+}
+
 async function search(testId: string) {
   // Uppercased to match the suggestion list's case-insensitive filtering —
   // otherwise typing "t001" and pressing Enter (instead of picking the
@@ -210,6 +242,12 @@ async function search(testId: string) {
   analysisError.value = null
   isCreatingAnalysis.value = false
   analysisToken++
+  previousAnalyses.value = null
+  previousAnalysesError.value = null
+  // Independent of the Cuts fetch below (own try/catch, own loading/error
+  // state) — a previous-analyses failure must never block or blank out the
+  // Cuts listing, and vice versa.
+  loadPreviousAnalyses(trimmed, currentToken)
 
   try {
     const result = await listCuts(session.accessToken.value, trimmed)
@@ -247,10 +285,6 @@ function formatSize(bytes: number): string {
     unitIndex += 1
   }
   return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
-}
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString()
 }
 
 // Ticket #21: play/download a Cut via a lazily-minted, single-Cut-scoped
@@ -620,6 +654,48 @@ onMounted(() => {
             {{ isCreatingAnalysis ? 'Starting analysis…' : 'Analyze selected' }}
           </button>
         </template>
+
+        <!-- Loaded independently of the Cuts fetch above (its own request,
+             own loading/error state — see loadPreviousAnalyses) and shown
+             regardless of whether Cuts is still loading, 404s, or errors:
+             a Test can have prior AnalysisJob rows even when its Cuts are
+             currently unavailable (e.g. removed/renamed in S3 after being
+             analyzed), and that history must stay visible either way. -->
+        <div class="mt-8">
+          <h3 class="text-base font-medium text-foreground">
+            Previous analyses for {{ selectedTestId }}
+          </h3>
+          <p v-if="isLoadingPreviousAnalyses" class="mt-2 text-sm text-muted">Loading…</p>
+          <p v-else-if="previousAnalysesError" class="mt-2 text-sm text-danger" role="alert">
+            {{ previousAnalysesError }}
+          </p>
+          <p
+            v-else-if="previousAnalyses && previousAnalyses.length === 0"
+            class="mt-2 text-sm text-muted"
+          >
+            No previous analyses for this Test.
+          </p>
+          <ul
+            v-else-if="previousAnalyses"
+            data-testid="previous-analyses"
+            class="mt-2 divide-y divide-border rounded-md border border-border"
+          >
+            <li
+              v-for="job in previousAnalyses"
+              :key="job.id"
+              class="flex items-center justify-between px-3 py-2 text-sm"
+            >
+              <RouterLink
+                :to="{ name: 'analysis-detail', params: { id: job.id } }"
+                data-testid="previous-analysis-link"
+                class="font-medium text-primary hover:underline"
+              >
+                Analysis #{{ job.id }}
+              </RouterLink>
+              <span class="text-muted">{{ job.status }} · {{ formatDate(job.createdAt) }}</span>
+            </li>
+          </ul>
+        </div>
       </div>
     </section>
 

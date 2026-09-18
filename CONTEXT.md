@@ -563,3 +563,37 @@ health check.
   every non-`pending` video (succeeded *and* failed), matching the ticket's
   own "2/5 videos, current: ..." example read as "how far through the
   batch", not "how many have succeeded so far".
+
+**Analyses history (ticket #53):** `AnalysesHistoryView.vue` (`/analyses`,
+linked from Home next to Media Browser — every authenticated Account, no
+role gating) lists the current Account's own jobs via `GET /analyses`, and
+`MediaBrowserView`'s Test view gets an inline "Previous analyses for
+{Test}" panel via `GET /analyses?test_id=...`. Both reuse the existing
+`listAnalyses` addition to `analyses.ts` — no new backend endpoint or
+authorization logic: `list_analysis_jobs` already scopes to
+`requested_by=account.id` (issue #44's "no cross-user visibility" decision,
+Admin included), so this ticket is frontend-only.
+
+- **The inline panel's fetch is independent of the Cuts fetch, and must stay
+  that way:** `MediaBrowserView.search()` kicks off `loadPreviousAnalyses`
+  alongside `listCuts`, not nested inside its `try`/`catch` — a Test can
+  have prior `AnalysisJob` rows even when its Cuts are currently
+  unavailable (e.g. removed/renamed in S3 after being analyzed, or a
+  transient Cuts-listing failure), so the panel renders as a sibling of the
+  Cuts `<template v-else-if="cuts">` block, not nested inside it. It was
+  initially built nested (caught in review) — a Cuts-side 404/error/loading
+  state silently hid an already-loaded, successful analyses panel. Guarded
+  by the same `searchToken`, not a separate token: it's started from within
+  the same `search()` call for the same Test switch, so no independent
+  staleness window exists for it to guard against.
+- **Route order:** `/analyses` (this ticket) is declared before
+  `/analyses/:id` (ticket #52) in `router/index.ts` — doesn't change
+  matching behavior (vue-router already prefers a static segment over a
+  dynamic one regardless of declaration order), but keeps the two visually
+  grouped in source in the order a reader encounters them in the UI.
+- **`formatDate` (ISO string → locale string) moved to `frontend/src/utils/
+  date.ts`:** previously defined separately inside `MediaBrowserView.vue`
+  (for a Cut's "Last modified") and duplicated verbatim into
+  `AnalysesHistoryView.vue`; the second copy was caught in review and
+  factored out instead, since both views (plus the inline panel) now need
+  the identical formatting.

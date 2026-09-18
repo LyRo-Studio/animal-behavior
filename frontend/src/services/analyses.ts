@@ -152,6 +152,26 @@ export async function cancelAnalysis(accessToken: string, id: number): Promise<A
   )
 }
 
+// Ticket #53: the current Account's own jobs (backend/app/services/
+// analyses.py's list_analysis_jobs already scopes this — no cross-user
+// visibility, Admin included, per issue #44's "Authorization" section), newest
+// first. Backs both the global AnalysesHistoryView and MediaBrowserView's
+// inline "previous analyses for this Test" panel via the optional `testId`
+// filter.
+export async function listAnalyses(accessToken: string, testId?: string): Promise<AnalysisJob[]> {
+  const url = new URL(`${API_BASE_URL}/analyses`)
+  if (testId) url.searchParams.set('test_id', testId)
+
+  const response = await fetch(url, { headers: authHeaders(accessToken) })
+
+  if (!response.ok) {
+    throw await errorFromResponse(response, 'Failed to load analyses.')
+  }
+
+  const rows: AnalysisJobResponse[] = await response.json()
+  return rows.map(toAnalysisJob)
+}
+
 // Ticket #49's GET /analyses/{id}/report is a plain bearer-authenticated
 // download (CONTEXT.md's "Analysis report download" decision) — unlike
 // mediaBrowser.ts's media-token-authenticated streaming, there's no native

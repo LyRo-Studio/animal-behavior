@@ -25,6 +25,14 @@ async function handleLogout() {
         >
           Media Browser
         </RouterLink>
+        <!-- Ticket #53: same "every authenticated Account" access as Media
+             Browser above — own-jobs-only history, no role gating. -->
+        <RouterLink
+          :to="{ name: 'analyses-history' }"
+          class="text-sm font-medium text-primary hover:underline"
+        >
+          Analyses
+        </RouterLink>
         <!-- Only Admins see this link (CONTEXT.md's "Admin page" entry) —
              a User attempting the route directly is redirected away by the
              router guard regardless, this just avoids showing an

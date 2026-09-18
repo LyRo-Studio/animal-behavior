@@ -19,6 +19,11 @@ function createTestRouter() {
       { path: '/', name: 'home', component: HomeView },
       { path: '/login', name: 'login', component: { template: '<div>login</div>' } },
       { path: '/media', name: 'media', component: { template: '<div>media</div>' } },
+      {
+        path: '/analyses',
+        name: 'analyses-history',
+        component: { template: '<div>analyses</div>' },
+      },
       { path: '/admin', name: 'admin', component: { template: '<div>admin</div>' } },
     ],
   })
@@ -62,7 +67,7 @@ describe('HomeView', () => {
     expect(router.currentRoute.value.name).toBe('login')
   })
 
-  it('does not show an Admin link for a User account, but shows Media Browser', async () => {
+  it('does not show an Admin link for a User account, but shows Media Browser and Analyses', async () => {
     const router = createTestRouter()
     router.push('/')
     await router.isReady()
@@ -71,6 +76,7 @@ describe('HomeView', () => {
 
     expect(wrapper.text()).not.toContain('Admin')
     expect(wrapper.text()).toContain('Media Browser')
+    expect(wrapper.text()).toContain('Analyses')
   })
 
   it('shows both the Media Browser and Admin links for an Admin account', async () => {
