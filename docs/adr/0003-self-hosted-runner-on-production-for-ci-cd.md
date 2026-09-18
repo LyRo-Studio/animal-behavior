@@ -55,3 +55,22 @@ outside contributors start opening PRs).
 - No staging environment exists — every merge to `master` deploys straight to production. Revisit
   if this app ever needs to protect real users' uptime expectations the current internal-only
   scope doesn't have.
+
+## Amendment (ticket #70): two runners, not one — the original premise was wrong
+
+This ADR says the runner lives "on the production box." It never did: the
+runner (`lynn-delaere-prod`) was installed on the *development* VM
+(`lynn-delaere`), so every deploy landed there rather than on a separate
+production machine. The no-SSH, self-hosted-runner reasoning above still
+holds, but it's now applied to two boxes with two roles:
+
+- **`lynn-delaere` runner** (label `ci`): runs `ci.yml`'s test/lint/build jobs
+  only. It never receives production secrets and never deploys.
+- **`dogtrace-app` runner** (label `production-deploy`, the real production
+  VM): runs `deploy.yml`'s deploy job only, and is the only place the
+  `production` GitHub Environment's secrets are ever read.
+
+This also narrows the first bullet under "Consequences": CI (including a PR's
+test/lint/build steps) no longer runs beside production's `.env`, Docker
+daemon, or database — that blast-radius concern now applies to the
+development VM only. See `CONTEXT.md`'s "CI/CD retarget (ticket #70)".

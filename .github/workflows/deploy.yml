@@ -30,7 +30,15 @@ env:
 jobs:
   deploy:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
-    runs-on: [self-hosted, linux, x64, production]
+    # The runner registered on `dogtrace-app`, the production VM (ticket #69).
+    # Deliberately not the `ci` runner on the development VM — deploy must
+    # execute where the containers actually have to run (CONTEXT.md's
+    # "CI/CD retarget" decision, ticket #70).
+    runs-on: [self-hosted, linux, x64, production-deploy]
+    # Gives this job access to the `production` Environment's secrets and
+    # variables (used by "Generate .env" below) — and only this job, so
+    # ci.yml's runner never sees production config at all.
+    environment: production
     permissions:
       contents: read
       packages: write
@@ -41,12 +49,6 @@ jobs:
           # Deploy the exact commit ci.yml validated, not just whatever
           # HEAD happens to be when this job starts.
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.ref }}
-          # actions/checkout defaults to `git clean -ffdx`, which deletes
-          # gitignored files too — including this box's own `.env`
-          # (ENGINEERING-STANDARDS.md §2: secrets live in `.env`, never in
-          # committed config). Deploy reads that `.env` below, so it must
-          # survive the checkout.
-          clean: false
 
       - name: Determine image tag
         id: image
@@ -72,6 +74,108 @@ jobs:
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Fail-fast: runs before anything is built or pushed, so a missing
+      # secret costs seconds rather than a wasted multi-GB image build.
+      #
+      # Secrets/variables reach the script only through `env:` — never
+      # interpolated into the script text itself — so a value can't inject
+      # shell, and GitHub masks every `secrets.*` value in the log. Nothing
+      # below ever prints `.env` or a value (errors name the variable only).
+      - name: Generate .env
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          MEDIA_TOKEN_SECRET_KEY: ${{ secrets.MEDIA_TOKEN_SECRET_KEY }}
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+          S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
+          CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+          # Optional — compose supplies a default when these are unset.
+          POSTGRES_USER: ${{ vars.POSTGRES_USER }}
+          POSTGRES_DB: ${{ vars.POSTGRES_DB }}
+          S3_ADDRESSING_STYLE: ${{ vars.S3_ADDRESSING_STYLE }}
+          # May be empty until ticket #72 discovers the real header name.
+          IDENTITY_HEADER_NAME: ${{ vars.IDENTITY_HEADER_NAME }}
+          # Transitional (remove with ticket #72): the backend still
+          # authenticates its own users and docker-compose.yml still hard-
+          # requires these, so deploy can't succeed without them until the
+          # application stops reading them.
+          FIRST_ADMIN_EMAIL: ${{ vars.FIRST_ADMIN_EMAIL }}
+          FIRST_ADMIN_PASSWORD: ${{ secrets.FIRST_ADMIN_PASSWORD }}
+          # Also transitional and optional: invite/reset emails. Without
+          # these the backend only logs emails instead of sending them and
+          # builds invite links pointing at localhost.
+          SMTP_HOST: ${{ vars.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT }}
+          SMTP_USERNAME: ${{ vars.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM_EMAIL: ${{ vars.SMTP_FROM_EMAIL }}
+          SMTP_USE_TLS: ${{ vars.SMTP_USE_TLS }}
+          FRONTEND_BASE_URL: ${{ vars.FRONTEND_BASE_URL }}
+        run: |
+          set -euo pipefail
+          # Never world-readable, not even for the instant before chmod.
+          umask 077
+
+          required=(
+            POSTGRES_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+            S3_BUCKET S3_ENDPOINT MEDIA_TOKEN_SECRET_KEY CORS_ORIGINS
+            VITE_API_BASE_URL FIRST_ADMIN_EMAIL FIRST_ADMIN_PASSWORD
+          )
+          optional=(
+            POSTGRES_USER POSTGRES_DB S3_ADDRESSING_STYLE IDENTITY_HEADER_NAME
+            SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM_EMAIL
+            SMTP_USE_TLS FRONTEND_BASE_URL
+          )
+
+          missing=()
+          for name in "${required[@]}"; do
+            [ -n "${!name:-}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing from the 'production' GitHub Environment (secret or variable): ${missing[*]}"
+            exit 1
+          fi
+
+          # docker-compose.yml splices this into DATABASE_URL without URL-
+          # encoding, so any of `@ / : ? # %` would corrupt the URL and leave
+          # the backend unable to connect — fail here, not as a crash loop.
+          if ! [[ "$POSTGRES_PASSWORD" =~ ^[A-Za-z0-9._~-]+$ ]]; then
+            echo "::error::POSTGRES_PASSWORD may only contain letters, digits and . _ ~ - (it is embedded unescaped in DATABASE_URL)"
+            exit 1
+          fi
+
+          tmp="$(mktemp .env.XXXXXX)"
+          trap 'rm -f "$tmp"' EXIT
+
+          # Single-quoted so docker compose reads the value literally — an
+          # unquoted `$` in a password would otherwise be interpolated. A
+          # single quote or line break can't be represented that way, so
+          # reject it rather than write a mangled (or injected) line.
+          emit() {
+            case "$2" in
+              *\'* | *$'\n'* | *$'\r'*)
+                echo "::error::$1 contains a single quote or line break, which .env cannot represent"
+                exit 1
+                ;;
+            esac
+            printf "%s='%s'\n" "$1" "$2" >> "$tmp"
+          }
+
+          for name in "${required[@]}"; do emit "$name" "${!name}"; done
+          for name in "${optional[@]}"; do
+            [ -z "${!name:-}" ] || emit "$name" "${!name}"
+          done
+          # Transitional alias (remove with ticket #72): the backend still
+          # reads its signing key as JWT_SECRET_KEY (it signs every JWT
+          # today, not just media tokens) until that ticket renames the
+          # setting and drops the login tokens.
+          emit JWT_SECRET_KEY "$MEDIA_TOKEN_SECRET_KEY"
+
+          mv "$tmp" .env
+          chmod 600 .env
+
       # Needed both to push the newly built images and to pull an existing
       # tag back down on a rollback dispatch.
       - name: Log in to GHCR
@@ -84,20 +188,6 @@ jobs:
       - name: Set up Docker Buildx
         if: steps.image.outputs.build == 'true'
         uses: docker/setup-buildx-action@v3
-
-      - name: Read production frontend build config
-        if: steps.image.outputs.build == 'true'
-        id: frontend_config
-        # VITE_API_BASE_URL is baked into the frontend bundle at build time
-        # (frontend/Dockerfile) — read from the box's own .env rather than
-        # duplicating it into a GitHub Secret. It's the public API URL, not
-        # a secret, so surfacing just this one value via GITHUB_OUTPUT is
-        # safe; nothing else from .env is echoed or logged.
-        run: |
-          set -a
-          source .env
-          set +a
-          echo "vite_api_base_url=${VITE_API_BASE_URL:-http://localhost:8000}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push backend image
         if: steps.image.outputs.build == 'true'
@@ -115,8 +205,12 @@ jobs:
         with:
           context: frontend
           push: true
+          # Baked into the bundle at build time (frontend/Dockerfile). A
+          # plain (non-secret) Environment variable; "Generate .env" above
+          # already failed the job if it's unset or contains a quote or
+          # line break (so it can't inject an extra build-arg here).
           build-args: |
-            VITE_API_BASE_URL=${{ steps.frontend_config.outputs.vite_api_base_url }}
+            VITE_API_BASE_URL=${{ vars.VITE_API_BASE_URL }}
           tags: |
             ${{ env.FRONTEND_IMAGE }}:${{ steps.image.outputs.tag }}
             ${{ env.FRONTEND_IMAGE }}:latest

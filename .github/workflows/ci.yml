@@ -8,15 +8,20 @@ on:
 
 jobs:
   backend:
-    runs-on: [self-hosted, linux, x64, production]
+    # `ci` marks the runner on the development VM (`lynn-delaere`) — test/lint/
+    # build only. Deploys run on `dogtrace-app`'s `production-deploy` runner
+    # (deploy.yml), so CI never touches production secrets or the production
+    # box (ticket #70). Keep this label off any runner that also has
+    # `production-deploy`, or CI would start running on the production VM.
+    runs-on: [self-hosted, linux, x64, ci]
 
     # Real Postgres, migrated through Alembic — matches backend/tests/conftest.py's
     # "never SQLite or a mocked ORM" testing decision (issue #1). Published on 5433,
-    # not Postgres's default 5432, so this never collides with the production `db`
-    # container already running on this same box (docker-compose.yml, ADR-0003).
-    # Bound to 127.0.0.1 only — this runner lives on the production box, reachable
-    # over the tailnet; an unbound 0.0.0.0 publish would expose these (trivial,
-    # throwaway) credentials to anything on the tailnet for the job's duration.
+    # not Postgres's default 5432, so this never collides with a `db` container
+    # from docker-compose.yml that may be running on this same box (ADR-0003).
+    # Bound to 127.0.0.1 only — this runner is reachable over the tailnet; an
+    # unbound 0.0.0.0 publish would expose these (trivial, throwaway)
+    # credentials to anything on the tailnet for the job's duration.
     services:
       postgres:
         image: postgres:16-alpine
@@ -38,10 +43,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # This runner's workspace is shared with deploy.yml, which reads
-          # the production `.env` sitting in it (see deploy.yml). The
-          # default `git clean -ffdx` here would delete that gitignored
-          # file before deploy.yml ever runs.
+          # deploy.yml no longer runs on this runner (ticket #70), but this
+          # workspace may still hold the `.env` of the stack earlier deploys
+          # started on this box — the default `git clean -ffdx` would delete
+          # that gitignored file. Safe to drop once that old stack is gone.
           clean: false
 
       # actions/setup-python can only fetch a prebuilt interpreter for GitHub's
@@ -51,10 +56,10 @@ jobs:
       # per-run venv works fine and needs no external download.
       - name: Install dependencies
         working-directory: backend
-        # `clean: false` above (needed to preserve the box's .env) means a
-        # stale .venv from a previous run would otherwise survive too, and
-        # `python3 -m venv` re-run against an existing venv doesn't remove
-        # packages no longer in requirements.txt — recreate it fresh instead.
+        # `clean: false` above means a stale .venv from a previous run would
+        # otherwise survive too, and `python3 -m venv` re-run against an
+        # existing venv doesn't remove packages no longer in
+        # requirements.txt — recreate it fresh instead.
         run: |
           rm -rf .venv
           python3 -m venv .venv
@@ -75,7 +80,7 @@ jobs:
         run: .venv/bin/pytest
 
   worker:
-    runs-on: [self-hosted, linux, x64, production]
+    runs-on: [self-hosted, linux, x64, ci]
 
     # Its own throwaway Postgres, same reasoning as the backend job's above
     # — a different port (5434) so the two jobs never collide even if this
@@ -101,8 +106,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # See the backend job's checkout step above — same shared-workspace
-          # reasoning.
+          # See the backend job's checkout step above — same reasoning.
           clean: false
 
       - name: Install dependencies
@@ -129,13 +133,12 @@ jobs:
         run: .venv/bin/pytest
 
   frontend:
-    runs-on: [self-hosted, linux, x64, production]
+    runs-on: [self-hosted, linux, x64, ci]
 
     steps:
       - uses: actions/checkout@v4
         with:
-          # See the backend job's checkout step above — same shared-workspace
-          # reasoning.
+          # See the backend job's checkout step above — same reasoning.
           clean: false
 
       - uses: actions/setup-node@v4

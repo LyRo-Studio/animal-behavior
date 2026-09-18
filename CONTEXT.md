@@ -310,6 +310,10 @@ runner: `lynn-delaere-prod`, running as a systemd service
 (`actions.runner.LyRo-Studio-animal-behavior.lynn-delaere-prod.service`)
 so it survives reboots. See
 `docs/adr/0003-self-hosted-runner-on-production-for-ci-cd.md`.
+**Amended by ticket #70:** that runner was never actually on the production
+box — it's on the development VM and now serves CI only (label `ci`); deploys
+run on a second runner on `dogtrace-app` (label `production-deploy`). See
+"CI/CD retarget (ticket #70)" below and ADR-0003's amendment.
 
 **CI/CD — deploy.yml (ticket #36):** Triggered by `workflow_run` off
 `ci.yml` completing successfully for `master` (never re-runs the checks),
@@ -328,13 +332,13 @@ authenticated with only the workflow's own `GITHUB_TOKEN`
   building from source unchanged. Deploy runs
   `docker compose ... up -d --pull always --no-build --wait` — `--no-build`
   guarantees the pulled tag is used rather than rebuilt on the box.
-- The frontend image's `VITE_API_BASE_URL` build-arg (baked in at build
-  time, per `frontend/Dockerfile`) is read from the production box's own
-  `.env` rather than duplicated into a GitHub Secret — consistent with
-  `.env` already being the one place production config lives. It isn't a
-  secret itself, so surfacing it via `GITHUB_OUTPUT` is safe; nothing else
-  from `.env` is echoed.
-- Both `ci.yml` and `deploy.yml`'s checkout steps set `clean: false`.
+- **Superseded by ticket #70 (see "CI/CD retarget" below):** the frontend
+  image's `VITE_API_BASE_URL` build-arg (baked in at build time, per
+  `frontend/Dockerfile`) was read from the production box's own hand-
+  maintained `.env`. It's now the `production` GitHub Environment's
+  `VITE_API_BASE_URL` variable, read directly by the build step.
+- **Superseded by ticket #70 for `deploy.yml`:** both `ci.yml` and
+  `deploy.yml`'s checkout steps set `clean: false`.
   `actions/checkout`'s default `git clean -ffdx` removes gitignored files
   too, which would delete the box's `.env` (shared workspace: the one
   runner reuses the same checkout directory for every workflow) before
@@ -748,6 +752,7 @@ final):**
   `lynn-delaere`, which is the *development* VM above) it has been running
   on the development VM the whole time — so every `deploy.yml` run has
   been deploying onto the dev box, not onto a separate production VM.
+  **Workflow half implemented in ticket #70 — see "CI/CD retarget" below.**
   Fix, once `dogtrace-app` is reachable (see Open Questions): register a
   **second, dedicated self-hosted runner directly on `dogtrace-app`**,
   labeled distinctly (e.g. `production-deploy`) and used only by
@@ -786,3 +791,116 @@ final):**
   already scoped to Cut/Dataset/report blobs only, with Postgres already
   holding the S3-key references (`report_s3_prefix`). Confirmed during
   grilling rather than assumed.
+
+**CI/CD retarget (ticket #70):** `deploy.yml`'s deploy job now runs on the
+`dogtrace-app` runner (`production-deploy` label, ticket #69) instead of the
+development VM, and production config is generated from a GitHub
+Environment instead of a hand-maintained file. The `.env` decisions above
+that this replaces are marked superseded in place.
+
+- **Runner labels:** `deploy.yml` → `[self-hosted, linux, x64,
+  production-deploy]`; `ci.yml`'s three jobs → `[self-hosted, linux, x64,
+  ci]` (was `production`). The label change on the development VM's runner
+  itself is a manual GitHub-side step — it has to exist there *before* this
+  merges, or CI jobs queue forever (and, since `deploy.yml` fires off CI
+  succeeding, nothing deploys either). The `ci` label must never be added to
+  the `dogtrace-app` runner, or CI would start executing on the production
+  box — the whole point of splitting them (CI compute never sees production
+  secrets or the production box).
+- **`.env` is generated on every deploy** by `deploy.yml`'s "Generate .env"
+  step from the `production` GitHub Environment (`environment: production`
+  on the deploy job, so only that job can read it). Runs *before* any image
+  build so a missing value fails in seconds. Written on the runner's own
+  filesystem (no network transfer), `umask 077` then `chmod 600`, via a
+  temp file + `mv` so a failed run never leaves a half-written `.env`.
+  Values reach the script only as `env:` entries (never interpolated into
+  script text) and errors name the variable, never its value; `secrets.*`
+  are additionally masked by GitHub. Never `cat`s `.env`.
+- **Values are single-quoted in `.env`** so `docker compose` reads them
+  literally — verified against a real `docker compose config` with a
+  password containing `$`, `"` and `#`; an unquoted `$` would be
+  interpolated. A value containing a single quote or line break can't be
+  represented that way, so it's rejected outright (which also blocks a
+  newline from injecting extra keys) instead of written mangled. Practical
+  consequence: no production secret may contain `'`.
+- **`POSTGRES_PASSWORD` is further restricted to `[A-Za-z0-9._~-]`:**
+  `docker-compose.yml` splices it into `DATABASE_URL` without URL-encoding, so
+  `@ / : ? # %` would corrupt the URL and the backend would crash-loop unable
+  to connect (found in review — the quoting check above only proves `.env`
+  parsing, not that the value survives being embedded in a URL). Checked in
+  the generator so it fails in seconds with a clear message instead.
+- **Required vs optional:** required (job fails naming everything missing):
+  `POSTGRES_PASSWORD`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+  `MEDIA_TOKEN_SECRET_KEY` (secrets); `S3_BUCKET`, `S3_ENDPOINT`,
+  `CORS_ORIGINS`, `VITE_API_BASE_URL` (variables). Optional, omitted from
+  `.env` when empty so compose's own defaults apply: `POSTGRES_USER`,
+  `POSTGRES_DB`, `S3_ADDRESSING_STYLE`, `IDENTITY_HEADER_NAME` (the last may
+  stay empty until ticket #72's header discovery).
+- **Transitional bridge, remove with ticket #72:** the backend still reads
+  its media-token signing key as `JWT_SECRET_KEY`, and `docker-compose.yml`
+  still hard-requires `FIRST_ADMIN_EMAIL`/`FIRST_ADMIN_PASSWORD` (app-level
+  auth isn't removed until #72). The ticket's Environment list names only
+  `MEDIA_TOKEN_SECRET_KEY`, so left as-is the first deploy would fail at
+  compose's `:?` checks. So the generator (a) also writes
+  `JWT_SECRET_KEY` = `MEDIA_TOKEN_SECRET_KEY`, and (b) additionally
+  *requires* `FIRST_ADMIN_EMAIL` (variable) and `FIRST_ADMIN_PASSWORD`
+  (secret) in the Environment — required here, rather than left to compose,
+  so the failure message says which GitHub Environment entry is missing.
+  Ticket #72 deletes all three lines when it renames the setting and drops
+  the auth variables.
+- **Also passed through, optional (found in review):** `SMTP_HOST`/
+  `SMTP_PORT`/`SMTP_USERNAME`/`SMTP_FROM_EMAIL`/`SMTP_USE_TLS` (variables),
+  `SMTP_PASSWORD` (secret) and `FRONTEND_BASE_URL` (variable). The old hand-
+  kept `.env` carried these; a regenerated one that silently dropped them
+  would leave invite emails only logged and invite links pointing at
+  `localhost:5173` until #72 removes the invite flow. Omitted when empty (an
+  empty `SMTP_HOST` is a legitimate "log, don't send" choice). Token
+  lifetimes and rate-limit knobs are *not* carried — compose's defaults
+  already match `.env.example`, so a value only needs adding if production
+  ever deviates. All of these go away with #72.
+- **`.env.example` deliberately does not yet list `MEDIA_TOKEN_SECRET_KEY`
+  or `IDENTITY_HEADER_NAME`:** nothing in the application or compose reads
+  either today (the backend still reads `JWT_SECRET_KEY`), so documenting
+  them there now would describe variables that do nothing. Ticket #72 adds
+  both when it renames the setting and starts reading the header.
+- **`deploy.yml`'s checkout no longer sets `clean: false`:** its only
+  reason was preserving a hand-placed `.env` across checkouts. With `.env`
+  regenerated every run, the default clean is now a benefit — a key removed
+  from the Environment can't linger from a previous deploy. `ci.yml` keeps
+  `clean: false` for now (its workspace may still hold the `.env` of the
+  stack earlier deploys started on the development VM); safe to drop once
+  that stack is decommissioned.
+- **The `production` Environment and its values are configured by hand in
+  GitHub** (Settings → Environments) — a secret's value isn't something this
+  repo (or an agent) should set. No `PROD_HOST`/`PROD_USER`/`PROD_SSH_KEY`/
+  `PROD_PORT` secrets exist; there is no SSH step. **Recommended when
+  creating it: restrict its deployment branches to `master`.** Without that,
+  a `workflow_dispatch` run from any branch (a `workflow_dispatch` can target
+  any ref a writer picks) could read every production secret. Not enforceable
+  from this repo's YAML.
+- **`image_tag` is no longer interpolated into the shell (separate commit):**
+  `Determine image tag` used to splice the free-text `image_tag` dispatch
+  input straight into a `run:` script on the production-adjacent runner.
+  Pre-existing rather than introduced here, but this job now also holds
+  production secrets, so it was fixed alongside: values go through `env:`,
+  and a rollback tag must match Docker's tag charset (also because it flows
+  into multi-line `tags:` inputs).
+- **"Fail loudly on a failed migration" holds, but slowly:** migrations run
+  as `alembic upgrade head && uvicorn` in the backend image's `CMD`, so a
+  failing migration exits the container; with `restart: unless-stopped` it
+  then restart-loops rather than staying down, never turns healthy, and
+  `up --wait` fails at `--wait-timeout` (up to 10 minutes) — nonzero exit,
+  red run, but not instant, and the old backend container is already gone by
+  then (ADR-0003's accepted outage window, ticket #41). Unchanged existing
+  behaviour; not verified against a real failing migration.
+- **Verification is operational, per the ticket:** no unit-test seam (YAML +
+  shell). The generator script was exercised locally (extracted verbatim from
+  the workflow) for: happy path (mode `600`, no leftover temp file),
+  missing-variable failure, single-quote and newline rejection, and a
+  `docker compose config` round-trip. Still to confirm after merge, on the
+  real runner: a `workflow_dispatch`/`master` run succeeding, `docker compose
+  ps` healthy on `dogtrace-app`, and the run showing on the `dogtrace-app`
+  runner in GitHub's own UI.
+- **Follow-up, not done here:** ADR-0003's body still describes one runner on
+  one box; it now carries an amendment note pointing at this section rather
+  than being rewritten, since the ADR records the original reasoning.
