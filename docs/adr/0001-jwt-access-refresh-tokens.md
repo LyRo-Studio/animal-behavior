@@ -1,6 +1,7 @@
 # Use JWT access + refresh tokens instead of cookie sessions
 
-**Status:** accepted
+**Status:** superseded by ADR-0004 (application-level authentication removed
+in favor of trusting an external access layer)
 
 The backend (FastAPI) and frontend (Vue SPA) authenticate via a JWT bearer
 token sent in the `Authorization` header, rather than a server-tracked

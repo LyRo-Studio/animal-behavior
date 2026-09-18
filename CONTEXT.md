@@ -732,3 +732,57 @@ long-lived local Postgres instance and corrupt later runs.
   real data outside this repo's version control — needs the project
   owner's own explicit go-ahead and timing, not something to run
   unilaterally as part of landing this fix.
+
+**Production architecture / auth-removal round — settled so far (pre-
+implementation planning; grilling in progress, not everything below is
+final):**
+
+- **Development VM vs. production VM, named:** `lynn-delaere`
+  (`100.91.91.89`, Tailscale) is the development VM; `dogtrace-app`
+  (`100.87.177.17`, Tailscale) is the production VM the application must
+  actually run on. These are two distinct machines.
+- **ADR-0003 correction — the self-hosted CI/CD runner is on the wrong
+  box today:** ADR-0003 states the runner (`lynn-delaere-prod`) lives on
+  "the production box." In fact (confirmed directly: the runner's own
+  systemd unit is `active`/`running` on the host literally named
+  `lynn-delaere`, which is the *development* VM above) it has been running
+  on the development VM the whole time — so every `deploy.yml` run has
+  been deploying onto the dev box, not onto a separate production VM.
+  Fix, once `dogtrace-app` is reachable (see Open Questions): register a
+  **second, dedicated self-hosted runner directly on `dogtrace-app`**,
+  labeled distinctly (e.g. `production-deploy`) and used only by
+  `deploy.yml`'s deploy job. The existing `lynn-delaere` runner keeps
+  `ci.yml`'s test/lint/build jobs (its `production` label there was always
+  misleading and should be dropped). Still **no SSH anywhere** in the
+  pipeline — "deploy" stays "the runner sitting on the box runs `docker
+  compose up` locally," just relocated to the correct box, preserving
+  ADR-0003's original no-SSH/no-tailnet-key rationale rather than
+  reversing it.
+- **Mechatronics is the single authentication boundary — the application
+  must not authenticate its own users.** It's an external firewall in
+  front of the production box that also forwards the authenticated
+  person's identity via an HTTP header present on every proxied request
+  (header name/exact format still unconfirmed — see Open Questions). This
+  supersedes `docs/adr/0001-jwt-access-refresh-tokens.md` in full: Account/
+  Admin/User role, JWT access/refresh tokens, password hashing, password
+  reset, email-invite activation, and the SMTP transport that exists only
+  to send those emails are all being removed. A new ADR will document this
+  once implemented, marking ADR-0001 superseded rather than deleting it.
+- **AnalysisJob visibility scoping is also being removed, not just the
+  Admin/User role split:** issue #44's "no cross-user visibility — each
+  Account only sees its own analyses" rule goes away; analysis history
+  becomes fully shared (everyone past Mechatronics sees every analysis).
+  The identity header is kept only for attribution, as a plain nullable
+  string column directly on `AnalysisJob` (not a separate account/identity
+  table — nothing in this round needs a roster of people, just a "run by"
+  label per analysis).
+- **No TLS between Mechatronics and the application:** the production box
+  has no public IP (tailnet-only), and Mechatronics/the tailnet is already
+  the trust boundary, so the new reverse proxy in front of frontend/backend
+  serves plain HTTP — no certificate or domain needed.
+- **Postgres/S3 split needs no migration — already correct:** `Account`,
+  `RefreshToken`, `AccountActionToken`, `AnalysisJob`, `AnalysisJobVideo`,
+  and `CutMediaInfo` already live in Postgres via SQLAlchemy/Alembic; S3 is
+  already scoped to Cut/Dataset/report blobs only, with Postgres already
+  holding the S3-key references (`report_s3_prefix`). Confirmed during
+  grilling rather than assumed.

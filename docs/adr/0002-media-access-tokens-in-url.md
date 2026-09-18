@@ -32,3 +32,11 @@ trade-off acceptable:
 - If this bucket's gateway is ever fixed to accept presigned URLs, or the auth model changes, this
   decision should be revisited — the reasoning here doesn't extend to the app's actual session
   tokens.
+- **Open question raised by ADR 0004 (application-level auth removed):** this ADR's entire premise
+  is that a native browser element can't carry the app's own `Authorization` header, unlike a JS
+  `fetch()` call. Under ADR 0004, identity instead comes from Mechatronics attaching a header at
+  the network/proxy layer, in front of *every* request the box receives — if that applies uniformly
+  to native-element requests (not just JS-initiated ones), the gap this ADR works around no longer
+  exists, and this entire token mechanism could be removed rather than merely kept/renamed. Not
+  something to act on without confirming that assumption empirically (same diagnostic step as
+  discovering the identity header's name/format — see issue #72) — flagged here, not decided.
