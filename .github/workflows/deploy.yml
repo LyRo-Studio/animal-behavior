@@ -25,6 +25,7 @@ concurrency:
 env:
   BACKEND_IMAGE: ghcr.io/lyro-studio/animal-behavior-backend
   FRONTEND_IMAGE: ghcr.io/lyro-studio/animal-behavior-frontend
+  WORKER_IMAGE: ghcr.io/lyro-studio/animal-behavior-worker
 
 jobs:
   deploy:
@@ -108,20 +109,46 @@ jobs:
             ${{ env.FRONTEND_IMAGE }}:${{ steps.image.outputs.tag }}
             ${{ env.FRONTEND_IMAGE }}:latest
 
+      # Build context is the repo root, not `worker` — `worker/Dockerfile`
+      # itself needs it that way to COPY files out of `backend/app` (see
+      # CONTEXT.md's "Analysis worker" > "Worker build context" decision).
+      - name: Build and push worker image
+        if: steps.image.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: worker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.WORKER_IMAGE }}:${{ steps.image.outputs.tag }}
+            ${{ env.WORKER_IMAGE }}:latest
+
       - name: Deploy
         env:
           BACKEND_IMAGE_REF: ${{ env.BACKEND_IMAGE }}:${{ steps.image.outputs.tag }}
           FRONTEND_IMAGE_REF: ${{ env.FRONTEND_IMAGE }}:${{ steps.image.outputs.tag }}
+          WORKER_IMAGE_REF: ${{ env.WORKER_IMAGE }}:${{ steps.image.outputs.tag }}
+        # --profile worker: `worker` sits behind Compose's `profiles:
+        # ["worker"]` gate (ticket #47 — keeps a GPU-less `docker compose
+        # up` from failing outright on a machine without one). Without this
+        # flag here, `worker` would silently never start on deploy even
+        # with its image built/pushed/overridden correctly — found and
+        # filed as a gap in this ticket's own issue comment before this was
+        # implemented, since backend/frontend health-checking successfully
+        # would otherwise mask it indefinitely.
         # --pull always: always fetch the exact tag from GHCR rather than
         # trusting whatever local image cache happens to be on the box.
         # --no-build: docker-compose.prod.yml layers `image:` on top of the
         # base file's `build:` — this guarantees compose uses the pulled
         # image rather than rebuilding from source on the box.
-        # --wait: blocks until db/backend/frontend all report healthy (or
-        # fails the step — see docker-compose.yml's healthchecks). Timeout
-        # covers the worst-case sequential health chain (db ~50s -> backend
-        # depends_on db ~55s -> frontend depends_on backend ~55s, ~160s)
-        # plus room for a slow `--pull always` of a freshly pushed image.
+        # --wait: blocks until db/backend/frontend all report healthy, and
+        # worker (no healthcheck of its own) is at least running (or fails
+        # the step — see docker-compose.yml's healthchecks). Timeout was
+        # 300s (sized for the db ~50s -> backend ~55s -> frontend ~55s
+        # sequential health chain, ~160s, plus pull headroom); bumped to
+        # 600s now that a slow `--pull always` also has to fetch worker's
+        # image, built FROM a CUDA/torch/ultralytics base that's multiple
+        # GB larger than backend/frontend's.
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-            up -d --pull always --no-build --wait --wait-timeout 300
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile worker \
+            up -d --pull always --no-build --wait --wait-timeout 600

@@ -597,3 +597,73 @@ Admin included), so this ticket is frontend-only.
   `AnalysesHistoryView.vue`; the second copy was caught in review and
   factored out instead, since both views (plus the inline panel) now need
   the identical formatting.
+
+**Docker/CI/CD wiring for the analysis worker (ticket #54):** `worker` is
+now deployed and built the same way `backend`/`frontend` already are. The
+GPU device reservation, S3/DB env vars, and `profiles: ["worker"]` gate
+already existed from ticket #47 (local `docker-compose.yml` only) — this
+ticket only adds the *deployment* plumbing: image publishing, the prod
+compose override, and actually starting `worker` on deploy.
+
+- **`docker-compose.prod.yml` gets a `worker` image override**, same
+  `image:`-on-top-of-`build:` pattern as `backend`/`frontend`
+  (`WORKER_IMAGE_REF`), read by `deploy.yml`'s Deploy step. Its
+  `profiles`/`deploy.resources` blocks stay defined only in the base file,
+  unchanged.
+- **`deploy.yml` builds and pushes `ghcr.io/lyro-studio/animal-behavior-worker`**,
+  tagged `sha-<short-commit>` and `latest`, same `docker/build-push-action`
+  step shape and `GITHUB_TOKEN`-only auth as backend/frontend — except
+  `context: .` (repo root) with an explicit `file: worker/Dockerfile`,
+  since `worker/Dockerfile` itself needs the repo root as its build context
+  to `COPY` files out of `backend/app` (see this file's "Analysis worker"
+  section, "Worker build context is the repo root" decision).
+- **Deploy's `docker compose ... up` now passes `--profile worker`** —
+  found missing during a stuck-`queued`-job investigation and filed as a
+  comment on this ticket before implementation started. Without it, the
+  base file's `profiles: ["worker"]` gate (deliberately there so a
+  GPU-less `docker compose up` doesn't fail outright — ticket #47) would
+  silently exclude `worker` from every deploy even with its image
+  built/pushed/overridden correctly; `backend`/`frontend` health-checking
+  successfully would have masked the gap indefinitely, since neither
+  depends on `worker`.
+- **`--wait-timeout` bumped 300s → 600s:** `worker`'s image is built
+  `FROM lynndelaere/dogtrace:1.1.1`, which bundles a full CUDA/torch/
+  ultralytics/opencv stack — multiple GB, versus backend/frontend's much
+  smaller images. A `--pull always` of a freshly-pushed worker image is
+  now expected to dominate the wait time, not the db→backend→frontend
+  health chain the original 300s budget was sized for.
+- **No new environment variables:** `worker`'s `DATABASE_URL`/`S3_*`/
+  `ANALYSIS_WORKER_*` vars were already added to `docker-compose.yml` (the
+  base file, shared by every compose invocation) in ticket #47.
+  `docker-compose.prod.yml` only ever overrides `image:`, never
+  `environment:`, so nothing further was needed here.
+- **Opt-in real-GPU/real-image test** (`worker/tests/test_real_gpu_inference.py`,
+  `real_gpu` marker, excluded from the default run via `worker/pyproject.toml`'s
+  `addopts` — same shape as ticket #23's `real_bucket` marker): exercises
+  `RealDogTraceRunner` — the actual `dogtrace` package, not a fake —
+  against a real CUDA GPU and a real C2 Cut pulled from the real S3
+  bucket. Skips (never fails) on any of three independent missing
+  prerequisites: `torch`/`dogtrace` unimportable (not actually running
+  with the dogtrace image's dependencies available), no CUDA device
+  (`torch.cuda.is_available()`), or S3 not configured (same check as
+  `test_s3_client_real_bucket.py`). Neither `worker/Dockerfile` nor
+  `worker/requirements.txt` installs pytest/alembic in the production
+  image (ticket #47's "no FastAPI/test deps" boundary), so this test is
+  run by installing `worker/requirements-dev.txt` into a shell inside a
+  running `worker` container (or an equivalent GPU+dogtrace environment)
+  — see the test file's own docstring for the exact command.
+- **Follow-up, not decided here (per the ticket):** whether to keep
+  pulling `lynndelaere/dogtrace` straight from Docker Hub in
+  `deploy.yml`/`worker/Dockerfile`, or mirror it into
+  `ghcr.io/lyro-studio/...` for consistency with the other three images.
+- **Known limitation, accepted rather than engineered around:** a
+  `workflow_dispatch` rollback to a tag from *before* this ticket merged
+  will fail — `WORKER_IMAGE_REF` is required unconditionally and
+  `--profile worker` is now always passed, but no
+  `ghcr.io/lyro-studio/animal-behavior-worker` image was ever published at
+  those older tags. Every tag from this ticket's merge onward always gets
+  all three images built together (same unconditional step shape as
+  backend/frontend), so this only affects rolling back to a handful of
+  already-stale tags right after merge, not an ongoing risk — not worth
+  the added complexity of detecting per-tag image existence for a
+  self-resolving, one-time gap.
