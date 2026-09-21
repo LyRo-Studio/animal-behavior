@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.analyses import router as analyses_router
+from app.api.debug import router as debug_router
 from app.api.health import router as health_router
 from app.api.media_browser import public_router as media_stream_router
 from app.api.media_browser import router as media_browser_router
@@ -47,3 +48,4 @@ app.include_router(whoami_router, prefix=API_PREFIX)
 app.include_router(media_browser_router, prefix=API_PREFIX)
 app.include_router(media_stream_router, prefix=API_PREFIX)
 app.include_router(analyses_router, prefix=API_PREFIX)
+app.include_router(debug_router, prefix=API_PREFIX)

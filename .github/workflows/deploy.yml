@@ -98,6 +98,9 @@ jobs:
           # `dogtrace-app` (ticket #72's diagnostic step) — empty means the
           # backend reads no identity at all.
           IDENTITY_HEADER_NAME: ${{ vars.IDENTITY_HEADER_NAME }}
+          # Temporary (ticket #72's header discovery): `true` enables the
+          # request-header diagnostic endpoint. Leave unset otherwise.
+          DEBUG_REQUEST_HEADERS_ENABLED: ${{ vars.DEBUG_REQUEST_HEADERS_ENABLED }}
           # Vestigial in production since ticket #71: the site is one origin behind
           # nginx, so no cross-origin request is ever made. Kept optional in case a
           # value is still set; compose's default applies when it is empty.
@@ -113,7 +116,7 @@ jobs:
           )
           optional=(
             POSTGRES_USER POSTGRES_DB S3_ADDRESSING_STYLE IDENTITY_HEADER_NAME
-            CORS_ORIGINS
+            CORS_ORIGINS DEBUG_REQUEST_HEADERS_ENABLED
           )
 
           missing=()

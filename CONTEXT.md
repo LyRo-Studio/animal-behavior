@@ -1045,7 +1045,9 @@ forgot-password/set-password/Admin views, the session store and every
   self-resolving gap ticket #54 accepted for its own rollback limitation. And the
   migration cannot be rolled back, so a pre-#72 image would not find its
   `accounts` table anyway.
-- **Identity-header discovery is still open.** The real header name is unknown
+- **Identity-header discovery is still open** (the "diagnostic was *not* added"
+  decision below is superseded by "Identity-header diagnostic (ticket #72,
+  follow-up)" at the end of this file). The real header name is unknown
   until `dogtrace-app` is live behind Mechatronics. The issue's suggested
   temporary `GET /api/debug/request-headers` diagnostic was **not** added: an
   endpoint echoing every request header would also echo any credential-bearing
@@ -1159,3 +1161,60 @@ from the frontend container and `/api/` from the backend container.
   production box. Out of this ticket's scope (it was never routed through
   anything), but it sits awkwardly with ADR-0004's "only Mechatronics' route
   should reach the app's data" and should be closed the same way.
+
+**Identity-header diagnostic (ticket #72, follow-up):** `GET /api/debug/request-headers`
+(`app/api/debug.py`, `app/services/request_diagnostics.py`) exists so the real
+identity header — and the media-token gate (does a native `<video>` request carry
+it?) — can be discovered from the browser console on the hosted site. Procedure in
+the README's "Discovering the identity header". It supersedes the "not added"
+decision under "Identity-header discovery is still open" above, on the owner's
+request, with the safeguards that decision was missing.
+
+- **Approved deviation from ENGINEERING-STANDARDS.md §5** ("Session or
+  authentication state must not be exposed through … client-visible debugging
+  information"): this endpoint deliberately returns request headers — which
+  include the identity Mechatronics forwards — to the client. Justification: the
+  header's name cannot be found any other way, and until it is, analyses go
+  unattributed and the media-token mechanism (ADR-0002) can't be judged for
+  removal. Bounded by: **off by default** (`DEBUG_REQUEST_HEADERS_ENABLED`, an
+  optional `production` Environment variable; when off the route is a plain 404),
+  used only while discovering and then switched off, returning **only the
+  caller's own request**, behind Mechatronics like everything else, and deleted
+  once #72 is closed out. It is not a standing feature.
+- **Credentials are not echoed, judged two ways.** By name: `cookie`, `set-cookie`,
+  `authorization`, `proxy-authorization` and any name containing `token`, `secret`,
+  `password`, `credential`, `key`, `session`, `jwt`, `bearer`, `assertion` or
+  `signature` come back `[redacted]`. By value, whatever the header is called: a
+  JWT-shaped value (starts `ey`, three dot-separated segments) or a
+  `Bearer`/`Basic`/`Digest`/`Negotiate` value. A query string is cut from *every*
+  value (URL-carrying headers like `Referer` or `X-Original-URI` would otherwise
+  echo the media token), and values are capped at 200 characters. `auth` and `user`
+  are deliberately *not* matched by name — the identity header is quite possibly
+  `X-Auth-User`, and hiding it would defeat the purpose — and an email-style
+  identity is not JWT-shaped. Residual risk, accepted for a temporary, off-by-
+  default, own-request-only endpoint: a secret in a header with an innocuous name
+  and an unrecognisable value is still shown.
+- **A repeated header shows every value** (`"first, second"`), not just the last —
+  an appended or spoofed identity must be visible when working out which header
+  to trust.
+- **The media-stream record is names-only:** the last 20 `/media/stream` requests
+  are kept in memory as header *names*, `Sec-Fetch-Dest`, a timestamp and whether
+  the identity header was present (via `get_identity`, so it can't drift from how
+  the app reads it) — never a value and never the query string (where the token
+  is). Recorded only **after** the media token validates, so junk requests can't
+  push the real `<video>` request out of the buffer. In-process, per worker, lost
+  on restart: correct only because the backend runs a single uvicorn worker
+  (`backend/Dockerfile`); with more workers the record would be partial.
+- **An empty `DEBUG_REQUEST_HEADERS_ENABLED=` means off**, as an empty
+  `IDENTITY_HEADER_NAME=` means "read none" — it must not stop the app starting.
+- **To remove it (when #72 is closed out):** delete `app/api/debug.py`,
+  `app/schemas/debug.py`, `app/services/request_diagnostics.py` and
+  `tests/test_debug_request_headers.py`; the router line in `app/main.py`; the
+  `record_media_request` call in `stream_cut` (`app/api/media_browser.py`); the
+  setting and its validator in `app/core/config.py`; and the variable in
+  `docker-compose.yml`, `.env.example` and `deploy.yml`. A middleware registered
+  only while the flag is on was considered to keep the hook out of `stream_cut`, and
+  declined: a per-request middleware is no less cross-cutting, and this list is
+  short.
+- Not in the OpenAPI schema. No frontend change — it is called with a one-line
+  `fetch` from the console.
