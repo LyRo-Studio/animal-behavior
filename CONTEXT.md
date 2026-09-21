@@ -1218,3 +1218,37 @@ request, with the safeguards that decision was missing.
   short.
 - Not in the OpenAPI schema. No frontend change — it is called with a one-line
   `fetch` from the console.
+
+**nginx :8000 API-only listener (stopgap for Mechatronics' `/api` route):** after
+#71 deployed, every `/api/*` request through `https://dogtrace.mechatronics.be`
+returned 504 after 30 s while `/` worked. Evidence it is Mechatronics' routing, not
+the app: `curl localhost:5173/api/health` and the debug endpoint work on the box;
+across several reloads nginx and the backend logged no `/api` request at all, only
+`/` and asset requests from Mechatronics' gateway (`10.25.3.1`); and the 15-byte
+`Gateway Timeout` body is a Go proxy's, not nginx's. The most likely cause — not
+confirmed, the route is managed by someone else — is a Mechatronics rule sending
+`/api` to `:8000`, where the backend was published before #71 closed it; the box's
+firewall then drops the connection, hence the hang.
+
+- **What was added:** `nginx/default.conf` gets a second `server` on `:8000`, and
+  `docker-compose.prod.yml` publishes it (`8000:8000` next to `5173:80`). It is
+  **API-only**: `/api/...` passes through unchanged, and any other path gets `/api`
+  put back (`/whoami` → `/api/whoami`, query string kept), because the old backend
+  had no prefix and it isn't known whether their rule strips it. It never serves
+  the frontend. Port 8000 reaches nginx, never the backend directly — ADR-0004's
+  "only Mechatronics' route reaches the app" is no weaker than for `:5173`, which is
+  published the same way.
+- **Preferred outcome is still one upstream:** the intended setup (#71) is
+  Mechatronics forwarding the whole host, `/api` included, to `:5173`. This listener
+  is a way to make their existing two-route setup work without waiting on them; once
+  they switch, delete it (the second `server`, the port line, the `:8000` checks in
+  `nginx/test.sh`).
+- **Only works if** their route can reach `:8000` on the box (the firewall allows
+  it from `10.25.3.1`) — not something this repo can check.
+- **Refactor:** the settings both listeners share moved into
+  `nginx/snippets/server-common.conf` and `api-proxy.conf`, included by each
+  `server`. `$backend` is set at *server* level on purpose: `rewrite … break` in the
+  `:8000` `location /` stops any later `set` in that location, which left the
+  variable empty (caught by `nginx/test.sh`). The token-redaction map now matches
+  `/media/stream` with or without `/api`.
+

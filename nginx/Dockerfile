@@ -3,3 +3,4 @@
 # rollback tag carries the nginx config that matched it.
 FROM nginx:1.27-alpine
 COPY default.conf /etc/nginx/conf.d/default.conf
+COPY snippets/ /etc/nginx/snippets/

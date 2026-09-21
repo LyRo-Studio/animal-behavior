@@ -56,9 +56,11 @@ start_stub() { # <name>
 
 # The proxy starts first, with neither upstream running yet. It must come up
 # anyway (upstreams are resolved per request, not at startup)...
-docker run -d --rm --name "$id-proxy" --network "$net" -p 127.0.0.1::80 "$img" >/dev/null
+docker run -d --rm --name "$id-proxy" --network "$net" -p 127.0.0.1::80 -p 127.0.0.1::8000 "$img" >/dev/null
 port="$(docker port "$id-proxy" 80/tcp | head -n1 | sed 's/.*://')"
 base="http://127.0.0.1:$port"
+api_port="$(docker port "$id-proxy" 8000/tcp | head -n1 | sed 's/.*://')"
+api_base="http://127.0.0.1:$api_port"
 
 for _ in $(seq 1 30); do
   code="$(curl -s -o /dev/null -w '%{http_code}' "$base/api/health" || true)"
@@ -100,14 +102,29 @@ echo "limits"
 code="$(head -c 2097152 /dev/zero | curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary @- "$base/api/analyses")"
 [ "$code" = "413" ] && pass "a 2 MB request body is refused with 413" || fail "2 MB body got HTTP $code, wanted 413"
 
+echo "port 8000: API-only listener for a Mechatronics /api route pointed at :8000"
+# The old backend answered on :8000 with no /api prefix, so a proxy route
+# written for it may or may not keep the prefix. Both must work.
+expect_contains "/api/... is passed through unchanged" \
+  "$(curl -s "$api_base/api/health")" "backend uri=/api/health"
+expect_contains "a prefix-stripped path gets /api put back" \
+  "$(curl -s "$api_base/whoami")" "backend uri=/api/whoami"
+expect_contains "the query string survives that rewrite" \
+  "$(curl -s "$api_base/media/tests?x=1&y=2")" "backend uri=/api/media/tests?x=1&y=2"
+expect_contains "the identity header reaches the backend here too" \
+  "$(curl -s -H 'X-Test-User: jan.peeters@vives.be' "$api_base/whoami")" "user=jan.peeters@vives.be"
+expect_contains "it never serves the frontend" "$(curl -s "$api_base/")" "backend uri=/api/"
+
 echo "media token never reaches a log (ADR-0002)"
 curl -s -o /dev/null "$base/api/media/stream?key=cuts/T001/a.mp4&action=play&token=SECRET-ONE"
 curl -s -o /dev/null "$base/api/media/stream?key=k&token=SECRET-TWO&token=SECRET-THREE"
 curl -s -o /dev/null "$base/api/media/%73tream?key=k&token=SECRET-FOUR"
 curl -s -o /dev/null "$base/api/media/stream?token=SECRET-FIVE&key=k"
+curl -s -o /dev/null "$api_base/api/media/stream?key=k&token=SECRET-SIX"
+curl -s -o /dev/null "$api_base/media/stream?key=k&token=SECRET-SEVEN"
 curl -s -o /dev/null "$base/api/media/tests"
 logs="$(docker logs "$id-proxy" 2>&1)"
-for secret in SECRET-ONE SECRET-TWO SECRET-THREE SECRET-FOUR SECRET-FIVE; do
+for secret in SECRET-ONE SECRET-TWO SECRET-THREE SECRET-FOUR SECRET-FIVE SECRET-SIX SECRET-SEVEN; do
   expect_absent "$secret is not in the proxy logs" "$logs" "$secret"
 done
 expect_contains "the stream requests are still logged (by path)" "$logs" "GET /api/media/stream "

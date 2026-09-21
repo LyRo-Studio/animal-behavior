@@ -22,7 +22,11 @@ services:
 
   # 5173 is the port Mechatronics forwards dogtrace.mechatronics.be to — kept
   # so nginx replaces the frontend there without any change on their side.
+  # 8000 is nginx's API-only listener, for a Mechatronics `/api` route that
+  # still points at the port the backend used to be published on (see
+  # nginx/default.conf). It reaches nginx, never the backend directly.
   nginx:
     image: ${NGINX_IMAGE_REF:?Set NGINX_IMAGE_REF (see .github/workflows/deploy.yml)}
     ports:
       - "5173:80"
+      - "8000:8000"
