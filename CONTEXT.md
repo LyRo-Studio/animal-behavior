@@ -834,8 +834,10 @@ that this replaces are marked superseded in place.
   `MEDIA_TOKEN_SECRET_KEY` (secrets); `S3_BUCKET`, `S3_ENDPOINT`,
   `CORS_ORIGINS`, `VITE_API_BASE_URL` (variables). Optional, omitted from
   `.env` when empty so compose's own defaults apply: `POSTGRES_USER`,
-  `POSTGRES_DB`, `S3_ADDRESSING_STYLE`, `IDENTITY_HEADER_NAME` (the last may
-  stay empty until ticket #72's header discovery).
+  `POSTGRES_DB`, `S3_ADDRESSING_STYLE`. `IDENTITY_HEADER_NAME` is also
+  optional and omitted when empty, but it's the exception to "compose's
+  defaults apply": neither compose nor the backend reads it yet, so writing
+  it to `.env` is currently a no-op until ticket #72's header discovery.
 - **Transitional bridge, remove with ticket #72:** the backend still reads
   its media-token signing key as `JWT_SECRET_KEY`, and `docker-compose.yml`
   still hard-requires `FIRST_ADMIN_EMAIL`/`FIRST_ADMIN_PASSWORD` (app-level
@@ -863,6 +865,15 @@ that this replaces are marked superseded in place.
   either today (the backend still reads `JWT_SECRET_KEY`), so documenting
   them there now would describe variables that do nothing. Ticket #72 adds
   both when it renames the setting and starts reading the header.
+- **`.env.example` must keep the auth variables until #72:** a follow-up
+  commit (`d62b670`, same title as the main one) stripped 22 of them —
+  `JWT_SECRET_KEY`, `FIRST_ADMIN_*`, `SMTP_*`, token lifetimes, rate-limit
+  knobs — leaving `cp .env.example .env && docker compose config` failing on
+  compose's `:?` checks for `JWT_SECRET_KEY`/`FIRST_ADMIN_EMAIL`/
+  `FIRST_ADMIN_PASSWORD` (reproduced), and breaking ENGINEERING-STANDARDS.md
+  §2's "document every required variable". Restored to the first commit's
+  content, so `.env.example`'s only net change for #70 is its header. #72
+  removes them together with the code that reads them.
 - **`deploy.yml`'s checkout no longer sets `clean: false`:** its only
   reason was preserving a hand-placed `.env` across checkouts. With `.env`
   regenerated every run, the default clean is now a benefit — a key removed

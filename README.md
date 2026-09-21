@@ -31,7 +31,7 @@ docker compose up --build
 - Frontend: http://localhost:5173
 - Backend: http://localhost:8000 (see `/health`)
 
-`.env` holds local secrets (DB password, JWT signing key, S3 credentials, SMTP config) and is never committed — see `.env.example` for every variable and what it's for.
+`.env` holds local secrets (DB password, JWT signing key, S3 credentials, SMTP config) and is never committed — see `.env.example` for every variable the local stack reads and what it's for.
 
 ## Development (without Docker)
 
