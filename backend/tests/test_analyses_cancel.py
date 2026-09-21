@@ -11,7 +11,9 @@ from tests.helpers import identity_headers
 
 
 def _create_job(client, headers=None, *, test_id="T001", cut="cuts/T001/T001_C2_ME_F1.mp4"):
-    response = client.post("/analyses", json={"test_id": test_id, "cuts": [cut]}, headers=headers)
+    response = client.post(
+        "/api/analyses", json={"test_id": test_id, "cuts": [cut]}, headers=headers
+    )
     assert response.status_code == 201, response.text
     return response.json()["id"]
 
@@ -26,13 +28,13 @@ def _set_status(db_session, analysis_id: int, status: AnalysisJobStatus) -> None
 def test_cancel_a_queued_job_sets_status_to_cancelled(client, db_session):
     analysis_id = _create_job(client)
 
-    response = client.post(f"/analyses/{analysis_id}/cancel")
+    response = client.post(f"/api/analyses/{analysis_id}/cancel")
 
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "cancelled"
     assert response.json()["finished_at"] is not None
 
-    get_response = client.get(f"/analyses/{analysis_id}")
+    get_response = client.get(f"/api/analyses/{analysis_id}")
     assert get_response.json()["status"] == "cancelled"
     assert get_response.json()["finished_at"] is not None
 
@@ -51,10 +53,10 @@ def test_cancel_a_non_queued_job_is_rejected_and_status_unchanged(client, db_ses
     analysis_id = _create_job(client)
     _set_status(db_session, analysis_id, status)
 
-    response = client.post(f"/analyses/{analysis_id}/cancel")
+    response = client.post(f"/api/analyses/{analysis_id}/cancel")
 
     assert response.status_code == 409
-    get_response = client.get(f"/analyses/{analysis_id}")
+    get_response = client.get(f"/api/analyses/{analysis_id}")
     assert get_response.json()["status"] == status.value
 
 
@@ -64,7 +66,7 @@ def test_cancel_a_job_created_by_another_identity_succeeds(client):
     analysis_id = _create_job(client, identity_headers("owner@vives.be"))
 
     response = client.post(
-        f"/analyses/{analysis_id}/cancel", headers=identity_headers("other@vives.be")
+        f"/api/analyses/{analysis_id}/cancel", headers=identity_headers("other@vives.be")
     )
 
     assert response.status_code == 200
@@ -72,6 +74,6 @@ def test_cancel_a_job_created_by_another_identity_succeeds(client):
 
 
 def test_cancel_an_unknown_job_is_not_found(client):
-    response = client.post("/analyses/999999/cancel")
+    response = client.post("/api/analyses/999999/cancel")
 
     assert response.status_code == 404

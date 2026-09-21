@@ -15,7 +15,7 @@ def test_top_level_lists_datasets_and_excludes_cuts_and_source(client, db_sessio
     s3_client.objects["cuts/T001/T001_C1_ME_F1.mp4"] = b"c"
     s3_client.objects["source/T001/raw.mp4"] = b"d"
 
-    response = client.get("/media/datasets")
+    response = client.get("/api/media/datasets")
 
     assert response.status_code == 200
     entries = response.json()
@@ -28,7 +28,7 @@ def test_navigating_into_a_dataset_shows_its_immediate_children(client, db_sessi
     s3_client.objects["dataset_v0.9/valid/b.png"] = b"b"
     s3_client.objects["dataset_v0.9/README.md"] = b"readme"
 
-    response = client.get("/media/datasets", params={"path": "dataset_v0.9"})
+    response = client.get("/api/media/datasets", params={"path": "dataset_v0.9"})
 
     assert response.status_code == 200
     entries = response.json()
@@ -48,7 +48,7 @@ def test_navigating_deeper_shows_only_that_splits_children(client, db_session, s
     s3_client.objects["dataset_v0.9/train/img2.png"] = b"b"
     s3_client.objects["dataset_v0.9/valid/img3.png"] = b"c"
 
-    response = client.get("/media/datasets", params={"path": "dataset_v0.9/train"})
+    response = client.get("/api/media/datasets", params={"path": "dataset_v0.9/train"})
 
     assert response.status_code == 200
     entries = response.json()
@@ -59,7 +59,7 @@ def test_navigating_deeper_shows_only_that_splits_children(client, db_session, s
 def test_browsing_an_unknown_dataset_path_returns_not_found(client, db_session, s3_client):
     s3_client.objects["dataset_v0.9/train/a.png"] = b"a"
 
-    response = client.get("/media/datasets", params={"path": "dataset_v0.9/does-not-exist"})
+    response = client.get("/api/media/datasets", params={"path": "dataset_v0.9/does-not-exist"})
 
     assert response.status_code == 404
 
@@ -82,7 +82,7 @@ def test_a_dataset_path_never_resolves_outside_a_dataset_prefix(client, db_sessi
         "dataset_v0.9/../../cuts",
         ".",
     ]:
-        response = client.get("/media/datasets", params={"path": path})
+        response = client.get("/api/media/datasets", params={"path": path})
         assert response.status_code == 404
         assert b"secret" not in response.content
 
@@ -90,9 +90,9 @@ def test_a_dataset_path_never_resolves_outside_a_dataset_prefix(client, db_sessi
 def test_dataset_browser_needs_no_login_and_ignores_identity(client, s3_client):
     s3_client.objects["dataset_v0.9/train/a.png"] = b"a"
 
-    anonymous = client.get("/media/datasets", params={"path": "dataset_v0.9"})
+    anonymous = client.get("/api/media/datasets", params={"path": "dataset_v0.9"})
     identified = client.get(
-        "/media/datasets",
+        "/api/media/datasets",
         params={"path": "dataset_v0.9"},
         headers=identity_headers("jan.peeters@vives.be"),
     )
@@ -100,4 +100,4 @@ def test_dataset_browser_needs_no_login_and_ignores_identity(client, s3_client):
     assert anonymous.status_code == 200
     assert identified.status_code == 200
     assert anonymous.json() == identified.json()
-    assert client.get("/media/datasets").status_code == 200
+    assert client.get("/api/media/datasets").status_code == 200

@@ -22,7 +22,7 @@ def _access_log_record(full_path: str) -> logging.LogRecord:
 
 def test_redacts_the_token_query_parameter():
     record = _access_log_record(
-        "/media/stream?key=cuts/T001/a.mp4&action=play&token=secret.jwt.value"
+        "/api/media/stream?key=cuts/T001/a.mp4&action=play&token=secret.jwt.value"
     )
 
     RedactMediaTokenFilter().filter(record)
@@ -35,14 +35,14 @@ def test_redacts_the_token_query_parameter():
 
 
 def test_leaves_a_request_with_no_token_param_unchanged():
-    record = _access_log_record("/media/tests")
+    record = _access_log_record("/api/media/tests")
 
     RedactMediaTokenFilter().filter(record)
 
-    assert record.args[2] == "/media/tests"
+    assert record.args[2] == "/api/media/tests"
 
 
 def test_filter_always_returns_true_so_the_record_is_still_logged():
-    record = _access_log_record("/media/stream?token=secret")
+    record = _access_log_record("/api/media/stream?token=secret")
 
     assert RedactMediaTokenFilter().filter(record) is True

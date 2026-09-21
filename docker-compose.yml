@@ -49,13 +49,15 @@ services:
       # unchanged.
       FFPROBE_PATH: ${FFPROBE_PATH:-ffprobe}
       FFPROBE_TIMEOUT_SECONDS: ${FFPROBE_TIMEOUT_SECONDS:-30}
-    ports:
-      - "8000:8000"
+    # No host port (ticket #71): only `nginx` is reachable from outside the
+    # Docker network, so nothing can bypass Mechatronics by hitting the
+    # backend directly (ADR-0004). docker-compose.override.yml re-publishes
+    # it for local development only.
     depends_on:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -102,15 +104,35 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api}
     restart: unless-stopped
-    ports:
-      - "5173:4173"
+    # No host port — see `backend` above.
     depends_on:
       backend:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:4173/', res => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # Reverse proxy (ticket #71): `/` -> frontend, `/api/` -> backend, one
+  # origin. No `ports:` here on purpose — the host port differs per
+  # environment (docker-compose.override.yml locally, docker-compose.prod.yml
+  # on the production box, where it is what Mechatronics forwards to).
+  nginx:
+    build: ./nginx
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    healthcheck:
+      # 127.0.0.1, not localhost: busybox wget may try ::1 first, where
+      # nginx isn't listening.
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1/"]
       interval: 5s
       timeout: 5s
       retries: 10

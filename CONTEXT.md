@@ -328,6 +328,9 @@ authenticated with only the workflow's own `GITHUB_TOKEN`
   `frontend/Dockerfile`) was read from the production box's own hand-
   maintained `.env`. It's now the `production` GitHub Environment's
   `VITE_API_BASE_URL` variable, read directly by the build step.
+  **Superseded again by ticket #71:** no longer a variable at all — `deploy.yml`
+  builds the frontend with the fixed value `/api` (see "Reverse proxy and
+  `/api` prefix (ticket #71)" below).
 - **Superseded by ticket #70 for `deploy.yml`:** both `ci.yml` and
   `deploy.yml`'s checkout steps set `clean: false`.
   `actions/checkout`'s default `git clean -ffdx` removes gitignored files
@@ -825,7 +828,8 @@ that this replaces are marked superseded in place.
 - **Required vs optional:** required (job fails naming everything missing):
   `POSTGRES_PASSWORD`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
   `MEDIA_TOKEN_SECRET_KEY` (secrets); `S3_BUCKET`, `S3_ENDPOINT`,
-  `CORS_ORIGINS`, `VITE_API_BASE_URL` (variables). Optional, omitted from
+  `CORS_ORIGINS` (variables; `VITE_API_BASE_URL` was here until ticket #71
+  fixed it in the workflow). Optional, omitted from
   `.env` when empty so compose's own defaults apply: `POSTGRES_USER`,
   `POSTGRES_DB`, `S3_ADDRESSING_STYLE`. `IDENTITY_HEADER_NAME` is also
   optional and omitted when empty, but it's the exception to "compose's
@@ -932,8 +936,8 @@ forgot-password/set-password/Admin views, the session store and every
   no check that the header really came from Mechatronics (ADR-0004: the network
   topology is what makes that safe).
 - **`GET /whoami` echoes the identity back** (`{"identity": string | null}`) so
-  Home can show "Signed in as …". No `/api` prefix yet — that arrives with the
-  reverse proxy (ticket #3). A failed lookup just hides the line on Home.
+  Home can show "Signed in as …". Served as `/api/whoami` since ticket #71 (it had no prefix
+  when #72 shipped). A failed lookup just hides the line on Home.
 - **`AnalysisJob.requested_by` (FK to `accounts`) became `requested_by_identity`**
   (`String(320)`, nullable, no FK) and is exposed on `AnalysisJobOut` so history
   and detail views can show who ran each analysis. Every analysis is now visible
@@ -991,13 +995,14 @@ forgot-password/set-password/Admin views, the session store and every
   mechanism, key the stream endpoint on the Cut key directly with its own shape
   validation, decide explicitly whether the stream endpoint or Nginx/
   Mechatronics owns its DoS limit, drop `MEDIA_TOKEN_SECRET_KEY`).
-- **Open: the backend port is still published.** `docker-compose.yml` still maps
-  `8000:8000` on the `backend` service. ADR-0004 calls the network topology
+- **Resolved by ticket #71 — the backend port is no longer published.** (Cited
+  there and in the PR as "ticket #3", which is actually the closed Login &
+  session ticket; the reverse-proxy work is #71.) It used to be open:
+  `docker-compose.yml` mapped `8000:8000` on the `backend` service. ADR-0004 calls the network topology
   "load-bearing" (only Mechatronics' routed path should reach the backend, since
   the identity header is trusted unverified), so a host-published backend port is
-  now part of what that decision depends on. Left alone here — it is the reverse-
-  proxy work in ticket #3 (which also brings the `/api` prefix `GET /whoami`
-  lacks) — but that ticket, or whoever deploys before it, must close it.
+  now part of what that decision depends on. Left alone in #72 as reverse-proxy
+  work, and closed by #71.
 - **The 500-row cap is silent.** `list_analysis_jobs` drops jobs beyond the newest
   500 with no indication in the History or per-Test views, which sits awkwardly
   with "see every analysis that's been run". Fine at today's volume; the fix is
@@ -1057,3 +1062,100 @@ forgot-password/set-password/Admin views, the session store and every
   handling, ticket #63's territory, was deleted with the mechanism it served).
   "Analyses history (ticket #53)" lists every analysis, not "the current
   Account's own".
+
+**Reverse proxy and `/api` prefix (ticket #71):** the site is reached at
+`https://dogtrace.mechatronics.be` — Mechatronics terminates TLS and forwards
+to `dogtrace-app`, port 5173. Everything is now one origin: nginx serves `/`
+from the frontend container and `/api/` from the backend container.
+
+- **Found after ticket #72 deployed, not designed in advance:** the frontend
+  was built with `VITE_API_BASE_URL=http://100.91.91.89:8000` — the
+  *development* VM's address — so every API call from the HTTPS page was an
+  `http://` request to a host and port Mechatronics doesn't route, blocked by
+  the browser as mixed content ("NetworkError when attempting to fetch
+  resource" in the UI). Correcting the IP would not have helped: no absolute
+  `http://` backend URL can work from that page, and the backend port isn't
+  reachable through Mechatronics at all.
+- **Every backend route is mounted under `/api`** (`app/main.py`'s
+  `API_PREFIX`), including the interactive docs (`/api/docs`,
+  `/api/openapi.json`) — otherwise `/docs` would fall through to the
+  frontend's SPA fallback. The proxy therefore never rewrites a path. There is
+  no unprefixed alias (tested); the backend healthcheck is `/api/health`.
+- **nginx is a config-only image, not a bind-mounted file:** `nginx/Dockerfile`
+  copies `nginx/default.conf` into `nginx:1.27-alpine`, and `deploy.yml` builds
+  and pushes it as `ghcr.io/lyro-studio/animal-behavior-nginx` next to the
+  other three (`NGINX_IMAGE_REF` in `docker-compose.prod.yml`). ENGINEERING-
+  STANDARDS.md §3 wants production on immutable images built from
+  Dockerfiles, and a rollback tag then carries the nginx config that matched
+  it instead of whatever is on the checked-out branch. The issue said only "a
+  new `nginx` service"; this is an implementation choice within that.
+- **Only nginx is published.** The base `docker-compose.yml` gives
+  `backend`/`frontend`/`nginx` no host ports; `docker-compose.prod.yml`
+  publishes nginx on `5173` — the port Mechatronics already forwards to, so
+  nothing changes on their side. The issue also wanted local development to
+  keep using `:5173`/`:8000` directly, which contradicts dropping the ports
+  from the base file; reconciled with `docker-compose.local.yml`, selected by
+  `COMPOSE_FILE` in the developer's `.env` (`.env.example` sets it) and never
+  present in production's generated `.env`. It re-publishes `8000`/`5173` and
+  adds the proxied entry point on `8080` (only meaningful when the frontend
+  was built with `VITE_API_BASE_URL=/api`, since the default bakes in the
+  direct URL). It is deliberately not `docker-compose.override.yml`: compose
+  merges that automatically, so a hand-run `docker compose up` on
+  `dogtrace-app` would have re-published the backend port and bypassed
+  nginx/Mechatronics (found in review). Cost: an existing local `.env` needs
+  `COMPOSE_FILE`/`COMPOSE_PATH_SEPARATOR` added and `VITE_API_BASE_URL`
+  changed to `.../api` (README's "Upgrading an existing `.env`").
+- **`VITE_API_BASE_URL` is a fixed `/api` in `deploy.yml`, not an Environment
+  variable** — it was the misconfiguration behind the outage above, and with
+  one origin there is only one correct value. It is dropped from the required
+  list and from the generated `.env`; the `production` Environment's copy of
+  the variable can be deleted. `CORS_ORIGINS`, unused for the same reason,
+  moved from required to optional. The frontend's local default is now
+  `http://localhost:8000/api`.
+- **The frontend resolves a relative base against the page origin**
+  (`apiUrl()` in `services/apiBase.ts`): four call sites did `new URL(
+  API_BASE_URL + path)`, which throws for a relative base like `/api`.
+- **nginx behaviour worth knowing:** upstreams are resolved per request via
+  Docker's DNS (`resolver 127.0.0.11` + variables in `proxy_pass`), so a
+  redeployed backend/frontend container with a new IP doesn't leave nginx
+  proxying to a dead address; request bodies are capped at 1 MB (all are small
+  JSON, ENGINEERING-STANDARDS.md §5); `/api/` is unbuffered so a Cut streamed
+  with Range requests isn't spooled to disk; `/api/` reads may take up to 120 s
+  (`/api/media/cuts/info` downloads a Cut and runs `ffprobe`);
+  `underscores_in_headers on` so an identity header whose name contains
+  underscores (still unknown, ticket #72) isn't silently dropped. Mechatronics'
+  identity header is forwarded untouched — no `proxy_set_header` overrides it.
+- **The media token stays out of nginx's logs (ADR-0002):** the stream
+  endpoint's `token` query parameter would otherwise be written verbatim by
+  nginx's default access log. For `/api/media/stream`, `default.conf` logs the
+  normalised path only and drops the query string entirely (matched on `$uri`,
+  so an encoded path can't dodge it) — a first version that blanked `token=`
+  with a regex leaked when the parameter was repeated (found in review).
+  nginx's *error* log quotes the request line
+  on upstream failures and can't be redacted, so it is set to `crit`: a failed
+  upstream still shows as a 502 in the access log, with the cause in the
+  backend's own log. Accepted trade-off.
+- **`X-Forwarded-For` is still not trusted.** There is a proxy now (the note
+  under "Brute-force throttling" above says there was none), but the only
+  rate limits left are keyed per identity, not per IP, so nothing reads it.
+- **Tested:** `nginx/test.sh` (a CI job, `nginx`) builds the image, puts it in
+  front of two stub upstreams on a throwaway Docker network, and checks: it
+  starts with no upstream and finds them later; `/` -> frontend, `/api/...` ->
+  backend with the path untouched; the identity header, `Host` (with port) and
+  `Range` reach the backend; `/api` redirects relatively; a 2 MB body is 413;
+  and no `token=` value — including a repeated one, a percent-encoded path
+  and a token-first query — appears in nginx's log. Run against the first
+  version of the redaction (a regex over the request URI) it caught a
+  repeated-`token=` leak that code review had found, so the check can fail.
+  **Not exercised:** the real backend/frontend containers behind it, or TLS
+  and Mechatronics. After deploying, check `https://dogtrace.mechatronics.be/`
+  and `https://dogtrace.mechatronics.be/api/health`, then that a Cut plays and
+  seeks.
+- **Known limitation, accepted:** a rollback `workflow_dispatch` to a tag from
+  before this ticket fails (no `animal-behavior-nginx` image exists at those
+  tags, and those frontend images call an absolute backend URL) — the same
+  kind of one-time gap tickets #54 and #72 accepted.
+- **Follow-up, not done here:** `db` still publishes `5432:5432` on the
+  production box. Out of this ticket's scope (it was never routed through
+  anything), but it sits awkwardly with ADR-0004's "only Mechatronics' route
+  should reach the app's data" and should be closed the same way.

@@ -9,7 +9,9 @@ from tests.helpers import identity_headers
 
 
 def _create_job(client, headers=None, *, test_id="T001", cut="cuts/T001/T001_C2_ME_F1.mp4"):
-    response = client.post("/analyses", json={"test_id": test_id, "cuts": [cut]}, headers=headers)
+    response = client.post(
+        "/api/analyses", json={"test_id": test_id, "cuts": [cut]}, headers=headers
+    )
     assert response.status_code == 201, response.text
     return response.json()["id"]
 
@@ -40,7 +42,7 @@ def test_download_report_for_completed_job_returns_the_xlsx_bytes(client, db_ses
         db_session, analysis_id, status=AnalysisJobStatus.COMPLETED, report_s3_prefix=prefix
     )
 
-    response = client.get(f"/analyses/{analysis_id}/report")
+    response = client.get(f"/api/analyses/{analysis_id}/report")
 
     assert response.status_code == 200
     assert response.content == b"fake-xlsx-bytes"
@@ -63,7 +65,7 @@ def test_download_report_for_completed_with_errors_job_returns_the_xlsx_bytes(
         report_s3_prefix=prefix,
     )
 
-    response = client.get(f"/analyses/{analysis_id}/report")
+    response = client.get(f"/api/analyses/{analysis_id}/report")
 
     assert response.status_code == 200
     assert response.content == b"fake-xlsx-bytes"
@@ -72,7 +74,7 @@ def test_download_report_for_completed_with_errors_job_returns_the_xlsx_bytes(
 def test_download_report_for_a_queued_job_is_rejected(client, db_session, s3_client):
     analysis_id = _create_job(client)
 
-    response = client.get(f"/analyses/{analysis_id}/report")
+    response = client.get(f"/api/analyses/{analysis_id}/report")
 
     assert response.status_code == 409
 
@@ -84,7 +86,7 @@ def test_download_report_for_a_running_job_is_rejected(client, db_session, s3_cl
     db_session.add(job)
     db_session.commit()
 
-    response = client.get(f"/analyses/{analysis_id}/report")
+    response = client.get(f"/api/analyses/{analysis_id}/report")
 
     assert response.status_code == 409
 
@@ -99,7 +101,7 @@ def test_download_report_for_a_failed_job_is_rejected(client, db_session, s3_cli
         video_status=AnalysisJobVideoStatus.FAILED,
     )
 
-    response = client.get(f"/analyses/{analysis_id}/report")
+    response = client.get(f"/api/analyses/{analysis_id}/report")
 
     assert response.status_code == 409
 
@@ -111,7 +113,7 @@ def test_download_report_for_a_cancelled_job_is_rejected(client, db_session, s3_
     db_session.add(job)
     db_session.commit()
 
-    response = client.get(f"/analyses/{analysis_id}/report")
+    response = client.get(f"/api/analyses/{analysis_id}/report")
 
     assert response.status_code == 409
 
@@ -126,7 +128,7 @@ def test_download_report_for_a_job_run_by_another_identity_succeeds(client, db_s
     )
 
     response = client.get(
-        f"/analyses/{analysis_id}/report", headers=identity_headers("other@vives.be")
+        f"/api/analyses/{analysis_id}/report", headers=identity_headers("other@vives.be")
     )
 
     assert response.status_code == 200
@@ -134,7 +136,7 @@ def test_download_report_for_a_job_run_by_another_identity_succeeds(client, db_s
 
 
 def test_download_report_for_an_unknown_job_is_not_found(client, s3_client):
-    response = client.get("/analyses/999999/report")
+    response = client.get("/api/analyses/999999/report")
 
     assert response.status_code == 404
 
@@ -147,6 +149,6 @@ def test_download_report_missing_from_s3_is_not_found(client, db_session, s3_cli
         db_session, analysis_id, status=AnalysisJobStatus.COMPLETED, report_s3_prefix=prefix
     )
 
-    response = client.get(f"/analyses/{analysis_id}/report")
+    response = client.get(f"/api/analyses/{analysis_id}/report")
 
     assert response.status_code == 404
