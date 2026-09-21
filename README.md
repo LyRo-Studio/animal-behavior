@@ -80,7 +80,7 @@ Deploy (`.github/workflows/deploy.yml`) triggers automatically once `ci.yml` suc
 
 1. Generates `.env` on the runner from the `production` GitHub Environment (see below) — failing immediately if a required value is missing.
 2. Builds the backend, frontend, worker and nginx images and pushes them to GHCR, tagged both `sha-<short-commit>` and `latest`. The frontend is always built with `VITE_API_BASE_URL=/api` (same origin), and the `nginx` image is a config-only image (`nginx/`).
-3. Runs `docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile worker up -d --pull always --no-build --wait` on the production VM (`dogtrace-app`, the runner labelled `production-deploy`) against those published images, blocking until all services report healthy. Only `nginx` publishes a host port (5173, the port Mechatronics forwards to); backend and frontend are internal to the Docker network.
+3. Runs `docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile worker up -d --pull always --no-build --wait` on the production VM (`dogtrace-app`, the runner labelled `production-deploy`) against those published images, blocking until all services report healthy. Only `nginx` publishes host ports — 5173 (the port Mechatronics forwards to) and 8000 (an API-only listener for a Mechatronics `/api` route still pointed at the port the backend used to be on; see `nginx/default.conf`); backend and frontend are internal to the Docker network.
 
 **Production configuration** lives in the repo's `production` GitHub Environment (Settings → Environments), not in a hand-edited file on the box. Each deploy regenerates `.env` from it (`chmod 600`, never logged), so rotating a secret means updating GitHub and redeploying.
 
