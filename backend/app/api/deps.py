@@ -1,82 +1,50 @@
-import jwt
-from fastapi import Depends, HTTPException, Request, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.orm import Session
+from fastapi import HTTPException, Request, status
 
-from app.core.security import decode_access_token
-from app.db.session import get_db
-from app.models.account import Account, AccountRole
+from app.core.config import settings
+from app.models.analysis_job import REQUESTED_BY_IDENTITY_MAX_LENGTH
 from app.services.rate_limit import RateLimitResult
 
-_bearer_scheme = HTTPBearer(auto_error=False)
 
+def get_identity(request: Request) -> str | None:
+    """The identity Mechatronics forwarded for this request, or None.
 
-def get_current_account(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
-    db: Session = Depends(get_db),
-) -> Account:
-    """Resolve the Account for a valid, unexpired access token.
+    Ticket #72 / docs/adr/0004-trust-mega-tronics-remove-application-auth.md:
+    the app no longer authenticates anyone — Mechatronics does — so this is
+    used **only for attribution** (which analysis was run by whom, and as a
+    rate-limit key), never to allow or deny anything.
 
-    401s on anything wrong with the token *and* on a deactivated account —
-    the latter is defense-in-depth on top of the refresh-cycle guarantee in
-    docs/adr/0001-jwt-access-refresh-tokens.md, not a replacement for it (an
-    already-issued access token otherwise can't be revoked before it
-    naturally expires).
+    None when `identity_header_name` isn't configured, the header is absent
+    (local development has no Mechatronics in front of it), or it's blank.
+    The value is untrusted input (ENGINEERING-STANDARDS.md §5) headed for a
+    bounded DB column, so it's trimmed and cut to `REQUESTED_BY_IDENTITY_MAX_LENGTH`
+    rather than rejected: an over-long value must never turn an otherwise
+    valid request into a 500 from the database, or a 400 that would lock
+    someone out of the whole app over a header they don't control.
+
+    There is deliberately no verification that the header really came from
+    Mechatronics: anything that can reach the backend directly can claim any
+    identity — the network topology is what makes that safe (ADR-0004).
     """
-    unauthenticated = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Not authenticated",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    if credentials is None:
-        raise unauthenticated
-
-    try:
-        payload = decode_access_token(credentials.credentials)
-        account_id = int(payload["sub"])
-    except (jwt.PyJWTError, KeyError, ValueError):
-        raise unauthenticated from None
-
-    account = db.get(Account, account_id)
-    if account is None or not account.is_active:
-        raise unauthenticated
-
-    return account
+    header_name = settings.identity_header_name
+    if not header_name:
+        return None
+    value = request.headers.get(header_name, "").strip()
+    return value[:REQUESTED_BY_IDENTITY_MAX_LENGTH] or None
 
 
-def require_admin(account: Account = Depends(get_current_account)) -> Account:
-    """Resolve the current Account and require it to be an Admin.
+def identity_rate_limit_key(prefix: str, identity: str | None) -> str:
+    """The rate-limit bucket for `prefix` (e.g. "cut-info") and the caller.
 
-    403 (not 401 — the caller *is* authenticated, just not authorized) for
-    a non-Admin request to an Admin-only endpoint.
+    With no identity (no header configured or sent) every caller shares one
+    "anonymous" bucket rather than skipping the check: a rate limit that
+    silently disappears whenever the header is missing would leave the
+    expensive operations it guards (ENGINEERING-STANDARDS.md §5, DoS)
+    unprotected exactly when something is misconfigured. In practice this
+    only ever applies to local development.
     """
-    if account.role != AccountRole.ADMIN:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
-    return account
-
-
-def client_ip(request: Request) -> str | None:
-    """The connecting client's address, for IP-keyed rate limiting, or
-    None when it genuinely can't be determined.
-
-    No reverse-proxy header (X-Forwarded-For etc.) support: this app has
-    no proxy in front of it in any current deployment (see
-    docker-compose.yml) and blindly trusting such a header from an
-    untrusted client would let it be spoofed to dodge the limit entirely.
-    Revisit if/when a reverse proxy is introduced.
-
-    Returns None rather than a fallback placeholder string when
-    `request.client` is unset: collapsing every such caller onto one
-    shared "unknown" bucket would let any one of them exhaust the budget
-    for all the others — exactly the "DoS against legitimate users" this
-    feature exists to prevent. Callers skip the IP-keyed check entirely
-    when this is None (falling back to whatever other dimension — e.g.
-    per-email — they also check), rather than share a bucket. In
-    practice `request.client` is always set for this app's real
-    deployment (uvicorn over TCP, per docker-compose.yml); this only
-    matters for unusual ASGI transports.
-    """
-    return request.client.host if request.client is not None else None
+    if identity is None:
+        return f"{prefix}:anonymous"
+    return f"{prefix}:identity:{identity}"
 
 
 def raise_if_throttled(result: RateLimitResult | None) -> None:

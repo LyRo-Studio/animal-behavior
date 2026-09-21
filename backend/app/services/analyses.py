@@ -8,7 +8,7 @@ import re
 from datetime import UTC, datetime
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.analysis_job import (
     AnalysisJob,
@@ -58,12 +58,9 @@ class InvalidCutSelectionError(Exception):
 
 
 class AnalysisJobNotFoundError(Exception):
-    """Raised for a nonexistent AnalysisJob id, or one that exists but
-    belongs to a different Account (see `get_analysis_job`) — the two are
-    deliberately indistinguishable to the caller, same "404 either way"
-    reasoning as CutNotFoundError, so a request can never be used to probe
-    which ids exist for another Account (issue #44's "no cross-user
-    visibility" decision)."""
+    """Raised for a nonexistent AnalysisJob id. Every job is visible to
+    everyone since ticket #72 (analysis history is fully shared), so "not
+    found" now only ever means "no such id"."""
 
 
 def _validate_cut_key(test_id: str, key: str) -> None:
@@ -85,10 +82,11 @@ def _validate_cut_key(test_id: str, key: str) -> None:
 
 
 def create_analysis_job(
-    db: Session, *, requested_by: int, test_id: str, cut_keys: list[str]
+    db: Session, *, requested_by_identity: str | None, test_id: str, cut_keys: list[str]
 ) -> AnalysisJob:
     """Create a `queued` AnalysisJob requesting analysis of `cut_keys`
-    within `test_id`.
+    within `test_id`, attributed to `requested_by_identity` (the identity
+    Mechatronics forwarded, or None — attribution only, never authorization).
 
     Validates every key before creating anything (see `_validate_cut_key`)
     — the whole request is rejected and no job is created if any key fails,
@@ -100,7 +98,7 @@ def create_analysis_job(
     for key in cut_keys:
         _validate_cut_key(test_id, key)
 
-    job = AnalysisJob(test_id=test_id, requested_by=requested_by)
+    job = AnalysisJob(test_id=test_id, requested_by_identity=requested_by_identity)
     job.videos = [
         AnalysisJobVideo(cut_key=key, position=position, status=AnalysisJobVideoStatus.PENDING)
         for position, key in enumerate(cut_keys)
@@ -111,16 +109,11 @@ def create_analysis_job(
     return job
 
 
-def get_analysis_job(db: Session, *, requested_by: int, analysis_id: int) -> AnalysisJob:
-    """The AnalysisJob for `analysis_id`, scoped to `requested_by` — every
-    Account may only ever see its own jobs (issue #44's "Authorization"
-    section: "No cross-user visibility into other Accounts' analyses in
-    v1", Admin included)."""
-    job = db.scalar(
-        select(AnalysisJob).where(
-            AnalysisJob.id == analysis_id, AnalysisJob.requested_by == requested_by
-        )
-    )
+def get_analysis_job(db: Session, *, analysis_id: int) -> AnalysisJob:
+    """The AnalysisJob for `analysis_id`, whoever requested it — analysis
+    history is fully shared (ticket #72 superseding issue #44's "no
+    cross-user visibility" decision; docs/adr/0004-...)."""
+    job = db.get(AnalysisJob, analysis_id)
     if job is None:
         raise AnalysisJobNotFoundError(analysis_id)
     return job
@@ -135,11 +128,10 @@ class AnalysisJobNotCancellableError(Exception):
     makes no sense either."""
 
 
-def cancel_analysis_job(db: Session, *, requested_by: int, analysis_id: int) -> AnalysisJob:
-    """Cancel `requested_by`'s own `queued` AnalysisJob `analysis_id`.
+def cancel_analysis_job(db: Session, *, analysis_id: int) -> AnalysisJob:
+    """Cancel the `queued` AnalysisJob `analysis_id`, whoever requested it.
 
-    Raises AnalysisJobNotFoundError for a nonexistent id or one owned by a
-    different Account (same scoping as `get_analysis_job`), and
+    Raises AnalysisJobNotFoundError for a nonexistent id, and
     AnalysisJobNotCancellableError if it's not currently `queued` — in
     particular, a `running` job is left untouched, not cancelled out from
     under the worker processing it. A `queued` job never had a temp
@@ -154,11 +146,7 @@ def cancel_analysis_job(db: Session, *, requested_by: int, analysis_id: int) -> 
     queued row), or the worker's claim commits first (this blocks until it
     does, then sees `status=running` and correctly refuses to cancel).
     """
-    job = db.scalar(
-        select(AnalysisJob)
-        .where(AnalysisJob.id == analysis_id, AnalysisJob.requested_by == requested_by)
-        .with_for_update()
-    )
+    job = db.scalar(select(AnalysisJob).where(AnalysisJob.id == analysis_id).with_for_update())
     if job is None:
         raise AnalysisJobNotFoundError(analysis_id)
     if job.status != AnalysisJobStatus.QUEUED:
@@ -186,20 +174,18 @@ class AnalysisReportNotAvailableError(Exception):
     per-video count is needed here."""
 
 
-def get_analysis_report_key(db: Session, *, requested_by: int, analysis_id: int) -> str:
-    """The S3 key of `requested_by`'s own `analysis_id` job's combined
-    report (ticket #49), or raise if it isn't downloadable yet.
+def get_analysis_report_key(db: Session, *, analysis_id: int) -> str:
+    """The S3 key of `analysis_id`'s combined report (ticket #49), or raise
+    if it isn't downloadable yet.
 
-    Raises AnalysisJobNotFoundError for a nonexistent id or one owned by a
-    different Account (same scoping as `get_analysis_job` — a job's
-    existence and its report's availability must be equally invisible to
-    another Account). Raises AnalysisReportNotAvailableError for a job not
+    Raises AnalysisJobNotFoundError for a nonexistent id, and
+    AnalysisReportNotAvailableError for a job not
     yet in a terminal state with an uploaded report — `report_s3_prefix`
     is checked directly (rather than trusting `status` alone) since it's
     the one field `finalize_analysis_job` guarantees is only set once
     something was actually uploaded.
     """
-    job = get_analysis_job(db, requested_by=requested_by, analysis_id=analysis_id)
+    job = get_analysis_job(db, analysis_id=analysis_id)
     if (
         job.status not in (AnalysisJobStatus.COMPLETED, AnalysisJobStatus.COMPLETED_WITH_ERRORS)
         or job.report_s3_prefix is None
@@ -309,14 +295,27 @@ def requeue_stuck_running_jobs(db: Session) -> list[AnalysisJob]:
     return jobs
 
 
+# Every job is visible to everyone since ticket #72, so an unscoped listing
+# grows without bound as history accumulates — capped to the newest jobs
+# (ENGINEERING-STANDARDS.md §5: avoid unbounded database queries). Generous
+# for a research group's shared history; add real pagination if it's ever hit.
+MAX_LISTED_ANALYSIS_JOBS = 500
+
+
 def list_analysis_jobs(
-    db: Session, *, requested_by: int, test_id: str | None = None
+    db: Session, *, test_id: str | None = None, limit: int = MAX_LISTED_ANALYSIS_JOBS
 ) -> list[AnalysisJob]:
-    """`requested_by`'s own AnalysisJobs, newest first, optionally narrowed
-    to one Test — backs both the global history page and the Media
-    Browser's inline "previous analyses for this Test" panel (ticket #53)."""
-    stmt = select(AnalysisJob).where(AnalysisJob.requested_by == requested_by)
+    """The newest AnalysisJobs (up to `limit`), whoever requested them,
+    optionally narrowed to one Test — backs both the global history page
+    and the Media Browser's inline "previous analyses for this Test" panel
+    (ticket #53).
+
+    Each job's videos are loaded up front (`selectinload`): every job in the
+    response serializes them, so lazy loading would be one extra query per
+    row.
+    """
+    stmt = select(AnalysisJob).options(selectinload(AnalysisJob.videos))
     if test_id is not None:
         stmt = stmt.where(AnalysisJob.test_id == test_id)
-    stmt = stmt.order_by(AnalysisJob.created_at.desc())
+    stmt = stmt.order_by(AnalysisJob.created_at.desc(), AnalysisJob.id.desc()).limit(limit)
     return list(db.scalars(stmt))

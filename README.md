@@ -13,11 +13,9 @@ glossary and approved deviations from `ENGINEERING-STANDARDS.md`, and
 
 ## Features
 
-- **Auth**: JWT access + refresh tokens (no cookie sessions) — see `docs/adr/0001-jwt-access-refresh-tokens.md`
-- **Accounts**: a single seeded Admin manages Users (invite by email, deactivate/reactivate); Users set their password via an emailed invite link — no self-registration
-- **Password recovery**: email-based forgot-password flow
+- **Authentication**: none in the app itself — Mechatronics, an external layer in front of it, authenticates everyone and forwards their identity in an HTTP header, which the backend reads only to show who ran each analysis (`IDENTITY_HEADER_NAME`) — see `docs/adr/0004-trust-mega-tronics-remove-application-auth.md`
 - **Media browser**: browse and stream Test/Cut media from the S3 bucket, with scoped, time-limited access tokens carried in the URL — see `docs/adr/0002-media-access-tokens-in-url.md`
-- **Admin page**: create/deactivate User accounts (Admin-only)
+- **Analyses**: run DogTrace on a Test's Cuts and download the report; history is shared by everyone, each analysis showing who ran it
 
 Full domain terminology and feature-level decisions live in `CONTEXT.md`.
 
@@ -31,7 +29,7 @@ docker compose up --build
 - Frontend: http://localhost:5173
 - Backend: http://localhost:8000 (see `/health`)
 
-`.env` holds local secrets (DB password, JWT signing key, S3 credentials, SMTP config) and is never committed — see `.env.example` for every variable the local stack reads and what it's for.
+`.env` holds local secrets (DB password, media-token signing key, S3 credentials) and is never committed — see `.env.example` for every variable the local stack reads and what it's for.
 
 ## Development (without Docker)
 
@@ -76,8 +74,8 @@ Deploy (`.github/workflows/deploy.yml`) triggers automatically once `ci.yml` suc
 
 **Production configuration** lives in the repo's `production` GitHub Environment (Settings → Environments), not in a hand-edited file on the box. Each deploy regenerates `.env` from it (`chmod 600`, never logged), so rotating a secret means updating GitHub and redeploying.
 
-- Secrets: `POSTGRES_PASSWORD`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `MEDIA_TOKEN_SECRET_KEY`, `FIRST_ADMIN_PASSWORD` (temporary — removed with issue #72); optionally `SMTP_PASSWORD` (temporary, same).
-- Variables: `S3_BUCKET`, `S3_ENDPOINT`, `CORS_ORIGINS`, `VITE_API_BASE_URL`, `FIRST_ADMIN_EMAIL` (temporary, as above); optionally `POSTGRES_USER`, `POSTGRES_DB`, `S3_ADDRESSING_STYLE`, `IDENTITY_HEADER_NAME`, and (temporary, removed with issue #72) `SMTP_HOST`/`SMTP_PORT`/`SMTP_USERNAME`/`SMTP_FROM_EMAIL`/`SMTP_USE_TLS`/`FRONTEND_BASE_URL`.
+- Secrets: `POSTGRES_PASSWORD`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `MEDIA_TOKEN_SECRET_KEY`.
+- Variables: `S3_BUCKET`, `S3_ENDPOINT`, `CORS_ORIGINS`, `VITE_API_BASE_URL`; optionally `POSTGRES_USER`, `POSTGRES_DB`, `S3_ADDRESSING_STYLE`, `IDENTITY_HEADER_NAME` (empty until the real header name is known — the backend then reads no identity).
 - No value may contain a single quote or a line break, and `POSTGRES_PASSWORD` may only contain letters, digits and `. _ ~ -` (it is embedded unescaped in `DATABASE_URL`). The deploy fails immediately, naming the variable, if not.
 - Recommended: restrict the Environment's deployment branches to `master`.
 - See `CONTEXT.md`'s "CI/CD retarget (ticket #70)" for the reasoning.

@@ -23,29 +23,27 @@ completely independent connection.
 from sqlalchemy import create_engine, select
 
 from app.core.config import settings
-from app.models.account import Account, AccountRole
+from app.models.analysis_job import AnalysisJob
+from app.services.analyses import create_analysis_job
 from tests.conftest import db_session as _db_session_fixture
 
-_LEAK_CHECK_EMAIL = "ticket-60-leak-check@vives.be"
+_LEAK_CHECK_IDENTITY = "ticket-60-leak-check@vives.be"
 
 
 def test_a_session_commit_inside_a_test_does_not_leak_past_teardown(db_connection):
     generator = _db_session_fixture.__wrapped__(db_connection)
     session = next(generator)
 
-    session.add(
-        Account(
-            email=_LEAK_CHECK_EMAIL,
-            password_hash=None,
-            display_name="Leak Check",
-            role=AccountRole.USER,
-            is_active=True,
-        )
+    # A real service-layer call that commits from inside the test, mirroring
+    # every real one (create_analysis_job, claim_next_queued_job, ...) —
+    # rather than leaving nothing committed for the fixture's own rollback
+    # to undo.
+    create_analysis_job(
+        session,
+        requested_by_identity=_LEAK_CHECK_IDENTITY,
+        test_id="T001",
+        cut_keys=["cuts/T001/T001_C2_ME_F1.mp4"],
     )
-    # Mirrors every real service-layer function (create_analysis_job,
-    # claim_next_queued_job, ...): commits from inside the test, rather than
-    # leaving nothing committed for the fixture's own rollback to undo.
-    session.commit()
 
     # Drive the fixture's own teardown (session.close() + transaction.rollback())
     # right here, rather than waiting for pytest to run it once this test
@@ -56,7 +54,9 @@ def test_a_session_commit_inside_a_test_does_not_leak_past_teardown(db_connectio
     try:
         with engine.connect() as verification_connection:
             leaked = verification_connection.execute(
-                select(Account.id).where(Account.email == _LEAK_CHECK_EMAIL)
+                select(AnalysisJob.id).where(
+                    AnalysisJob.requested_by_identity == _LEAK_CHECK_IDENTITY
+                )
             ).first()
     finally:
         engine.dispose()

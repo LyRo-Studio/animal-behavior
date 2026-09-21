@@ -1,10 +1,11 @@
+from datetime import UTC, datetime, timedelta
+
 import jwt
 import pytest
 
 from app.core.config import settings
 from app.core.security import create_media_token
-from app.models.account import AccountRole
-from tests.helpers import create_account, login_headers
+from tests.helpers import identity_headers
 
 # Ticket #21's acceptance criteria: exercised entirely through the HTTP API
 # against the fake S3 client (the `s3_client` fixture) — no real bucket, no
@@ -13,22 +14,13 @@ from tests.helpers import create_account, login_headers
 _CUT_KEY = "cuts/T001/T001_C1_ME_F1.mp4"
 
 
-def _user_headers(client, db_session, *, role: AccountRole = AccountRole.USER):
-    email = "admin.person@vives.be" if role == AccountRole.ADMIN else "jan.peeters@vives.be"
-    create_account(db_session, email=email, role=role)
-    return login_headers(client, email)
-
-
 # --- POST /media/cuts/token: minting -----------------------------------
 
 
 def test_mint_token_for_a_well_formed_cut_key_succeeds(client, db_session, s3_client):
-    headers = _user_headers(client, db_session)
     s3_client.objects[_CUT_KEY] = b"video-bytes"
 
-    response = client.post(
-        "/media/cuts/token", json={"key": _CUT_KEY, "action": "play"}, headers=headers
-    )
+    response = client.post("/media/cuts/token", json={"key": _CUT_KEY, "action": "play"})
 
     assert response.status_code == 200
     body = response.json()
@@ -37,31 +29,25 @@ def test_mint_token_for_a_well_formed_cut_key_succeeds(client, db_session, s3_cl
 
 
 def test_mint_token_rejects_a_key_outside_cuts(client, db_session, s3_client):
-    headers = _user_headers(client, db_session)
     s3_client.objects["source/secret.mp4"] = b"top-secret"
 
-    response = client.post(
-        "/media/cuts/token", json={"key": "source/secret.mp4", "action": "play"}, headers=headers
-    )
+    response = client.post("/media/cuts/token", json={"key": "source/secret.mp4", "action": "play"})
 
     assert response.status_code == 404
 
 
 def test_mint_token_rejects_a_traversal_attempt(client, db_session, s3_client):
-    headers = _user_headers(client, db_session)
     s3_client.objects["cuts/secret.mp4"] = b"top-secret"
 
     for key in ["cuts/T001/../../source/secret.mp4", "cuts/T001/sub/nested.mp4", "cuts/secret.mp4"]:
-        response = client.post(
-            "/media/cuts/token", json={"key": key, "action": "play"}, headers=headers
-        )
+        response = client.post("/media/cuts/token", json={"key": key, "action": "play"})
         assert response.status_code == 404
 
 
-def test_mint_token_is_rate_limited_per_account(client, db_session, s3_client, monkeypatch):
-    monkeypatch.setattr(settings, "media_token_rate_limit_max_attempts_per_account", 2)
-    headers = _user_headers(client, db_session)
+def test_mint_token_is_rate_limited_per_identity(client, s3_client, monkeypatch):
+    monkeypatch.setattr(settings, "media_token_rate_limit_max_attempts_per_identity", 2)
     s3_client.objects[_CUT_KEY] = b"video-bytes"
+    headers = identity_headers("jan.peeters@vives.be")
 
     for _ in range(2):
         response = client.post(
@@ -76,26 +62,35 @@ def test_mint_token_is_rate_limited_per_account(client, db_session, s3_client, m
     assert "Retry-After" in throttled.headers
 
 
-def test_mint_token_rate_limit_is_scoped_per_account(client, db_session, s3_client, monkeypatch):
-    monkeypatch.setattr(settings, "media_token_rate_limit_max_attempts_per_account", 1)
+def test_mint_token_rate_limit_is_scoped_per_identity(client, s3_client, monkeypatch):
+    monkeypatch.setattr(settings, "media_token_rate_limit_max_attempts_per_identity", 1)
     s3_client.objects[_CUT_KEY] = b"video-bytes"
-    user_headers = _user_headers(client, db_session, role=AccountRole.USER)
-    admin_headers = _user_headers(client, db_session, role=AccountRole.ADMIN)
 
     exhausted = client.post(
-        "/media/cuts/token", json={"key": _CUT_KEY, "action": "play"}, headers=user_headers
+        "/media/cuts/token",
+        json={"key": _CUT_KEY, "action": "play"},
+        headers=identity_headers("jan.peeters@vives.be"),
     )
     assert exhausted.status_code == 200
 
     still_ok = client.post(
-        "/media/cuts/token", json={"key": _CUT_KEY, "action": "play"}, headers=admin_headers
+        "/media/cuts/token",
+        json={"key": _CUT_KEY, "action": "play"},
+        headers=identity_headers("other@vives.be"),
     )
     assert still_ok.status_code == 200
 
 
-def test_mint_token_requires_authentication(client, db_session):
-    response = client.post("/media/cuts/token", json={"key": _CUT_KEY, "action": "play"})
-    assert response.status_code == 401
+def test_mint_token_rate_limit_still_applies_without_an_identity(client, s3_client, monkeypatch):
+    """No identity header must not silently switch the limit off — token
+    issuance is what throttles streaming at all (nothing rate limits the
+    stream endpoint itself), so anonymous callers share one bucket."""
+    monkeypatch.setattr(settings, "media_token_rate_limit_max_attempts_per_identity", 1)
+    s3_client.objects[_CUT_KEY] = b"video-bytes"
+    payload = {"key": _CUT_KEY, "action": "play"}
+
+    assert client.post("/media/cuts/token", json=payload).status_code == 200
+    assert client.post("/media/cuts/token", json=payload).status_code == 429
 
 
 # --- GET /media/stream: serving ------------------------------------------
@@ -323,16 +318,25 @@ def test_stream_rejects_a_garbage_token(client, db_session, s3_client):
     assert response.status_code == 401
 
 
-def test_stream_rejects_an_access_token_used_as_a_media_token(client, db_session, s3_client):
-    """A normal login access token must never work here — media tokens are
-    a distinct, narrower-scoped token type (see create_media_token's "type"
-    claim), not interchangeable with the app's session tokens."""
+def test_stream_rejects_a_correctly_signed_token_of_another_type(client, s3_client):
+    """Only a token whose "type" claim is "media" is accepted, even when it
+    is signed with the right key and carries matching Cut/action claims (see
+    create_media_token) — a stray token of any other kind must never open a
+    Cut."""
     s3_client.objects[_CUT_KEY] = b"a"
-    headers = _user_headers(client, db_session)
-    access_token = headers["Authorization"].removeprefix("Bearer ")
+    other_type_token = jwt.encode(
+        {
+            "type": "access",
+            "cut_key": _CUT_KEY,
+            "action": "play",
+            "exp": datetime.now(UTC) + timedelta(minutes=5),
+        },
+        settings.media_token_secret_key,
+        algorithm="HS256",
+    )
 
     response = client.get(
-        "/media/stream", params={"key": _CUT_KEY, "action": "play", "token": access_token}
+        "/media/stream", params={"key": _CUT_KEY, "action": "play", "token": other_type_token}
     )
 
     assert response.status_code == 401
@@ -369,8 +373,8 @@ def test_stream_returns_not_found_for_a_cut_key_that_no_longer_exists_in_s3(
 
 def test_stream_requires_no_bearer_authentication(client, db_session, s3_client):
     """The streaming endpoint is reached by the browser's native <video
-    src>/download requests, which can't carry an Authorization header — it
-    must work with only the media token, no bearer auth at all."""
+    src>/download requests — it must work with only the media token: no
+    `Authorization` header and no identity header (ADR-0002)."""
     s3_client.objects[_CUT_KEY] = b"a"
     token = create_media_token(cut_key=_CUT_KEY, action="play")
 
@@ -392,7 +396,7 @@ def test_media_token_type_claim_rejects_a_forged_access_typed_media_token(monkey
 
     forged = pyjwt.encode(
         {"cut_key": _CUT_KEY, "action": "play", "type": "access"},
-        settings.jwt_secret_key,
+        settings.media_token_secret_key,
         algorithm="HS256",
     )
 

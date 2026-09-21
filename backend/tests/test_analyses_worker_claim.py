@@ -5,7 +5,6 @@ from app.services.analyses import (
     finalize_analysis_job,
     requeue_stuck_running_jobs,
 )
-from tests.helpers import create_account
 
 # Ticket #47's own service-layer additions to app/services/analyses.py —
 # the DB-transition primitives the worker (worker/orchestrator.py) calls
@@ -16,21 +15,24 @@ from tests.helpers import create_account
 
 
 def _create_job(db_session, *, test_id="T001", cut="cuts/T001/T001_C2_ME_F1.mp4"):
-    account = create_account(db_session, email="jan.peeters@vives.be")
-    return create_analysis_job(db_session, requested_by=account.id, test_id=test_id, cut_keys=[cut])
+    return create_analysis_job(
+        db_session,
+        requested_by_identity="jan.peeters@vives.be",
+        test_id=test_id,
+        cut_keys=[cut],
+    )
 
 
 def test_claim_next_queued_job_claims_oldest_and_sets_running(db_session):
-    account = create_account(db_session, email="jan.peeters@vives.be")
     older = create_analysis_job(
         db_session,
-        requested_by=account.id,
+        requested_by_identity="jan.peeters@vives.be",
         test_id="T001",
         cut_keys=["cuts/T001/T001_C2_ME_F1.mp4"],
     )
     create_analysis_job(
         db_session,
-        requested_by=account.id,
+        requested_by_identity="jan.peeters@vives.be",
         test_id="T002",
         cut_keys=["cuts/T002/T002_C2_ME_F1.mp4"],
     )
@@ -71,10 +73,9 @@ def test_finalize_analysis_job_all_succeeded_is_completed(db_session):
 
 
 def test_finalize_analysis_job_partial_success_is_completed_with_errors(db_session):
-    account = create_account(db_session, email="jan.peeters@vives.be")
     job = create_analysis_job(
         db_session,
-        requested_by=account.id,
+        requested_by_identity="jan.peeters@vives.be",
         test_id="T001",
         cut_keys=["cuts/T001/T001_C2_ME_F1.mp4", "cuts/T001/T001_C2_ME_F2.mp4"],
     )

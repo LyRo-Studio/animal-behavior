@@ -5,7 +5,6 @@ from app.models.analysis_job import AnalysisJob, AnalysisJobStatus, AnalysisJobV
 from app.services.analyses import create_analysis_job
 
 from tests.doubles import FakeDogTraceRunner, FakeS3Client
-from tests.helpers import create_account
 from worker.dogtrace_runner import ProgressCallback
 from worker.orchestrator import _make_progress_callback, process_next_job
 
@@ -18,9 +17,11 @@ from worker.orchestrator import _make_progress_callback, process_next_job
 def _create_job(
     db_session, *, test_id="T001", cuts=("cuts/T001/T001_C2_ME_F1.mp4",)
 ) -> AnalysisJob:
-    account = create_account(db_session)
     return create_analysis_job(
-        db_session, requested_by=account.id, test_id=test_id, cut_keys=list(cuts)
+        db_session,
+        requested_by_identity="jan.peeters@vives.be",
+        test_id=test_id,
+        cut_keys=list(cuts),
     )
 
 
@@ -225,10 +226,9 @@ def test_process_next_job_survives_an_unhandled_error_and_fails_only_that_job(
 
 def test_process_next_job_processes_only_one_job_at_a_time(db_session, work_root):
     first_job = _create_job(db_session, test_id="T001")
-    account = create_account(db_session, email="other@vives.be", display_name="Other")
     second_job = create_analysis_job(
         db_session,
-        requested_by=account.id,
+        requested_by_identity="other@vives.be",
         test_id="T002",
         cut_keys=["cuts/T002/T002_C2_ME_F1.mp4"],
     )

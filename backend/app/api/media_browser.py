@@ -6,11 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_account, raise_if_throttled
+from app.api.deps import get_identity, identity_rate_limit_key, raise_if_throttled
 from app.core.config import settings
 from app.core.security import create_media_token, decode_media_token
 from app.db.session import get_db
-from app.models.account import Account
 from app.schemas.media_browser import (
     CutMediaInfoOut,
     CutOut,
@@ -34,17 +33,19 @@ from app.services.rate_limit import RateLimiter, enforce_all, get_rate_limiter
 from app.services.s3_client import S3Client, S3ObjectNotFoundError, get_s3_client
 from app.services.s3_client import iter_object_range as _iter_range
 
-# Every authenticated Account (User or Admin) gets identical access here —
-# no extra role gating (CONTEXT.md's "Media browser — access" decision).
-router = APIRouter(
-    prefix="/media", tags=["media-browser"], dependencies=[Depends(get_current_account)]
-)
+# No authentication here since ticket #72 — Mechatronics is the boundary and
+# everyone past it gets the same access (CONTEXT.md's "Media browser —
+# access" decision). The identity header is read only to key the rate limits
+# below.
+router = APIRouter(prefix="/media", tags=["media-browser"])
 
-# The streaming endpoint (ticket #21) is reached by the browser's own
-# native <video src> / download-link requests, which can't carry the app's
-# Authorization bearer header — it's authenticated by the media token
-# itself instead (see docs/adr/0002-media-access-tokens-in-url.md), so it
-# lives on a separate router without `router`'s bearer-auth dependency.
+# The streaming endpoint (ticket #21) is reached by the browser's own native
+# <video src> / download-link requests and is gated by a short-lived signed
+# media token instead of the identity header (docs/adr/0002-media-access-
+# tokens-in-url.md — kept for now, pending a check on `dogtrace-app` of
+# whether Mechatronics' header also reaches native-element requests), so it
+# lives on its own router: the token, not `router`'s open access, is what
+# scopes a request to one Cut and action.
 public_router = APIRouter(prefix="/media", tags=["media-browser"])
 
 # `_iter_range` is `app.services.s3_client.iter_object_range` (imported
@@ -87,7 +88,7 @@ def list_datasets(path: str = "", s3: S3Client = Depends(get_s3_client)) -> list
 @router.get("/cuts/info", response_model=CutMediaInfoOut)
 def get_cut_info(
     key: str = Query(min_length=1, max_length=1024),
-    account: Account = Depends(get_current_account),
+    identity: str | None = Depends(get_identity),
     s3: S3Client = Depends(get_s3_client),
     prober: MediaProber = Depends(get_media_prober),
     limiter: RateLimiter = Depends(get_rate_limiter),
@@ -99,13 +100,13 @@ def get_cut_info(
     a temporary local download) and caches the result; a later request for
     the same, unchanged Cut reuses the cached row instead of re-probing.
 
-    Rate limited per Account regardless of outcome — same "hit before
-    processing" shape as /cuts/token above, since a cache miss here is
+    Rate limited per identity regardless of outcome — same "hit before
+    processing" shape as /cuts/token below, since a cache miss here is
     exactly as expensive as issuing a media token, if not more so.
     """
     result = limiter.hit(
-        f"cut-info:account:{account.id}",
-        limit=settings.cut_info_rate_limit_max_attempts_per_account,
+        identity_rate_limit_key("cut-info", identity),
+        limit=settings.cut_info_rate_limit_max_attempts_per_identity,
         window_seconds=settings.cut_info_rate_limit_window_seconds,
     )
     raise_if_throttled(enforce_all(result))
@@ -122,18 +123,18 @@ def get_cut_info(
 @router.post("/cuts/token", response_model=MediaTokenResponse)
 def mint_media_token(
     payload: MediaTokenRequest,
-    account: Account = Depends(get_current_account),
+    identity: str | None = Depends(get_identity),
     limiter: RateLimiter = Depends(get_rate_limiter),
 ) -> MediaTokenResponse:
     """Mint a short-lived, single-Cut-scoped, single-action-scoped media
     token (ticket #21) for `payload.key`/`payload.action`. Rate limited per
-    Account regardless of outcome — same "hit before processing" shape as
-    /auth/forgot-password, since issuance itself is the resource being
-    protected (CONTEXT.md's "Media browser — abuse protection" decision).
+    identity regardless of outcome ("hit before processing"), since
+    issuance itself is the resource being protected (CONTEXT.md's "Media
+    browser — abuse protection" decision).
     """
     result = limiter.hit(
-        f"media-token:account:{account.id}",
-        limit=settings.media_token_rate_limit_max_attempts_per_account,
+        identity_rate_limit_key("media-token", identity),
+        limit=settings.media_token_rate_limit_max_attempts_per_identity,
         window_seconds=settings.media_token_rate_limit_window_seconds,
     )
     raise_if_throttled(enforce_all(result))
@@ -225,8 +226,8 @@ def stream_cut(
     request: Request,
     s3: S3Client = Depends(get_s3_client),
 ) -> StreamingResponse:
-    """Serve a Cut's bytes for `key`/`action`, authenticated by `token`
-    alone (ticket #21) — no bearer auth, see `public_router`'s docstring.
+    """Serve a Cut's bytes for `key`/`action`, gated by `token` alone
+    (ticket #21) — see `public_router`'s comment.
 
     Forwards an incoming Range request through to S3 as a correct 206
     partial-content response, so the browser can seek during playback;

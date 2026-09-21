@@ -95,24 +95,10 @@ jobs:
           POSTGRES_USER: ${{ vars.POSTGRES_USER }}
           POSTGRES_DB: ${{ vars.POSTGRES_DB }}
           S3_ADDRESSING_STYLE: ${{ vars.S3_ADDRESSING_STYLE }}
-          # May be empty until ticket #72 discovers the real header name.
+          # May be empty until the real header name is discovered on
+          # `dogtrace-app` (ticket #72's diagnostic step) — empty means the
+          # backend reads no identity at all.
           IDENTITY_HEADER_NAME: ${{ vars.IDENTITY_HEADER_NAME }}
-          # Transitional (remove with ticket #72): the backend still
-          # authenticates its own users and docker-compose.yml still hard-
-          # requires these, so deploy can't succeed without them until the
-          # application stops reading them.
-          FIRST_ADMIN_EMAIL: ${{ vars.FIRST_ADMIN_EMAIL }}
-          FIRST_ADMIN_PASSWORD: ${{ secrets.FIRST_ADMIN_PASSWORD }}
-          # Also transitional and optional: invite/reset emails. Without
-          # these the backend only logs emails instead of sending them and
-          # builds invite links pointing at localhost.
-          SMTP_HOST: ${{ vars.SMTP_HOST }}
-          SMTP_PORT: ${{ vars.SMTP_PORT }}
-          SMTP_USERNAME: ${{ vars.SMTP_USERNAME }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          SMTP_FROM_EMAIL: ${{ vars.SMTP_FROM_EMAIL }}
-          SMTP_USE_TLS: ${{ vars.SMTP_USE_TLS }}
-          FRONTEND_BASE_URL: ${{ vars.FRONTEND_BASE_URL }}
         run: |
           set -euo pipefail
           # Never world-readable, not even for the instant before chmod.
@@ -121,12 +107,10 @@ jobs:
           required=(
             POSTGRES_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
             S3_BUCKET S3_ENDPOINT MEDIA_TOKEN_SECRET_KEY CORS_ORIGINS
-            VITE_API_BASE_URL FIRST_ADMIN_EMAIL FIRST_ADMIN_PASSWORD
+            VITE_API_BASE_URL
           )
           optional=(
             POSTGRES_USER POSTGRES_DB S3_ADDRESSING_STYLE IDENTITY_HEADER_NAME
-            SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM_EMAIL
-            SMTP_USE_TLS FRONTEND_BASE_URL
           )
 
           missing=()
@@ -167,11 +151,6 @@ jobs:
           for name in "${optional[@]}"; do
             [ -z "${!name:-}" ] || emit "$name" "${!name}"
           done
-          # Transitional alias (remove with ticket #72): the backend still
-          # reads its signing key as JWT_SECRET_KEY (it signs every JWT
-          # today, not just media tokens) until that ticket renames the
-          # setting and drops the login tokens.
-          emit JWT_SECRET_KEY "$MEDIA_TOKEN_SECRET_KEY"
 
           mv "$tmp" .env
           chmod 600 .env

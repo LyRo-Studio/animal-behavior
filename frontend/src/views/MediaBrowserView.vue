@@ -18,7 +18,6 @@ import {
   type DatasetEntry,
   type MediaTokenAction,
 } from '@/services/mediaBrowser'
-import { session } from '@/stores/session'
 import { formatDate } from '@/utils/date'
 import { triggerBrowserDownload } from '@/utils/download'
 
@@ -52,9 +51,8 @@ const selectedCutKeys = ref<Set<string>>(new Set())
 const isCreatingAnalysis = ref(false)
 const analysisError = ref<string | null>(null)
 
-// Ticket #53: inline "previous analyses for this Test" panel, scoped to the
-// current Account's own jobs (the backend already enforces that — see
-// listAnalyses). `null` (not loaded yet) is distinct from `[]` (loaded,
+// Ticket #53: inline "previous analyses for this Test" panel, listing every
+// analysis of the Test whoever ran it (see listAnalyses). `null` (not loaded yet) is distinct from `[]` (loaded,
 // none exist), same "loading vs. genuinely empty" distinction `cuts` above
 // already makes.
 const previousAnalyses = ref<AnalysisJob[] | null>(null)
@@ -92,12 +90,7 @@ function toggleCutSelection(cut: Cut) {
 let analysisToken = 0
 
 async function analyzeSelected() {
-  if (
-    selectedCutKeys.value.size === 0 ||
-    !selectedTestId.value ||
-    !session.accessToken.value ||
-    isCreatingAnalysis.value
-  ) {
+  if (selectedCutKeys.value.size === 0 || !selectedTestId.value || isCreatingAnalysis.value) {
     return
   }
 
@@ -105,11 +98,7 @@ async function analyzeSelected() {
   isCreatingAnalysis.value = true
   analysisError.value = null
   try {
-    const job = await createAnalysis(
-      session.accessToken.value,
-      selectedTestId.value,
-      Array.from(selectedCutKeys.value),
-    )
+    const job = await createAnalysis(selectedTestId.value, Array.from(selectedCutKeys.value))
     // Ticket #52's AnalysisView. Navigated to unconditionally (not gated on
     // currentToken) — the job was created for whichever Test was selected
     // at click time regardless of what's since been searched. Wrapped in
@@ -173,8 +162,7 @@ async function loadTestIds() {
   isLoadingTestIds.value = true
   testIdsError.value = null
   try {
-    if (!session.accessToken.value) return
-    testIds.value = await listTestIds(session.accessToken.value)
+    testIds.value = await listTestIds()
   } catch {
     testIdsError.value = 'Failed to load Tests.'
   } finally {
@@ -198,11 +186,9 @@ const COMPLETE_TEST_ID_RE = /^T\d+$/
 // enough to discard a stale response from a Test the user has since
 // searched away from, same as `cuts`/`notFound`/`cutsError` above.
 async function loadPreviousAnalyses(testId: string, token: number) {
-  if (!session.accessToken.value) return
-
   isLoadingPreviousAnalyses.value = true
   try {
-    const result = await listAnalyses(session.accessToken.value, testId)
+    const result = await listAnalyses(testId)
     if (token !== searchToken) return
     previousAnalyses.value = result
   } catch {
@@ -222,7 +208,7 @@ async function search(testId: string) {
   // pattern even though the Test exists.
   const trimmed = testId.trim().toUpperCase()
   suggestionsOpen.value = false
-  if (!COMPLETE_TEST_ID_RE.test(trimmed) || !session.accessToken.value) return
+  if (!COMPLETE_TEST_ID_RE.test(trimmed)) return
 
   const currentToken = ++searchToken
   selectedTestId.value = trimmed
@@ -250,7 +236,7 @@ async function search(testId: string) {
   loadPreviousAnalyses(trimmed, currentToken)
 
   try {
-    const result = await listCuts(session.accessToken.value, trimmed)
+    const result = await listCuts(trimmed)
     if (currentToken !== searchToken) return
     cuts.value = result
   } catch (err) {
@@ -302,13 +288,13 @@ function isMediaActionInFlight(cut: Cut, action: MediaTokenAction): boolean {
 }
 
 async function playCut(cut: Cut) {
-  if (!session.accessToken.value || isMediaActionInFlight(cut, 'play')) return
+  if (isMediaActionInFlight(cut, 'play')) return
   const flightKey = `${cut.key}:play`
   mediaActionInFlight.value[flightKey] = true
   mediaActionError.value = null
 
   try {
-    const token = await requestMediaToken(session.accessToken.value, cut.key, 'play')
+    const token = await requestMediaToken(cut.key, 'play')
     playingCutKey.value = cut.key
     playbackUrl.value = mediaStreamUrl(cut.key, 'play', token)
   } catch (err) {
@@ -346,13 +332,12 @@ async function toggleCutInfo(cut: Cut) {
   }
   openInfoCutKey.value = cut.key
 
-  if (cutMediaInfo.value[cut.key] || cutInfoInFlight.value[cut.key] || !session.accessToken.value)
-    return
+  if (cutMediaInfo.value[cut.key] || cutInfoInFlight.value[cut.key]) return
 
   cutInfoInFlight.value[cut.key] = true
   delete cutInfoError.value[cut.key]
   try {
-    cutMediaInfo.value[cut.key] = await getCutMediaInfo(session.accessToken.value, cut.key)
+    cutMediaInfo.value[cut.key] = await getCutMediaInfo(cut.key)
   } catch (err) {
     cutInfoError.value[cut.key] =
       err instanceof CutInfoNotFoundError
@@ -373,13 +358,13 @@ function formatDuration(totalSeconds: number): string {
 }
 
 async function downloadCut(cut: Cut) {
-  if (!session.accessToken.value || isMediaActionInFlight(cut, 'download')) return
+  if (isMediaActionInFlight(cut, 'download')) return
   const flightKey = `${cut.key}:download`
   mediaActionInFlight.value[flightKey] = true
   mediaActionError.value = null
 
   try {
-    const token = await requestMediaToken(session.accessToken.value, cut.key, 'download')
+    const token = await requestMediaToken(cut.key, 'download')
     // A native download the browser's Content-Disposition-driven save
     // dialog handles — not a fetch, so the SPA never buffers the file. No
     // filename override: the stream URL is a real navigable request, so the
@@ -413,8 +398,7 @@ async function loadDatasetFolder() {
   datasetNotFound.value = false
 
   try {
-    if (!session.accessToken.value) return
-    const result = await listDatasetFolder(session.accessToken.value, datasetPath.value.join('/'))
+    const result = await listDatasetFolder(datasetPath.value.join('/'))
     if (currentToken !== datasetLoadToken) return
     datasetEntries.value = result
   } catch (err) {
@@ -692,7 +676,12 @@ onMounted(() => {
               >
                 Analysis #{{ job.id }}
               </RouterLink>
-              <span class="text-muted">{{ job.status }} · {{ formatDate(job.createdAt) }}</span>
+              <span class="text-muted">
+                {{ job.status }} · {{ formatDate(job.createdAt) }}
+                <span v-if="job.requestedByIdentity" data-testid="previous-analysis-requested-by">
+                  · {{ job.requestedByIdentity }}
+                </span>
+              </span>
             </li>
           </ul>
         </div>

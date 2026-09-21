@@ -2,9 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_account
+from app.api.deps import get_identity
 from app.db.session import get_db
-from app.models.account import Account
 from app.models.analysis_job import AnalysisJob
 from app.schemas.analyses import AnalysisJobOut, CreateAnalysisRequest
 from app.services.analyses import (
@@ -23,24 +22,21 @@ from app.services.analyses import (
 from app.services.s3_client import S3Client, S3ObjectNotFoundError, get_s3_client
 from app.services.s3_client import iter_object_range as _iter_range
 
-# Every authenticated Account (User or Admin) gets identical access here —
-# no extra role gating, matching the Media Browser's existing access rule
-# (CONTEXT.md's "Media browser — access" decision, carried over by issue
-# #44's "Authorization" section).
-router = APIRouter(
-    prefix="/analyses", tags=["analyses"], dependencies=[Depends(get_current_account)]
-)
+# No authentication or per-caller scoping here (ticket #72): Mechatronics is
+# the boundary, and analysis history is fully shared — the identity header is
+# read only to attribute a new job (docs/adr/0004-...).
+router = APIRouter(prefix="/analyses", tags=["analyses"])
 
 
 @router.post("", response_model=AnalysisJobOut, status_code=status.HTTP_201_CREATED)
 def create_analysis(
     payload: CreateAnalysisRequest,
-    account: Account = Depends(get_current_account),
+    identity: str | None = Depends(get_identity),
     db: Session = Depends(get_db),
 ) -> AnalysisJob:
     try:
         return create_analysis_job(
-            db, requested_by=account.id, test_id=payload.test_id, cut_keys=payload.cuts
+            db, requested_by_identity=identity, test_id=payload.test_id, cut_keys=payload.cuts
         )
     except EmptyCutSelectionError:
         raise HTTPException(
@@ -56,11 +52,10 @@ def create_analysis(
 @router.get("/{analysis_id}", response_model=AnalysisJobOut)
 def get_analysis(
     analysis_id: int,
-    account: Account = Depends(get_current_account),
     db: Session = Depends(get_db),
 ) -> AnalysisJob:
     try:
-        return get_analysis_job(db, requested_by=account.id, analysis_id=analysis_id)
+        return get_analysis_job(db, analysis_id=analysis_id)
     except AnalysisJobNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found."
@@ -75,23 +70,19 @@ _REPORT_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetm
 @router.get("/{analysis_id}/report")
 def download_analysis_report(
     analysis_id: int,
-    account: Account = Depends(get_current_account),
     db: Session = Depends(get_db),
     s3: S3Client = Depends(get_s3_client),
 ) -> StreamingResponse:
     """Download `analysis_id`'s combined `casiop_report.xlsx` (ticket #49).
 
-    A plain bearer-authenticated download, not the media-token pattern used
-    by Cut streaming (`app/api/media_browser.py`'s `public_router`) — this
-    endpoint is never reached by a browser's native `<video>`/download-link
-    request that can't carry an `Authorization` header, so it doesn't need
-    that pattern's URL-embedded-token exception (see
-    docs/adr/0002-media-access-tokens-in-url.md, which is scoped to the
-    media browser). The frontend triggers this via an authenticated fetch,
-    same as every other bearer-authenticated endpoint on `router`.
+    A plain download, not the media-token pattern used by Cut streaming
+    (`app/api/media_browser.py`'s `public_router`) — that pattern's
+    URL-embedded-token exception (docs/adr/0002-media-access-tokens-in-url.md)
+    is scoped to the media browser. The frontend triggers this via an
+    ordinary `fetch`, same as every other endpoint on `router`.
     """
     try:
-        key = get_analysis_report_key(db, requested_by=account.id, analysis_id=analysis_id)
+        key = get_analysis_report_key(db, analysis_id=analysis_id)
     except AnalysisJobNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found."
@@ -123,11 +114,10 @@ def download_analysis_report(
 @router.post("/{analysis_id}/cancel", response_model=AnalysisJobOut)
 def cancel_analysis(
     analysis_id: int,
-    account: Account = Depends(get_current_account),
     db: Session = Depends(get_db),
 ) -> AnalysisJob:
     try:
-        return cancel_analysis_job(db, requested_by=account.id, analysis_id=analysis_id)
+        return cancel_analysis_job(db, analysis_id=analysis_id)
     except AnalysisJobNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found."
@@ -142,7 +132,6 @@ def cancel_analysis(
 @router.get("", response_model=list[AnalysisJobOut])
 def list_analyses(
     test_id: str | None = Query(default=None, max_length=50),
-    account: Account = Depends(get_current_account),
     db: Session = Depends(get_db),
 ) -> list[AnalysisJob]:
-    return list_analysis_jobs(db, requested_by=account.id, test_id=test_id)
+    return list_analysis_jobs(db, test_id=test_id)

@@ -246,8 +246,8 @@ def get_s3_client() -> S3Client:
     including repeated video seeks. Safe to share: nothing about a Cut's
     read path is per-request state.
 
-    Fails closed: unlike SMTP's "log instead of send", there's no safe
-    fallback for object storage, so an unconfigured bucket/endpoint/
+    Fails closed: there's no safe "log instead of" fallback for object
+    storage, so an unconfigured bucket/endpoint/
     credentials raises here rather than silently falling through to
     boto3's ambient (process/instance) credential chain against whatever
     account and bucket that chain happens to resolve.

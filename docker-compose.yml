@@ -28,33 +28,15 @@ services:
       # whatever password `db` actually started with.
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-animal_behavior}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}@db:5432/${POSTGRES_DB:-animal_behavior}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
-      # No fallbacks for secrets/credentials — same reasoning as
-      # POSTGRES_PASSWORD above. Lifetimes are safe to default.
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env (see .env.example)}
-      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
-      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
-      FIRST_ADMIN_EMAIL: ${FIRST_ADMIN_EMAIL:?Set FIRST_ADMIN_EMAIL in .env (see .env.example)}
-      FIRST_ADMIN_PASSWORD: ${FIRST_ADMIN_PASSWORD:?Set FIRST_ADMIN_PASSWORD in .env (see .env.example)}
-      # No `:?` here: an unset SMTP_HOST is a legitimate local-dev choice
-      # (logs invite emails instead of sending — see app/services/mail.py),
-      # not a missing-secret mistake like the vars above.
-      SMTP_HOST: ${SMTP_HOST:-}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      SMTP_USERNAME: ${SMTP_USERNAME:-}
-      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
-      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-no-reply@vives.be}
-      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
-      INVITE_TOKEN_EXPIRE_HOURS: ${INVITE_TOKEN_EXPIRE_HOURS:-72}
-      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:5173}
-      # Brute-force throttling (ticket #7) — see app/core/config.py.
-      LOGIN_RATE_LIMIT_MAX_FAILED_ATTEMPTS_PER_IP: ${LOGIN_RATE_LIMIT_MAX_FAILED_ATTEMPTS_PER_IP:-10}
-      LOGIN_RATE_LIMIT_MAX_FAILED_ATTEMPTS_PER_EMAIL: ${LOGIN_RATE_LIMIT_MAX_FAILED_ATTEMPTS_PER_EMAIL:-10}
-      LOGIN_RATE_LIMIT_WINDOW_SECONDS: ${LOGIN_RATE_LIMIT_WINDOW_SECONDS:-300}
-      REFRESH_RATE_LIMIT_MAX_FAILED_ATTEMPTS_PER_IP: ${REFRESH_RATE_LIMIT_MAX_FAILED_ATTEMPTS_PER_IP:-30}
-      REFRESH_RATE_LIMIT_WINDOW_SECONDS: ${REFRESH_RATE_LIMIT_WINDOW_SECONDS:-300}
-      FORGOT_PASSWORD_RATE_LIMIT_MAX_ATTEMPTS_PER_IP: ${FORGOT_PASSWORD_RATE_LIMIT_MAX_ATTEMPTS_PER_IP:-10}
-      FORGOT_PASSWORD_RATE_LIMIT_MAX_ATTEMPTS_PER_EMAIL: ${FORGOT_PASSWORD_RATE_LIMIT_MAX_ATTEMPTS_PER_EMAIL:-5}
-      FORGOT_PASSWORD_RATE_LIMIT_WINDOW_SECONDS: ${FORGOT_PASSWORD_RATE_LIMIT_WINDOW_SECONDS:-900}
+      # No fallback for a secret — same reasoning as POSTGRES_PASSWORD above.
+      # Signs the short-lived Cut streaming/download tokens (ADR-0002); the
+      # only thing the backend signs since ticket #72 removed its own login.
+      MEDIA_TOKEN_SECRET_KEY: ${MEDIA_TOKEN_SECRET_KEY:?Set MEDIA_TOKEN_SECRET_KEY in .env (see .env.example)}
+      # Ticket #72: name of the HTTP header Mechatronics forwards the
+      # authenticated person's identity in, read for attribution only. No
+      # `:?` — unset/empty (local development, or until the real header is
+      # discovered on `dogtrace-app`) legitimately means "read no identity".
+      IDENTITY_HEADER_NAME: ${IDENTITY_HEADER_NAME:-}
       # Media browser (ticket #18) — see app/services/s3_client.py.
       S3_BUCKET: ${S3_BUCKET:?Set S3_BUCKET in .env (see .env.example)}
       S3_ENDPOINT: ${S3_ENDPOINT:?Set S3_ENDPOINT in .env (see .env.example)}

@@ -12,11 +12,11 @@ from alembic.config import Config
 from app.core.config import settings
 from app.db.session import get_db
 from app.main import app
-from app.services.mail import get_mail_transport
 from app.services.media_prober import get_media_prober
 from app.services.rate_limit import RateLimiter, get_rate_limiter
 from app.services.s3_client import get_s3_client
-from tests.fakes import FakeMailTransport, FakeMediaProber, FakeS3Client
+from tests.fakes import FakeMediaProber, FakeS3Client
+from tests.helpers import IDENTITY_HEADER
 
 _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
@@ -51,7 +51,7 @@ def db_session(db_connection: Connection) -> Generator[Session, None, None]:
     the schema between every test.
 
     Most service-layer functions (`create_analysis_job`, `claim_next_queued_job`,
-    `finalize_analysis_job`, account creation, ...) call `session.commit()`
+    `finalize_analysis_job`, ...) call `session.commit()`
     themselves. A session bound directly to `db_connection` with nothing
     else in play would let that internal commit end the outer `transaction`
     early, leaving the `transaction.rollback()` below with nothing left to
@@ -80,11 +80,14 @@ def db_session(db_connection: Connection) -> Generator[Session, None, None]:
         transaction.rollback()
 
 
-@pytest.fixture()
-def mail_transport() -> FakeMailTransport:
-    """The fake mail transport injected into the app for this test — see
-    tests/fakes.py and issue #1's testing decisions."""
-    return FakeMailTransport()
+@pytest.fixture(autouse=True)
+def _identity_header_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point `settings.identity_header_name` at `tests.helpers.IDENTITY_HEADER`
+    for every test (ticket #72) — production reads it from `.env`, and a
+    test run with no `.env` would otherwise never read any identity at all.
+    Tests that want it unconfigured monkeypatch it back to None themselves.
+    """
+    monkeypatch.setattr(settings, "identity_header_name", IDENTITY_HEADER)
 
 
 @pytest.fixture()
@@ -118,24 +121,21 @@ def media_prober() -> FakeMediaProber:
 @pytest.fixture()
 def client(
     db_session: Session,
-    mail_transport: FakeMailTransport,
     rate_limiter: RateLimiter,
     s3_client: FakeS3Client,
     media_prober: FakeMediaProber,
 ) -> Generator[TestClient, None, None]:
     """A test client for the FastAPI app, hitting real routes end-to-end.
 
-    The app's own `get_db`/`get_mail_transport`/`get_rate_limiter`/
-    `get_s3_client`/`get_media_prober` dependencies are overridden to use
-    the per-test transactional session, fake mail transport, fresh rate
-    limiter, fake S3 client, and fake media prober above, so requests made
-    through this client see (and roll back) the same data a test sets up
-    directly, never send real email, touch the real bucket, or run the
-    real `ffprobe` binary, and start with a clean rate-limit slate every
-    test.
+    The app's own `get_db`/`get_rate_limiter`/`get_s3_client`/
+    `get_media_prober` dependencies are overridden to use the per-test
+    transactional session, fresh rate limiter, fake S3 client, and fake
+    media prober above, so requests made through this client see (and roll
+    back) the same data a test sets up directly, never touch the real
+    bucket or run the real `ffprobe` binary, and start with a clean
+    rate-limit slate every test.
     """
     app.dependency_overrides[get_db] = lambda: db_session
-    app.dependency_overrides[get_mail_transport] = lambda: mail_transport
     app.dependency_overrides[get_rate_limiter] = lambda: rate_limiter
     app.dependency_overrides[get_s3_client] = lambda: s3_client
     app.dependency_overrides[get_media_prober] = lambda: media_prober

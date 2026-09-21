@@ -11,24 +11,12 @@ const downloadAnalysisReportMock = vi.hoisted(() => vi.fn())
 // AnalysisNotFoundError`, so the mocked module needs to export the same
 // constructor identity that tests throw instances of.
 const AnalysisNotFoundError = vi.hoisted(() => class AnalysisNotFoundError extends Error {})
-const AnalysisUnauthorizedError = vi.hoisted(() => class AnalysisUnauthorizedError extends Error {})
 
 vi.mock('@/services/analyses', () => ({
   getAnalysis: getAnalysisMock,
   cancelAnalysis: cancelAnalysisMock,
   downloadAnalysisReport: downloadAnalysisReportMock,
   AnalysisNotFoundError,
-  AnalysisUnauthorizedError,
-}))
-
-// A real, mutable ref-like object (not a fresh `{ value: 'a-token' }` per
-// test) so refreshAccessTokenMock's implementation can simulate a real
-// rotation by writing a new value the view's next getAnalysis call reads.
-const sessionAccessToken = vi.hoisted(() => ({ value: 'a-token' }))
-const refreshAccessTokenMock = vi.hoisted(() => vi.fn())
-
-vi.mock('@/stores/session', () => ({
-  session: { accessToken: sessionAccessToken, refreshAccessToken: refreshAccessTokenMock },
 }))
 
 function createTestRouter() {
@@ -37,7 +25,6 @@ function createTestRouter() {
     routes: [
       { path: '/analyses/:id', name: 'analysis-detail', component: AnalysisView },
       { path: '/media', name: 'media', component: { template: '<div>media</div>' } },
-      { path: '/login', name: 'login', component: { template: '<div>login</div>' } },
     ],
   })
 }
@@ -56,6 +43,7 @@ function job(overrides: Record<string, unknown> = {}) {
   return {
     id: 42,
     testId: 'T001',
+    requestedByIdentity: 'jan.peeters@vives.be',
     status: 'queued',
     dogtraceVersion: null,
     reportAvailable: false,
@@ -87,11 +75,9 @@ describe('AnalysisView', () => {
     getAnalysisMock.mockReset()
     cancelAnalysisMock.mockReset()
     downloadAnalysisReportMock.mockReset()
-    refreshAccessTokenMock.mockReset()
-    sessionAccessToken.value = 'a-token'
   })
 
-  it("shows a not-found message for an unknown or another Account's job", async () => {
+  it('shows a not-found message for an unknown job', async () => {
     getAnalysisMock.mockRejectedValue(new AnalysisNotFoundError('Analysis not found.'))
 
     const wrapper = await mountView()
@@ -122,71 +108,20 @@ describe('AnalysisView', () => {
     expect(wrapper.find('[data-testid="status"]').text()).toBe('running')
   })
 
-  it('stops polling and replaces a stale status with a session-expired message when refreshing the token also fails', async () => {
-    getAnalysisMock
-      .mockResolvedValueOnce(job({ status: 'queued', videos: [video()] }))
-      .mockRejectedValue(new AnalysisUnauthorizedError('Not authenticated'))
-    // The refresh token itself is also expired/invalid — there's nothing
-    // left to silently recover with.
-    refreshAccessTokenMock.mockResolvedValue(false)
+  it('shows who ran the analysis', async () => {
+    getAnalysisMock.mockResolvedValue(job({ status: 'completed' }))
 
     const wrapper = await mountView()
-    expect(wrapper.find('[data-testid="status"]').text()).toBe('queued')
 
-    await vi.advanceTimersByTimeAsync(2000)
-    expect(refreshAccessTokenMock).toHaveBeenCalledTimes(1)
-    // A failed rotation means no retry is attempted — just the one 401'd
-    // poll on top of the initial successful load.
-    expect(getAnalysisMock).toHaveBeenCalledTimes(2)
-    expect(wrapper.find('[data-testid="session-expired"]').exists()).toBe(true)
-    // The stale "queued" snapshot from before the token expired must not
-    // still be on screen next to the new message.
-    expect(wrapper.find('[data-testid="status"]').exists()).toBe(false)
-
-    // Must not keep hammering the backend with an access token that will
-    // never become valid again on its own.
-    await vi.advanceTimersByTimeAsync(10000)
-    expect(getAnalysisMock).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('[data-testid="requested-by"]').text()).toBe('jan.peeters@vives.be')
   })
 
-  it('silently rotates the access token and retries a 401 without ever showing a message', async () => {
-    getAnalysisMock
-      .mockResolvedValueOnce(job({ status: 'queued', videos: [video()] }))
-      .mockRejectedValueOnce(new AnalysisUnauthorizedError('Not authenticated'))
-      .mockResolvedValueOnce(job({ status: 'running', videos: [video({ status: 'processing' })] }))
-    refreshAccessTokenMock.mockImplementation(async () => {
-      sessionAccessToken.value = 'rotated-token'
-      return true
-    })
+  it('omits the "run by" line when the analysis has no recorded identity', async () => {
+    getAnalysisMock.mockResolvedValue(job({ status: 'completed', requestedByIdentity: null }))
 
     const wrapper = await mountView()
-    await vi.advanceTimersByTimeAsync(2000)
 
-    expect(refreshAccessTokenMock).toHaveBeenCalledTimes(1)
-    // The initial load, the 401'd poll, and the immediate post-rotation
-    // retry — the retry must use the freshly rotated token, not the stale
-    // one that just got rejected.
-    expect(getAnalysisMock).toHaveBeenCalledTimes(3)
-    expect(getAnalysisMock).toHaveBeenNthCalledWith(3, 'rotated-token', 42)
-    expect(wrapper.find('[data-testid="session-expired"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="status"]').text()).toBe('running')
-  })
-
-  it('gives up after one retry if the rotated token also gets a 401, rather than looping', async () => {
-    getAnalysisMock
-      .mockResolvedValueOnce(job({ status: 'queued', videos: [video()] }))
-      .mockRejectedValue(new AnalysisUnauthorizedError('Not authenticated'))
-    refreshAccessTokenMock.mockResolvedValue(true)
-
-    const wrapper = await mountView()
-    await vi.advanceTimersByTimeAsync(2000)
-
-    // Exactly one rotation attempt, not one per retried 401 — a second
-    // rotation attempt on the retry's own 401 would risk looping forever
-    // against a backend that keeps rejecting the "rotated" token.
-    expect(refreshAccessTokenMock).toHaveBeenCalledTimes(1)
-    expect(getAnalysisMock).toHaveBeenCalledTimes(3)
-    expect(wrapper.find('[data-testid="session-expired"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="requested-by"]').exists()).toBe(false)
   })
 
   it('never schedules another poll if the component unmounts before an in-flight request resolves', async () => {
@@ -337,7 +272,7 @@ describe('AnalysisView', () => {
     await wrapper.find('[data-testid="download-report"]').trigger('click')
     await flushPromises()
 
-    expect(downloadAnalysisReportMock).toHaveBeenCalledWith('a-token', 42)
+    expect(downloadAnalysisReportMock).toHaveBeenCalledWith(42)
     expect(createObjectURL).toHaveBeenCalledWith(blob)
     expect(clickSpy).toHaveBeenCalled()
     expect(revokeObjectURL).toHaveBeenCalledWith(objectUrl)
@@ -381,7 +316,7 @@ describe('AnalysisView', () => {
     await wrapper.find('[data-testid="cancel"]').trigger('click')
     await flushPromises()
 
-    expect(cancelAnalysisMock).toHaveBeenCalledWith('a-token', 42)
+    expect(cancelAnalysisMock).toHaveBeenCalledWith(42)
     expect(wrapper.find('[data-testid="status"]').text()).toBe('cancelled')
     expect(wrapper.find('[data-testid="cancel"]').exists()).toBe(false)
   })

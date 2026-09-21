@@ -32,14 +32,8 @@ function toCut(row: CutResponse): Cut {
   }
 }
 
-function authHeaders(accessToken: string): HeadersInit {
-  return { Authorization: `Bearer ${accessToken}` }
-}
-
-export async function listTestIds(accessToken: string): Promise<string[]> {
-  const response = await fetch(`${API_BASE_URL}/media/tests`, {
-    headers: authHeaders(accessToken),
-  })
+export async function listTestIds(): Promise<string[]> {
+  const response = await fetch(`${API_BASE_URL}/media/tests`)
 
   if (!response.ok) {
     throw new Error('Failed to load Tests.')
@@ -53,10 +47,8 @@ export async function listTestIds(accessToken: string): Promise<string[]> {
 // rather than a load-error banner.
 export class TestNotFoundError extends Error {}
 
-export async function listCuts(accessToken: string, testId: string): Promise<Cut[]> {
-  const response = await fetch(`${API_BASE_URL}/media/tests/${encodeURIComponent(testId)}/cuts`, {
-    headers: authHeaders(accessToken),
-  })
+export async function listCuts(testId: string): Promise<Cut[]> {
+  const response = await fetch(`${API_BASE_URL}/media/tests/${encodeURIComponent(testId)}/cuts`)
 
   if (response.status === 404) {
     throw new TestNotFoundError(`Test "${testId}" not found.`)
@@ -100,14 +92,11 @@ function toDatasetEntry(row: DatasetEntryResponse): DatasetEntry {
 // TestNotFoundError above.
 export class DatasetFolderNotFoundError extends Error {}
 
-export async function listDatasetFolder(
-  accessToken: string,
-  path: string = '',
-): Promise<DatasetEntry[]> {
+export async function listDatasetFolder(path: string = ''): Promise<DatasetEntry[]> {
   const url = new URL(`${API_BASE_URL}/media/datasets`)
   if (path) url.searchParams.set('path', path)
 
-  const response = await fetch(url, { headers: authHeaders(accessToken) })
+  const response = await fetch(url)
 
   if (response.status === 404) {
     throw new DatasetFolderNotFoundError(`Dataset folder "${path}" not found.`)
@@ -122,8 +111,10 @@ export async function listDatasetFolder(
 
 // Ticket #21: play/download a Cut via a short-lived, single-Cut-scoped,
 // single-action-scoped media token — see docs/adr/0002-media-access-tokens-
-// in-url.md. The native <video>/download request that follows can't carry
-// an Authorization header, so the token (not the session) authenticates it.
+// in-url.md. The native <video>/download request that follows is gated by
+// the token alone. Kept (renamed away from its old "JWT access token"
+// framing) until it's confirmed on `dogtrace-app` whether Mechatronics'
+// identity header also reaches native-element requests — see ADR-0002.
 export type MediaTokenAction = 'play' | 'download'
 
 interface MediaTokenResponse {
@@ -131,14 +122,10 @@ interface MediaTokenResponse {
   expires_in: number
 }
 
-export async function requestMediaToken(
-  accessToken: string,
-  key: string,
-  action: MediaTokenAction,
-): Promise<string> {
+export async function requestMediaToken(key: string, action: MediaTokenAction): Promise<string> {
   const response = await fetch(`${API_BASE_URL}/media/cuts/token`, {
     method: 'POST',
-    headers: { ...authHeaders(accessToken), 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ key, action }),
   })
 
@@ -197,11 +184,11 @@ function toCutMediaInfo(row: CutMediaInfoResponse): CutMediaInfo {
 // above.
 export class CutInfoNotFoundError extends Error {}
 
-export async function getCutMediaInfo(accessToken: string, key: string): Promise<CutMediaInfo> {
+export async function getCutMediaInfo(key: string): Promise<CutMediaInfo> {
   const url = new URL(`${API_BASE_URL}/media/cuts/info`)
   url.searchParams.set('key', key)
 
-  const response = await fetch(url, { headers: authHeaders(accessToken) })
+  const response = await fetch(url)
 
   if (response.status === 404) {
     throw new CutInfoNotFoundError('Cut not found.')

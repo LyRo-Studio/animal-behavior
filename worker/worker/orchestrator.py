@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Short, user-safe strings only (analysis_job_videos.failure_reason) — see
 # issue #44's "Failure handling" decision: never a raw exception, stack
 # trace, or file path. Full detail always goes to logger.exception/warning
-# below instead, correlated with analysis_id/account_id/test_id/cut_key.
+# below instead, correlated with analysis_id/test_id/cut_key.
 _DOWNLOAD_FAILURE_REASON = "The source video could not be retrieved from storage."
 _PIPELINE_FAILURE_REASON = "The analysis did not produce a result for this video."
 _BATCH_FAILURE_REASON = "The analysis could not be completed for this video."
@@ -55,9 +55,8 @@ def process_next_job(
         return False
 
     logger.info(
-        "analysis_id=%s account_id=%s test_id=%s claimed by worker",
+        "analysis_id=%s test_id=%s claimed by worker",
         job.id,
-        job.requested_by,
         job.test_id,
     )
 
@@ -82,9 +81,8 @@ def process_next_job(
             # after being requeued on restart, crash-loop forever without
             # ever reaching the next queued job.
             logger.exception(
-                "analysis_id=%s account_id=%s test_id=%s unhandled error while processing job",
+                "analysis_id=%s test_id=%s unhandled error while processing job",
                 job.id,
-                job.requested_by,
                 job.test_id,
             )
             _fail_after_unhandled_error(db, job)
@@ -161,10 +159,8 @@ def _run_claimed_job(
             )
         except Exception:
             logger.exception(
-                "analysis_id=%s account_id=%s test_id=%s run_reporting failed "
-                "before completing every video",
+                "analysis_id=%s test_id=%s run_reporting failed before completing every video",
                 job.id,
-                job.requested_by,
                 job.test_id,
             )
             # A video already resolved (e.g. a download failure above, or a
@@ -193,10 +189,9 @@ def _run_claimed_job(
             for video in job.videos:
                 if video.status in _OPEN_STATUSES:
                     logger.warning(
-                        "analysis_id=%s account_id=%s test_id=%s cut_key=%s never "
+                        "analysis_id=%s test_id=%s cut_key=%s never "
                         "reached a terminal status from dogtrace's progress callback",
                         job.id,
-                        job.requested_by,
                         job.test_id,
                         video.cut_key,
                     )
@@ -228,9 +223,8 @@ def _download_video(
         s3_client.download_file(video.cut_key, local_path)
     except S3ObjectNotFoundError:
         logger.warning(
-            "analysis_id=%s account_id=%s test_id=%s cut_key=%s not found in storage",
+            "analysis_id=%s test_id=%s cut_key=%s not found in storage",
             job.id,
-            job.requested_by,
             job.test_id,
             video.cut_key,
         )
