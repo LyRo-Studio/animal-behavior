@@ -90,6 +90,20 @@ Deploy (`.github/workflows/deploy.yml`) triggers automatically once `ci.yml` suc
 - Recommended: restrict the Environment's deployment branches to `master`.
 - See `CONTEXT.md`'s "CI/CD retarget (ticket #70)" for the reasoning.
 
+### Discovering the identity header
+
+Until `IDENTITY_HEADER_NAME` is set, analyses are attributed to no one. To find the header Mechatronics forwards (and to check whether a native `<video>` request carries it — the media-token question in issue #72):
+
+1. Set the `DEBUG_REQUEST_HEADERS_ENABLED` variable to `true` in the `production` Environment and redeploy (re-run the latest Deploy workflow).
+2. On the hosted site, open the browser console and run:
+   ```js
+   fetch('/api/debug/request-headers').then(r => r.json()).then(d => { console.table(d.headers); console.log(d) })
+   ```
+   Find the header that holds your own identity. Credentials are shown as `[redacted]` — by name (`cookie`, `authorization`, anything with `token`/`secret`/`key`/`session`/… in it) and by value (JWTs, `Bearer …`) — and query strings are cut from every value.
+3. Set `IDENTITY_HEADER_NAME` to that name and redeploy — Home then shows "Signed in as …".
+4. Play a Cut in the Media Browser, then run the same `fetch` again and look at `recent_media_requests`: each entry lists the header *names* of a `/media/stream` request (never values or the token) and `identity_header_present`. `true` for `sec_fetch_dest: "video"` means native requests carry the identity header, so the media-token mechanism can be removed (issue #72's "If the gate passes" list).
+5. Set `DEBUG_REQUEST_HEADERS_ENABLED` back to `false` (or delete it) and redeploy.
+
 A plain local `docker compose up` never touches `docker-compose.prod.yml` and always builds from source, unaffected by any of this. Don't run `docker compose` by hand on the production box without the `-f docker-compose.yml -f docker-compose.prod.yml` pair — without it compose builds from source and publishes no port at all.
 
 **Rollback**: dispatch `deploy.yml` manually with a previously published tag (skips build/push and redeploys that image directly):

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolved from this file's own location, not the process's working
@@ -38,6 +39,24 @@ class Settings(BaseSettings):
     # at all", which is also what local development (no Mechatronics in
     # front) runs with.
     identity_header_name: str | None = None
+
+    # Ticket #72's header discovery: enables `GET /api/debug/request-headers`
+    # (redacted request headers, plus the header names seen on recent
+    # `/media/stream` requests — the media-token gate's answer). Off by
+    # default, and meant to be switched on only while discovering the real
+    # identity header on `dogtrace-app`, then off again — see
+    # app/services/request_diagnostics.py.
+    debug_request_headers_enabled: bool = False
+
+    @field_validator("debug_request_headers_enabled", mode="before")
+    @classmethod
+    def _empty_means_off(cls, value: object) -> object:
+        # `.env` may carry `DEBUG_REQUEST_HEADERS_ENABLED=` with nothing after
+        # it (as it may for `IDENTITY_HEADER_NAME=`); pydantic would otherwise
+        # refuse to start over an empty string it can't read as a bool.
+        if isinstance(value, str) and not value.strip():
+            return False
+        return value
 
     # Signs the short-lived Cut streaming/download tokens (ADR-0002) — the
     # only thing left the backend signs. Same "safe placeholder for
