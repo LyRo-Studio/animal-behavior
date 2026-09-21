@@ -1,4 +1,4 @@
-import { API_BASE_URL, errorFromResponse } from '@/services/apiBase'
+import { API_BASE_URL, apiUrl, errorFromResponse } from '@/services/apiBase'
 
 // Mirrors the backend's AnalysisJobStatus / AnalysisJobVideoStatus enums
 // (backend/app/models/analysis_job.py) — issue #44's job state machine.
@@ -140,7 +140,7 @@ export async function cancelAnalysis(id: number): Promise<AnalysisJob> {
 // the global AnalysesHistoryView and MediaBrowserView's inline "previous
 // analyses for this Test" panel via the optional `testId` filter.
 export async function listAnalyses(testId?: string): Promise<AnalysisJob[]> {
-  const url = new URL(`${API_BASE_URL}/analyses`)
+  const url = apiUrl('/analyses')
   if (testId) url.searchParams.set('test_id', testId)
 
   const response = await fetch(url)

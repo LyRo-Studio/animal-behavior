@@ -51,3 +51,8 @@ trade-off acceptable:
   Mechatronics is the access control. That, plus the fact that the token issuance limiter is the
   only thing throttling streaming, is the case for removing the mechanism outright if the
   empirical check passes; the removal checklist is in issue #72's "Media-token decision" section.
+- **Amended by ticket #71 (reverse proxy):** nginx now sits in front of the backend and has its own
+  access log, which by default writes the whole request line — token included. `nginx/default.conf`
+  logs only the path (no query string) for `/api/media/stream` instead, and sets the error log to
+  `crit` because nginx's error log quotes the request line on upstream failures and cannot be
+  redacted. The backend's own uvicorn access-log filter is unchanged.

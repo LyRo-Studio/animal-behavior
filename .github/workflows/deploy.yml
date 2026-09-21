@@ -26,6 +26,7 @@ env:
   BACKEND_IMAGE: ghcr.io/lyro-studio/animal-behavior-backend
   FRONTEND_IMAGE: ghcr.io/lyro-studio/animal-behavior-frontend
   WORKER_IMAGE: ghcr.io/lyro-studio/animal-behavior-worker
+  NGINX_IMAGE: ghcr.io/lyro-studio/animal-behavior-nginx
 
 jobs:
   deploy:
@@ -89,8 +90,6 @@ jobs:
           MEDIA_TOKEN_SECRET_KEY: ${{ secrets.MEDIA_TOKEN_SECRET_KEY }}
           S3_BUCKET: ${{ vars.S3_BUCKET }}
           S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
-          CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
-          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
           # Optional — compose supplies a default when these are unset.
           POSTGRES_USER: ${{ vars.POSTGRES_USER }}
           POSTGRES_DB: ${{ vars.POSTGRES_DB }}
@@ -99,6 +98,10 @@ jobs:
           # `dogtrace-app` (ticket #72's diagnostic step) — empty means the
           # backend reads no identity at all.
           IDENTITY_HEADER_NAME: ${{ vars.IDENTITY_HEADER_NAME }}
+          # Vestigial in production since ticket #71: the site is one origin behind
+          # nginx, so no cross-origin request is ever made. Kept optional in case a
+          # value is still set; compose's default applies when it is empty.
+          CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
         run: |
           set -euo pipefail
           # Never world-readable, not even for the instant before chmod.
@@ -106,11 +109,11 @@ jobs:
 
           required=(
             POSTGRES_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-            S3_BUCKET S3_ENDPOINT MEDIA_TOKEN_SECRET_KEY CORS_ORIGINS
-            VITE_API_BASE_URL
+            S3_BUCKET S3_ENDPOINT MEDIA_TOKEN_SECRET_KEY
           )
           optional=(
             POSTGRES_USER POSTGRES_DB S3_ADDRESSING_STYLE IDENTITY_HEADER_NAME
+            CORS_ORIGINS
           )
 
           missing=()
@@ -184,12 +187,14 @@ jobs:
         with:
           context: frontend
           push: true
-          # Baked into the bundle at build time (frontend/Dockerfile). A
-          # plain (non-secret) Environment variable; "Generate .env" above
-          # already failed the job if it's unset or contains a quote or
-          # line break (so it can't inject an extra build-arg here).
+          # Baked into the bundle at build time (frontend/Dockerfile). Fixed,
+          # not an Environment variable (ticket #71): production is served
+          # from one origin with nginx routing `/api` to the backend, so the
+          # only correct value is the same-origin path. It used to be a
+          # variable, and a stale absolute URL there broke the whole site
+          # (mixed content, wrong host).
           build-args: |
-            VITE_API_BASE_URL=${{ vars.VITE_API_BASE_URL }}
+            VITE_API_BASE_URL=/api
           tags: |
             ${{ env.FRONTEND_IMAGE }}:${{ steps.image.outputs.tag }}
             ${{ env.FRONTEND_IMAGE }}:latest
@@ -208,11 +213,24 @@ jobs:
             ${{ env.WORKER_IMAGE }}:${{ steps.image.outputs.tag }}
             ${{ env.WORKER_IMAGE }}:latest
 
+      # Config-only image (nginx/Dockerfile) — the reverse proxy that is the
+      # only thing published on the production box (ticket #71).
+      - name: Build and push nginx image
+        if: steps.image.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: nginx
+          push: true
+          tags: |
+            ${{ env.NGINX_IMAGE }}:${{ steps.image.outputs.tag }}
+            ${{ env.NGINX_IMAGE }}:latest
+
       - name: Deploy
         env:
           BACKEND_IMAGE_REF: ${{ env.BACKEND_IMAGE }}:${{ steps.image.outputs.tag }}
           FRONTEND_IMAGE_REF: ${{ env.FRONTEND_IMAGE }}:${{ steps.image.outputs.tag }}
           WORKER_IMAGE_REF: ${{ env.WORKER_IMAGE }}:${{ steps.image.outputs.tag }}
+          NGINX_IMAGE_REF: ${{ env.NGINX_IMAGE }}:${{ steps.image.outputs.tag }}
         # --profile worker: `worker` sits behind Compose's `profiles:
         # ["worker"]` gate (ticket #47 — keeps a GPU-less `docker compose
         # up` from failing outright on a machine without one). Without this
@@ -226,7 +244,7 @@ jobs:
         # --no-build: docker-compose.prod.yml layers `image:` on top of the
         # base file's `build:` — this guarantees compose uses the pulled
         # image rather than rebuilding from source on the box.
-        # --wait: blocks until db/backend/frontend all report healthy, and
+        # --wait: blocks until db/backend/frontend/nginx all report healthy, and
         # worker (no healthcheck of its own) is at least running (or fails
         # the step — see docker-compose.yml's healthchecks). Timeout was
         # 300s (sized for the db ~50s -> backend ~55s -> frontend ~55s

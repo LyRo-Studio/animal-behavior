@@ -4,6 +4,9 @@
 # instead of the base file's `build:` context, so the deploy step never
 # rebuilds on the box. A plain local `docker compose up` (no `-f` override)
 # never loads this file and keeps building from source unchanged.
+#
+# Only `nginx` publishes a host port (ticket #71): backend and frontend are
+# reachable on the internal Docker network only.
 services:
   backend:
     image: ${BACKEND_IMAGE_REF:?Set BACKEND_IMAGE_REF (see .github/workflows/deploy.yml)}
@@ -16,3 +19,10 @@ services:
   # `build:` for an `image:`, same as backend/frontend above.
   worker:
     image: ${WORKER_IMAGE_REF:?Set WORKER_IMAGE_REF (see .github/workflows/deploy.yml)}
+
+  # 5173 is the port Mechatronics forwards dogtrace.mechatronics.be to — kept
+  # so nginx replaces the frontend there without any change on their side.
+  nginx:
+    image: ${NGINX_IMAGE_REF:?Set NGINX_IMAGE_REF (see .github/workflows/deploy.yml)}
+    ports:
+      - "5173:80"

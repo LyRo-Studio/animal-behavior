@@ -172,3 +172,19 @@ jobs:
         # vite build only — vue-tsc already ran as the Typecheck step above;
         # `npm run build` would repeat it a second time for no benefit.
         run: npx vite build
+
+  # Ticket #71: runs the real nginx/default.conf in front of stub upstreams —
+  # routing, the identity header, and (ADR-0002) that the media token never
+  # reaches a log. Uses the runner's own Docker, like the Postgres service
+  # containers above; it never starts the application stack.
+  nginx:
+    runs-on: [self-hosted, linux, x64, ci]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # See the backend job's checkout step above — same reasoning.
+          clean: false
+
+      - name: Test (nginx/test.sh)
+        run: bash nginx/test.sh

@@ -20,7 +20,7 @@ _CUT_KEY = "cuts/T001/T001_C1_ME_F1.mp4"
 def test_mint_token_for_a_well_formed_cut_key_succeeds(client, db_session, s3_client):
     s3_client.objects[_CUT_KEY] = b"video-bytes"
 
-    response = client.post("/media/cuts/token", json={"key": _CUT_KEY, "action": "play"})
+    response = client.post("/api/media/cuts/token", json={"key": _CUT_KEY, "action": "play"})
 
     assert response.status_code == 200
     body = response.json()
@@ -31,7 +31,9 @@ def test_mint_token_for_a_well_formed_cut_key_succeeds(client, db_session, s3_cl
 def test_mint_token_rejects_a_key_outside_cuts(client, db_session, s3_client):
     s3_client.objects["source/secret.mp4"] = b"top-secret"
 
-    response = client.post("/media/cuts/token", json={"key": "source/secret.mp4", "action": "play"})
+    response = client.post(
+        "/api/media/cuts/token", json={"key": "source/secret.mp4", "action": "play"}
+    )
 
     assert response.status_code == 404
 
@@ -40,7 +42,7 @@ def test_mint_token_rejects_a_traversal_attempt(client, db_session, s3_client):
     s3_client.objects["cuts/secret.mp4"] = b"top-secret"
 
     for key in ["cuts/T001/../../source/secret.mp4", "cuts/T001/sub/nested.mp4", "cuts/secret.mp4"]:
-        response = client.post("/media/cuts/token", json={"key": key, "action": "play"})
+        response = client.post("/api/media/cuts/token", json={"key": key, "action": "play"})
         assert response.status_code == 404
 
 
@@ -51,12 +53,12 @@ def test_mint_token_is_rate_limited_per_identity(client, s3_client, monkeypatch)
 
     for _ in range(2):
         response = client.post(
-            "/media/cuts/token", json={"key": _CUT_KEY, "action": "play"}, headers=headers
+            "/api/media/cuts/token", json={"key": _CUT_KEY, "action": "play"}, headers=headers
         )
         assert response.status_code == 200
 
     throttled = client.post(
-        "/media/cuts/token", json={"key": _CUT_KEY, "action": "play"}, headers=headers
+        "/api/media/cuts/token", json={"key": _CUT_KEY, "action": "play"}, headers=headers
     )
     assert throttled.status_code == 429
     assert "Retry-After" in throttled.headers
@@ -67,14 +69,14 @@ def test_mint_token_rate_limit_is_scoped_per_identity(client, s3_client, monkeyp
     s3_client.objects[_CUT_KEY] = b"video-bytes"
 
     exhausted = client.post(
-        "/media/cuts/token",
+        "/api/media/cuts/token",
         json={"key": _CUT_KEY, "action": "play"},
         headers=identity_headers("jan.peeters@vives.be"),
     )
     assert exhausted.status_code == 200
 
     still_ok = client.post(
-        "/media/cuts/token",
+        "/api/media/cuts/token",
         json={"key": _CUT_KEY, "action": "play"},
         headers=identity_headers("other@vives.be"),
     )
@@ -89,8 +91,8 @@ def test_mint_token_rate_limit_still_applies_without_an_identity(client, s3_clie
     s3_client.objects[_CUT_KEY] = b"video-bytes"
     payload = {"key": _CUT_KEY, "action": "play"}
 
-    assert client.post("/media/cuts/token", json=payload).status_code == 200
-    assert client.post("/media/cuts/token", json=payload).status_code == 429
+    assert client.post("/api/media/cuts/token", json=payload).status_code == 200
+    assert client.post("/api/media/cuts/token", json=payload).status_code == 429
 
 
 # --- GET /media/stream: serving ------------------------------------------
@@ -101,7 +103,7 @@ def test_stream_with_a_play_token_returns_full_content_inline(client, db_session
     token = create_media_token(cut_key=_CUT_KEY, action="play")
 
     response = client.get(
-        "/media/stream", params={"key": _CUT_KEY, "action": "play", "token": token}
+        "/api/media/stream", params={"key": _CUT_KEY, "action": "play", "token": token}
     )
 
     assert response.status_code == 200
@@ -116,7 +118,7 @@ def test_stream_with_a_download_token_sets_attachment_disposition(client, db_ses
     token = create_media_token(cut_key=_CUT_KEY, action="download")
 
     response = client.get(
-        "/media/stream", params={"key": _CUT_KEY, "action": "download", "token": token}
+        "/api/media/stream", params={"key": _CUT_KEY, "action": "download", "token": token}
     )
 
     assert response.status_code == 200
@@ -128,7 +130,7 @@ def test_stream_forwards_a_range_request_as_partial_content(client, db_session, 
     token = create_media_token(cut_key=_CUT_KEY, action="play")
 
     response = client.get(
-        "/media/stream",
+        "/api/media/stream",
         params={"key": _CUT_KEY, "action": "play", "token": token},
         headers={"Range": "bytes=2-4"},
     )
@@ -169,7 +171,7 @@ def test_stream_honors_a_full_open_ended_range_via_several_bounded_s3_reads(
     call_sizes = _tracking_read_range(s3_client)
 
     response = client.get(
-        "/media/stream",
+        "/api/media/stream",
         params={"key": _CUT_KEY, "action": "play", "token": token},
         headers={"Range": "bytes=0-"},
     )
@@ -195,7 +197,7 @@ def test_stream_with_no_range_header_streams_a_large_download_in_bounded_chunks(
     call_sizes = _tracking_read_range(s3_client)
 
     response = client.get(
-        "/media/stream", params={"key": _CUT_KEY, "action": "download", "token": token}
+        "/api/media/stream", params={"key": _CUT_KEY, "action": "download", "token": token}
     )
 
     assert response.status_code == 200
@@ -213,7 +215,7 @@ def test_stream_suffix_range_streams_in_bounded_chunks(client, db_session, s3_cl
     call_sizes = _tracking_read_range(s3_client)
 
     response = client.get(
-        "/media/stream",
+        "/api/media/stream",
         params={"key": _CUT_KEY, "action": "play", "token": token},
         headers={"Range": f"bytes=-{total_size}"},
     )
@@ -234,7 +236,7 @@ def test_stream_treats_a_reversed_range_as_malformed_and_serves_full_content(
     token = create_media_token(cut_key=_CUT_KEY, action="play")
 
     response = client.get(
-        "/media/stream",
+        "/api/media/stream",
         params={"key": _CUT_KEY, "action": "play", "token": token},
         headers={"Range": "bytes=5-3"},
     )
@@ -251,7 +253,7 @@ def test_stream_escapes_a_quote_character_in_the_content_disposition_filename(
     token = create_media_token(cut_key=key, action="download")
 
     response = client.get(
-        "/media/stream", params={"key": key, "action": "download", "token": token}
+        "/api/media/stream", params={"key": key, "action": "download", "token": token}
     )
 
     assert response.status_code == 200
@@ -263,7 +265,7 @@ def test_stream_rejects_an_unsatisfiable_range(client, db_session, s3_client):
     token = create_media_token(cut_key=_CUT_KEY, action="play")
 
     response = client.get(
-        "/media/stream",
+        "/api/media/stream",
         params={"key": _CUT_KEY, "action": "play", "token": token},
         headers={"Range": "bytes=100-200"},
     )
@@ -279,7 +281,7 @@ def test_stream_rejects_a_token_used_for_a_different_cut(client, db_session, s3_
     token = create_media_token(cut_key=_CUT_KEY, action="play")
 
     response = client.get(
-        "/media/stream", params={"key": other_key, "action": "play", "token": token}
+        "/api/media/stream", params={"key": other_key, "action": "play", "token": token}
     )
 
     assert response.status_code == 403
@@ -290,7 +292,7 @@ def test_stream_rejects_a_token_used_for_the_other_action(client, db_session, s3
     token = create_media_token(cut_key=_CUT_KEY, action="play")
 
     response = client.get(
-        "/media/stream", params={"key": _CUT_KEY, "action": "download", "token": token}
+        "/api/media/stream", params={"key": _CUT_KEY, "action": "download", "token": token}
     )
 
     assert response.status_code == 403
@@ -302,7 +304,7 @@ def test_stream_rejects_an_expired_token(client, db_session, s3_client, monkeypa
     token = create_media_token(cut_key=_CUT_KEY, action="play")
 
     response = client.get(
-        "/media/stream", params={"key": _CUT_KEY, "action": "play", "token": token}
+        "/api/media/stream", params={"key": _CUT_KEY, "action": "play", "token": token}
     )
 
     assert response.status_code == 401
@@ -312,7 +314,7 @@ def test_stream_rejects_a_garbage_token(client, db_session, s3_client):
     s3_client.objects[_CUT_KEY] = b"a"
 
     response = client.get(
-        "/media/stream", params={"key": _CUT_KEY, "action": "play", "token": "not-a-real-token"}
+        "/api/media/stream", params={"key": _CUT_KEY, "action": "play", "token": "not-a-real-token"}
     )
 
     assert response.status_code == 401
@@ -336,7 +338,7 @@ def test_stream_rejects_a_correctly_signed_token_of_another_type(client, s3_clie
     )
 
     response = client.get(
-        "/media/stream", params={"key": _CUT_KEY, "action": "play", "token": other_type_token}
+        "/api/media/stream", params={"key": _CUT_KEY, "action": "play", "token": other_type_token}
     )
 
     assert response.status_code == 401
@@ -352,7 +354,7 @@ def test_stream_rejects_a_key_outside_cuts_even_with_a_forged_matching_token(
     token = create_media_token(cut_key="source/secret.mp4", action="play")
 
     response = client.get(
-        "/media/stream", params={"key": "source/secret.mp4", "action": "play", "token": token}
+        "/api/media/stream", params={"key": "source/secret.mp4", "action": "play", "token": token}
     )
 
     assert response.status_code == 404
@@ -365,7 +367,7 @@ def test_stream_returns_not_found_for_a_cut_key_that_no_longer_exists_in_s3(
     token = create_media_token(cut_key=_CUT_KEY, action="play")
 
     response = client.get(
-        "/media/stream", params={"key": _CUT_KEY, "action": "play", "token": token}
+        "/api/media/stream", params={"key": _CUT_KEY, "action": "play", "token": token}
     )
 
     assert response.status_code == 404
@@ -379,7 +381,7 @@ def test_stream_requires_no_bearer_authentication(client, db_session, s3_client)
     token = create_media_token(cut_key=_CUT_KEY, action="play")
 
     response = client.get(
-        "/media/stream", params={"key": _CUT_KEY, "action": "play", "token": token}
+        "/api/media/stream", params={"key": _CUT_KEY, "action": "play", "token": token}
     )
 
     assert response.status_code == 200

@@ -20,7 +20,7 @@ def test_get_info_probes_and_returns_duration_resolution_and_codec(
         duration_seconds=42.5, width=1920, height=1080, codec="h264"
     )
 
-    response = client.get("/media/cuts/info", params={"key": _CUT_KEY})
+    response = client.get("/api/media/cuts/info", params={"key": _CUT_KEY})
 
     assert response.status_code == 200
     assert response.json() == {
@@ -37,8 +37,8 @@ def test_a_second_request_for_the_same_cut_reuses_the_cached_result(
 ):
     s3_client.objects[_CUT_KEY] = b"video-bytes"
 
-    first = client.get("/media/cuts/info", params={"key": _CUT_KEY})
-    second = client.get("/media/cuts/info", params={"key": _CUT_KEY})
+    first = client.get("/api/media/cuts/info", params={"key": _CUT_KEY})
+    second = client.get("/api/media/cuts/info", params={"key": _CUT_KEY})
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -50,7 +50,7 @@ def test_a_second_request_for_the_same_cut_reuses_the_cached_result(
 
 def test_a_changed_object_at_the_same_key_is_re_probed(client, db_session, s3_client, media_prober):
     s3_client.objects[_CUT_KEY] = b"original-bytes"
-    client.get("/media/cuts/info", params={"key": _CUT_KEY})
+    client.get("/api/media/cuts/info", params={"key": _CUT_KEY})
     assert len(media_prober.calls) == 1
 
     # The object at the same key is replaced — its ETag (content-derived in
@@ -61,7 +61,7 @@ def test_a_changed_object_at_the_same_key_is_re_probed(client, db_session, s3_cl
         duration_seconds=99.0, width=1280, height=720, codec="vp9"
     )
 
-    response = client.get("/media/cuts/info", params={"key": _CUT_KEY})
+    response = client.get("/api/media/cuts/info", params={"key": _CUT_KEY})
 
     assert response.status_code == 200
     assert response.json() == {
@@ -76,7 +76,7 @@ def test_a_changed_object_at_the_same_key_is_re_probed(client, db_session, s3_cl
 def test_get_info_rejects_a_key_outside_cuts(client, db_session, s3_client, media_prober):
     s3_client.objects["source/secret.mp4"] = b"top-secret"
 
-    response = client.get("/media/cuts/info", params={"key": "source/secret.mp4"})
+    response = client.get("/api/media/cuts/info", params={"key": "source/secret.mp4"})
 
     assert response.status_code == 404
     assert len(media_prober.calls) == 0
@@ -85,7 +85,7 @@ def test_get_info_rejects_a_key_outside_cuts(client, db_session, s3_client, medi
 def test_get_info_returns_not_found_for_a_cut_key_that_does_not_exist_in_s3(
     client, db_session, s3_client, media_prober
 ):
-    response = client.get("/media/cuts/info", params={"key": _CUT_KEY})
+    response = client.get("/api/media/cuts/info", params={"key": _CUT_KEY})
 
     assert response.status_code == 404
     assert len(media_prober.calls) == 0
@@ -94,9 +94,9 @@ def test_get_info_returns_not_found_for_a_cut_key_that_does_not_exist_in_s3(
 def test_cut_info_needs_no_login_and_ignores_identity(client, s3_client, media_prober):
     s3_client.objects[_CUT_KEY] = b"video-bytes"
 
-    anonymous = client.get("/media/cuts/info", params={"key": _CUT_KEY})
+    anonymous = client.get("/api/media/cuts/info", params={"key": _CUT_KEY})
     identified = client.get(
-        "/media/cuts/info",
+        "/api/media/cuts/info",
         params={"key": _CUT_KEY},
         headers=identity_headers("jan.peeters@vives.be"),
     )
@@ -120,7 +120,7 @@ def test_get_info_never_lets_a_dot_dot_filename_escape_the_temp_download_directo
     key = "cuts/T001/.."
     s3_client.objects[key] = b"video-bytes"
 
-    response = client.get("/media/cuts/info", params={"key": key})
+    response = client.get("/api/media/cuts/info", params={"key": key})
 
     assert response.status_code == 200
     [probed_path] = media_prober.calls
@@ -154,7 +154,7 @@ def test_get_info_returns_not_found_when_the_object_vanishes_between_head_and_do
     s3_client.objects[_CUT_KEY] = b"video-bytes"
     app.dependency_overrides[get_s3_client] = lambda: _VanishingS3Client(s3_client)
 
-    response = client.get("/media/cuts/info", params={"key": _CUT_KEY})
+    response = client.get("/api/media/cuts/info", params={"key": _CUT_KEY})
 
     assert response.status_code == 404
     assert len(media_prober.calls) == 0
@@ -170,16 +170,16 @@ def test_get_info_is_rate_limited_per_identity(client, s3_client, media_prober, 
     headers = identity_headers("jan.peeters@vives.be")
 
     for _ in range(2):
-        response = client.get("/media/cuts/info", params={"key": _CUT_KEY}, headers=headers)
+        response = client.get("/api/media/cuts/info", params={"key": _CUT_KEY}, headers=headers)
         assert response.status_code == 200
 
-    throttled = client.get("/media/cuts/info", params={"key": _CUT_KEY}, headers=headers)
+    throttled = client.get("/api/media/cuts/info", params={"key": _CUT_KEY}, headers=headers)
     assert throttled.status_code == 429
     assert "Retry-After" in throttled.headers
 
     # Another identity has its own budget.
     other = client.get(
-        "/media/cuts/info", params={"key": _CUT_KEY}, headers=identity_headers("other@vives.be")
+        "/api/media/cuts/info", params={"key": _CUT_KEY}, headers=identity_headers("other@vives.be")
     )
     assert other.status_code == 200
 
@@ -193,5 +193,5 @@ def test_get_info_rate_limit_still_applies_without_an_identity(
     monkeypatch.setattr(settings, "cut_info_rate_limit_max_attempts_per_identity", 1)
     s3_client.objects[_CUT_KEY] = b"video-bytes"
 
-    assert client.get("/media/cuts/info", params={"key": _CUT_KEY}).status_code == 200
-    assert client.get("/media/cuts/info", params={"key": _CUT_KEY}).status_code == 429
+    assert client.get("/api/media/cuts/info", params={"key": _CUT_KEY}).status_code == 200
+    assert client.get("/api/media/cuts/info", params={"key": _CUT_KEY}).status_code == 429

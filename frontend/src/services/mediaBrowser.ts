@@ -1,4 +1,4 @@
-import { API_BASE_URL } from '@/services/apiBase'
+import { API_BASE_URL, apiUrl } from '@/services/apiBase'
 
 export interface Cut {
   key: string
@@ -93,7 +93,7 @@ function toDatasetEntry(row: DatasetEntryResponse): DatasetEntry {
 export class DatasetFolderNotFoundError extends Error {}
 
 export async function listDatasetFolder(path: string = ''): Promise<DatasetEntry[]> {
-  const url = new URL(`${API_BASE_URL}/media/datasets`)
+  const url = apiUrl('/media/datasets')
   if (path) url.searchParams.set('path', path)
 
   const response = await fetch(url)
@@ -145,7 +145,7 @@ export async function requestMediaToken(key: string, action: MediaTokenAction): 
 // parameter rather than a header (the deliberate, scoped exception in the
 // ADR referenced above).
 export function mediaStreamUrl(key: string, action: MediaTokenAction, token: string): string {
-  const url = new URL(`${API_BASE_URL}/media/stream`)
+  const url = apiUrl('/media/stream')
   url.searchParams.set('key', key)
   url.searchParams.set('action', action)
   url.searchParams.set('token', token)
@@ -185,7 +185,7 @@ function toCutMediaInfo(row: CutMediaInfoResponse): CutMediaInfo {
 export class CutInfoNotFoundError extends Error {}
 
 export async function getCutMediaInfo(key: string): Promise<CutMediaInfo> {
-  const url = new URL(`${API_BASE_URL}/media/cuts/info`)
+  const url = apiUrl('/media/cuts/info')
   url.searchParams.set('key', key)
 
   const response = await fetch(url)

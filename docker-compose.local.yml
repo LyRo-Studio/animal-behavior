@@ -1,0 +1,27 @@
+# Local development only. Opted into by `COMPOSE_FILE` in your `.env` (see
+# .env.example), so a plain `docker compose up` picks it up locally. It is
+# deliberately NOT named docker-compose.override.yml, which compose merges
+# automatically: on the production box a stray `docker compose up` would then
+# re-publish the backend port and bypass nginx and Mechatronics (ADR-0004).
+# deploy.yml names its files with `-f` and its generated `.env` has no
+# COMPOSE_FILE, so this is never applied there.
+#
+# The base file publishes no backend/frontend port (ticket #71), so this puts
+# back the direct entry points local development has always used:
+#   frontend  http://localhost:5173   (calls the backend directly, below)
+#   backend   http://localhost:8000/api
+# and adds the proxied entry point on :8080. That one is only useful if the
+# frontend is built for same-origin API calls:
+#   VITE_API_BASE_URL=/api docker compose up --build   ->  http://localhost:8080
+services:
+  backend:
+    ports:
+      - "8000:8000"
+
+  frontend:
+    ports:
+      - "5173:4173"
+
+  nginx:
+    ports:
+      - "8080:80"
