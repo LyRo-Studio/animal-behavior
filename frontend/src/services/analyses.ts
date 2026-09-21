@@ -1,4 +1,4 @@
-import { API_BASE_URL, authHeaders, errorFromResponse } from '@/services/apiBase'
+import { API_BASE_URL, errorFromResponse } from '@/services/apiBase'
 
 // Mirrors the backend's AnalysisJobStatus / AnalysisJobVideoStatus enums
 // (backend/app/models/analysis_job.py) — issue #44's job state machine.
@@ -17,6 +17,9 @@ export interface AnalysisJobVideo {
 export interface AnalysisJob {
   id: number
   testId: string
+  // Who ran it, as forwarded by Mechatronics (ticket #72) — null when no
+  // identity was present at the time (e.g. local development).
+  requestedByIdentity: string | null
   status: AnalysisJobStatus
   dogtraceVersion: string | null
   reportAvailable: boolean
@@ -36,6 +39,7 @@ interface AnalysisJobVideoResponse {
 interface AnalysisJobResponse {
   id: number
   test_id: string
+  requested_by_identity: string | null
   status: AnalysisJobStatus
   dogtrace_version: string | null
   report_available: boolean
@@ -49,6 +53,7 @@ function toAnalysisJob(row: AnalysisJobResponse): AnalysisJob {
   return {
     id: row.id,
     testId: row.test_id,
+    requestedByIdentity: row.requested_by_identity,
     status: row.status,
     dogtraceVersion: row.dogtrace_version,
     reportAvailable: row.report_available,
@@ -67,16 +72,12 @@ function toAnalysisJob(row: AnalysisJobResponse): AnalysisJob {
 // Ticket #45's POST /analyses rejects the whole request (400) with a
 // user-safe `detail` string when any selected Cut isn't valid C2 analysis
 // input — surfaced here as-is rather than a generic message, via the
-// shared errorFromResponse (same "backend already gives a specific, safe
-// reason" call as admin.ts).
-export async function createAnalysis(
-  accessToken: string,
-  testId: string,
-  cutKeys: string[],
-): Promise<AnalysisJob> {
+// shared errorFromResponse ("backend already gives a specific, safe
+// reason").
+export async function createAnalysis(testId: string, cutKeys: string[]): Promise<AnalysisJob> {
   const response = await fetch(`${API_BASE_URL}/analyses`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(accessToken) },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ test_id: testId, cuts: cutKeys }),
   })
 
@@ -87,26 +88,15 @@ export async function createAnalysis(
   return toAnalysisJob(await response.json())
 }
 
-// Thrown by getAnalysis/cancelAnalysis specifically for "no such job, or not
-// this Account's" (backend 404 — the two are deliberately indistinguishable,
-// see AnalysisJobNotFoundError's docstring) — kept distinct from a generic
-// failure, same reasoning as TestNotFoundError in mediaBrowser.ts. Not
-// thrown by downloadAnalysisReport below: its 404 has a second, different
-// cause with its own backend-provided message (see that function).
+// Thrown by getAnalysis/cancelAnalysis specifically for "no such job" (backend
+// 404) — kept distinct from a generic failure, same reasoning as
+// TestNotFoundError in mediaBrowser.ts. Not thrown by downloadAnalysisReport
+// below: its 404 has a second, different cause with its own backend-provided
+// message (see that function).
 export class AnalysisNotFoundError extends Error {}
 
-// Thrown by getAnalysis/cancelAnalysis when the access token has expired or
-// is otherwise invalid (backend/app/api/deps.py's get_current_account always
-// returns 401 "Not authenticated" for this — never anything else, per its
-// own docstring). Kept distinct from a generic failure so AnalysisView can
-// stop polling and point the user at logging in again instead of retrying
-// forever against a token that will never become valid on its own — no view
-// in this app currently rotates the access token mid-session (that only
-// happens once, in the router guard, via session.ensureSession()).
-export class AnalysisUnauthorizedError extends Error {}
-
 // Shared by getAnalysis/cancelAnalysis, whose 404 always means the same
-// thing ("no such job, or not this Account's") — downloadAnalysisReport
+// thing ("no such job") — downloadAnalysisReport
 // below does its own request/response handling instead, since its 404
 // doesn't share that single meaning.
 async function requestAnalysisJob(
@@ -119,9 +109,6 @@ async function requestAnalysisJob(
   if (response.status === 404) {
     throw new AnalysisNotFoundError('Analysis not found.')
   }
-  if (response.status === 401) {
-    throw new AnalysisUnauthorizedError('Not authenticated')
-  }
   if (!response.ok) {
     throw await errorFromResponse(response, fallback)
   }
@@ -130,12 +117,8 @@ async function requestAnalysisJob(
 }
 
 // Ticket #52: polled by AnalysisView while a job is queued/running.
-export async function getAnalysis(accessToken: string, id: number): Promise<AnalysisJob> {
-  return requestAnalysisJob(
-    `${API_BASE_URL}/analyses/${id}`,
-    { headers: authHeaders(accessToken) },
-    'Failed to load analysis.',
-  )
+export async function getAnalysis(id: number): Promise<AnalysisJob> {
+  return requestAnalysisJob(`${API_BASE_URL}/analyses/${id}`, {}, 'Failed to load analysis.')
 }
 
 // Ticket #46's POST /analyses/{id}/cancel rejects (409) with a user-safe
@@ -144,25 +127,23 @@ export async function getAnalysis(accessToken: string, id: number): Promise<Anal
 // requestAnalysisJob), same as createAnalysis's 400 above; no dedicated
 // error class needed since the view just shows it inline, same treatment as
 // any other action error.
-export async function cancelAnalysis(accessToken: string, id: number): Promise<AnalysisJob> {
+export async function cancelAnalysis(id: number): Promise<AnalysisJob> {
   return requestAnalysisJob(
     `${API_BASE_URL}/analyses/${id}/cancel`,
-    { method: 'POST', headers: authHeaders(accessToken) },
+    { method: 'POST' },
     'Failed to cancel analysis.',
   )
 }
 
-// Ticket #53: the current Account's own jobs (backend/app/services/
-// analyses.py's list_analysis_jobs already scopes this — no cross-user
-// visibility, Admin included, per issue #44's "Authorization" section), newest
-// first. Backs both the global AnalysesHistoryView and MediaBrowserView's
-// inline "previous analyses for this Test" panel via the optional `testId`
-// filter.
-export async function listAnalyses(accessToken: string, testId?: string): Promise<AnalysisJob[]> {
+// Ticket #53: every analysis, newest first (the backend caps how many) —
+// history is fully shared since ticket #72, whoever ran each one. Backs both
+// the global AnalysesHistoryView and MediaBrowserView's inline "previous
+// analyses for this Test" panel via the optional `testId` filter.
+export async function listAnalyses(testId?: string): Promise<AnalysisJob[]> {
   const url = new URL(`${API_BASE_URL}/analyses`)
   if (testId) url.searchParams.set('test_id', testId)
 
-  const response = await fetch(url, { headers: authHeaders(accessToken) })
+  const response = await fetch(url)
 
   if (!response.ok) {
     throw await errorFromResponse(response, 'Failed to load analyses.')
@@ -172,22 +153,19 @@ export async function listAnalyses(accessToken: string, testId?: string): Promis
   return rows.map(toAnalysisJob)
 }
 
-// Ticket #49's GET /analyses/{id}/report is a plain bearer-authenticated
-// download (CONTEXT.md's "Analysis report download" decision) — unlike
-// mediaBrowser.ts's media-token-authenticated streaming, there's no native
-// <a>/<video> request involved, so this fetches the file directly (with the
-// normal Authorization header) and hands back a Blob for the caller to save
-// via a synthetic download link.
-export async function downloadAnalysisReport(accessToken: string, id: number): Promise<Blob> {
-  const response = await fetch(`${API_BASE_URL}/analyses/${id}/report`, {
-    headers: authHeaders(accessToken),
-  })
+// Ticket #49's GET /analyses/{id}/report is a plain download (CONTEXT.md's
+// "Analysis report download" decision) — unlike mediaBrowser.ts's
+// media-token-gated streaming, there's no native <a>/<video> request
+// involved, so this fetches the file directly and hands back a Blob for the
+// caller to save via a synthetic download link.
+export async function downloadAnalysisReport(id: number): Promise<Blob> {
+  const response = await fetch(`${API_BASE_URL}/analyses/${id}/report`)
 
   if (!response.ok) {
     // Unlike getAnalysis/cancelAnalysis, this endpoint's 404 has two
     // distinct causes with two distinct backend-provided messages
     // (backend/app/api/analyses.py's download_analysis_report): "Analysis
-    // not found" for an unknown/another Account's job id, vs "Report not
+    // not found" for an unknown job id, vs "Report not
     // found" for a report_available job whose S3 object went missing
     // regardless. The backend already picked the right one — surfaced as-is
     // rather than collapsed into a single hardcoded message here.

@@ -2,7 +2,6 @@
 import { onMounted, ref } from 'vue'
 
 import { listAnalyses, type AnalysisJob } from '@/services/analyses'
-import { session } from '@/stores/session'
 import { formatDate } from '@/utils/date'
 
 const analyses = ref<AnalysisJob[]>([])
@@ -10,15 +9,12 @@ const isLoading = ref(true)
 const loadError = ref<string | null>(null)
 
 async function loadAnalyses() {
-  if (!session.accessToken.value) return
-
   isLoading.value = true
   loadError.value = null
   try {
-    // Already scoped to the current Account's own jobs, newest first, by
-    // the backend (issue #44's "no cross-user visibility" decision) — no
-    // client-side filtering needed here.
-    analyses.value = await listAnalyses(session.accessToken.value)
+    // Every analysis, whoever ran it, newest first (ticket #72 made history
+    // fully shared) — the backend already orders and bounds it.
+    analyses.value = await listAnalyses()
   } catch {
     loadError.value = 'Failed to load analyses.'
   } finally {
@@ -55,8 +51,13 @@ onMounted(loadAnalyses)
           >
             Test {{ job.testId }}
           </RouterLink>
-          <span class="text-muted" data-testid="analysis-history-status">
-            {{ job.status }} · {{ formatDate(job.createdAt) }}
+          <span class="text-muted">
+            <span data-testid="analysis-history-status">
+              {{ job.status }} · {{ formatDate(job.createdAt) }}
+            </span>
+            <span v-if="job.requestedByIdentity" data-testid="analysis-history-requested-by">
+              · {{ job.requestedByIdentity }}
+            </span>
           </span>
         </li>
       </ul>

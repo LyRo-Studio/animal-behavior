@@ -38,10 +38,6 @@ vi.mock('@/services/analyses', () => ({
   listAnalyses: listAnalysesMock,
 }))
 
-vi.mock('@/stores/session', () => ({
-  session: { accessToken: { value: 'a-token' } },
-}))
-
 function createTestRouter() {
   return createRouter({
     history: createWebHistory(),
@@ -49,8 +45,7 @@ function createTestRouter() {
       { path: '/media', name: 'media', component: MediaBrowserView },
       { path: '/', name: 'home', component: { template: '<div>home</div>' } },
       // A stub, not the real AnalysisView — keeps this file's tests from
-      // depending on AnalysisView's own implementation, same pattern as
-      // SetPasswordView.spec.ts stubbing its post-submit "login" target.
+      // depending on AnalysisView's own implementation.
       {
         path: '/analyses/:id',
         name: 'analysis-detail',
@@ -119,7 +114,7 @@ describe('MediaBrowserView', () => {
     await wrapper.find('button[data-testid="test-suggestion"]').trigger('click')
     await flushPromises()
 
-    expect(listCutsMock).toHaveBeenCalledWith('a-token', 'T001')
+    expect(listCutsMock).toHaveBeenCalledWith('T001')
     expect(wrapper.text()).toContain('T001_C1_ME_F1.mp4')
     expect(wrapper.text()).toContain('C1')
     expect(wrapper.text()).toContain('ME')
@@ -185,7 +180,7 @@ describe('MediaBrowserView', () => {
     await wrapper.find('form').trigger('submit')
     await flushPromises()
 
-    expect(listCutsMock).toHaveBeenCalledWith('a-token', 'T001')
+    expect(listCutsMock).toHaveBeenCalledWith('T001')
   })
 
   it('discards a slower, earlier search response once a later search has started', async () => {
@@ -333,7 +328,7 @@ describe('MediaBrowserView', () => {
     ])
     const wrapper = await mountView()
 
-    expect(listDatasetFolderMock).toHaveBeenCalledWith('a-token', '')
+    expect(listDatasetFolderMock).toHaveBeenCalledWith('')
     const folders = wrapper.findAll('[data-testid="dataset-folder"]')
     const files = wrapper.findAll('[data-testid="dataset-file"]')
     expect(folders.map((f) => f.text())).toEqual(['dataset_v1'])
@@ -367,7 +362,7 @@ describe('MediaBrowserView', () => {
     await wrapper.find('[data-testid="dataset-folder"]').trigger('click')
     await flushPromises()
 
-    expect(listDatasetFolderMock).toHaveBeenLastCalledWith('a-token', 'dataset_v1')
+    expect(listDatasetFolderMock).toHaveBeenLastCalledWith('dataset_v1')
     expect(wrapper.find('nav[aria-label="Dataset folder path"]').text()).toContain('dataset_v1')
     expect(wrapper.find('[data-testid="dataset-folder"]').text()).toBe('train')
   })
@@ -408,7 +403,7 @@ describe('MediaBrowserView', () => {
     await wrapper.find('nav[aria-label="Dataset folder path"] button').trigger('click')
     await flushPromises()
 
-    expect(listDatasetFolderMock).toHaveBeenLastCalledWith('a-token', '')
+    expect(listDatasetFolderMock).toHaveBeenLastCalledWith('')
     expect(wrapper.find('nav[aria-label="Dataset folder path"]').text()).not.toContain('train')
   })
 
@@ -457,7 +452,7 @@ describe('MediaBrowserView', () => {
     await wrapper.find('[data-testid="play-cut"]').trigger('click')
     await flushPromises()
 
-    expect(requestMediaTokenMock).toHaveBeenCalledWith('a-token', SAMPLE_CUT.key, 'play')
+    expect(requestMediaTokenMock).toHaveBeenCalledWith(SAMPLE_CUT.key, 'play')
     expect(mediaStreamUrlMock).toHaveBeenCalledWith(SAMPLE_CUT.key, 'play', 'play-token')
     const player = wrapper.find('[data-testid="cut-player"]')
     expect(player.exists()).toBe(true)
@@ -492,7 +487,7 @@ describe('MediaBrowserView', () => {
     await wrapper.find('[data-testid="download-cut"]').trigger('click')
     await flushPromises()
 
-    expect(requestMediaTokenMock).toHaveBeenCalledWith('a-token', SAMPLE_CUT.key, 'download')
+    expect(requestMediaTokenMock).toHaveBeenCalledWith(SAMPLE_CUT.key, 'download')
     expect(mediaStreamUrlMock).toHaveBeenCalledWith(SAMPLE_CUT.key, 'download', 'download-token')
     expect(clickSpy).toHaveBeenCalledOnce()
     clickSpy.mockRestore()
@@ -546,7 +541,7 @@ describe('MediaBrowserView', () => {
     await wrapper.find('[data-testid="info-cut"]').trigger('click')
     await flushPromises()
 
-    expect(getCutMediaInfoMock).toHaveBeenCalledWith('a-token', SAMPLE_CUT.key)
+    expect(getCutMediaInfoMock).toHaveBeenCalledWith(SAMPLE_CUT.key)
     const panel = wrapper.find('[data-testid="cut-info-panel"]')
     expect(panel.exists()).toBe(true)
     expect(panel.find('[data-testid="cut-info-duration"]').text()).toBe('2:05')
@@ -697,7 +692,7 @@ describe('MediaBrowserView', () => {
     await wrapper.find('[data-testid="analyze-selected"]').trigger('click')
     await flushPromises()
 
-    expect(createAnalysisMock).toHaveBeenCalledWith('a-token', 'T001', [C2_CUT.key])
+    expect(createAnalysisMock).toHaveBeenCalledWith('T001', [C2_CUT.key])
     expect(router.currentRoute.value.name).toBe('analysis-detail')
     expect(router.currentRoute.value.params.id).toBe('42')
   })
@@ -778,11 +773,38 @@ describe('MediaBrowserView', () => {
     const wrapper = await mountView()
     await searchForSampleCut(wrapper)
 
-    expect(listAnalysesMock).toHaveBeenCalledWith('a-token', 'T001')
+    expect(listAnalysesMock).toHaveBeenCalledWith('T001')
     const link = wrapper.find('[data-testid="previous-analysis-link"]')
     expect(link.exists()).toBe(true)
     expect(link.attributes('href')).toBe('/analyses/42')
     expect(wrapper.text()).toContain('completed')
+  })
+
+  it('shows who ran each previous analysis, when known (ticket #72)', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([C2_CUT])
+    listAnalysesMock.mockResolvedValue([
+      {
+        id: 42,
+        testId: 'T001',
+        requestedByIdentity: 'jan.peeters@vives.be',
+        status: 'completed',
+        createdAt: '2026-01-02T10:00:00Z',
+      },
+      {
+        id: 41,
+        testId: 'T001',
+        requestedByIdentity: null,
+        status: 'failed',
+        createdAt: '2026-01-01T10:00:00Z',
+      },
+    ])
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    const runBy = wrapper.findAll('[data-testid="previous-analysis-requested-by"]')
+    expect(runBy).toHaveLength(1)
+    expect(runBy[0].text()).toContain('jan.peeters@vives.be')
   })
 
   it('still shows previous analyses when the Cuts fetch for that Test 404s', async () => {

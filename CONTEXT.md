@@ -1,29 +1,20 @@
 # Animal Behavior Webinterface
 
-Web application for Hogeschool VIVES. Ships first with account management
-(admin-managed users, login, password reset) and a landing page; further
-domain features (the actual animal-behavior functionality) will be added
-later and are out of scope for the current design round.
+Web application for Hogeschool VIVES for browsing animal-behavior test
+footage (Tests, Cuts, Datasets) and running DogTrace analyses on it.
+Originally shipped with its own account management (login, admin-managed
+users, password reset); ticket #72 removed all of that — Mechatronics, an
+external layer in front of the app, is now the only authentication boundary.
 
 ## Language
 
-**Account**:
-A stored identity with an email address and password hash, used to log in. Every Account has exactly one role: Admin or User.
-_Avoid_: login, user record
-
-**Admin**:
-An Account whose role grants account management (create/deactivate other Accounts) plus everything a User can do. A role value on Account, not a separate entity. The first Admin is seeded from `.env` at startup.
-
-**User**:
-An Account created only by an Admin (no self-registration), with access to the application's future animal-behavior features. Sets their own password via an emailed invite link before first login.
-_Avoid_: gebruiker (use "User" in code/discussion), member
+**Identity**:
+The person Mechatronics authenticated, as the raw string it forwards in an HTTP header on every request (the header's name is the `IDENTITY_HEADER_NAME` setting). Read by the backend purely for attribution — which analysis was run by whom — never for authorization; there is no role, no login and no per-person visibility. `null` when no header is configured or sent (local development). The application does not authenticate anyone itself since ticket #72 — see "Application-level authentication removed (ticket #72)" below and `docs/adr/0004-trust-mega-tronics-remove-application-auth.md`.
+_Avoid_: Account, Admin, User, login, session — those concepts no longer exist.
 
 **Home**:
-The authenticated page every Account (Admin or User) lands on right after logging in; carries the site's usage information. Requires login — there is no public page a visitor sees before authenticating.
-_Avoid_: Landing page (conventionally means a public pre-login page, which this is not)
-
-**Admin page**:
-A separate page, reachable from a nav link on Home, where an Admin manages User accounts (create, deactivate). Not reachable by a User.
+The page the site opens on; carries the site's usage information, links to the Media Browser and Analyses, and shows who the person is (their Identity) when known. There is no login step before it.
+_Avoid_: Landing page (conventionally means a public pre-login page)
 
 **Test**:
 The unit a user searches for by ID (e.g. `T001`). Backed by the `cuts/<Test>/` prefix in the S3 bucket — one prefix per Test.
@@ -56,26 +47,26 @@ Which segment of a Test a Cut represents, encoded as `F1`–`F8` (Fase 1–8, Du
 
 ## Decisions & Approved Deviations
 
-**Scope (this round):** Covers only Account/Admin/User management (login,
+**Scope (this round) — superseded by ticket #72 (application auth removed; kept as history):** Covers only Account/Admin/User management (login,
 invite-to-set-password, password reset, deactivate) plus the Landing and
 Admin page shells. The animal-behavior domain itself is explicitly out of
 scope and undesigned for now.
 
-**Login identifier:** Email address. No separate username.
+**Login identifier — superseded by ticket #72 (application auth removed; kept as history):** Email address. No separate username.
 
-**New-account activation:** Adding a User sends an emailed invite link
+**New-account activation — superseded by ticket #72 (application auth removed; kept as history):** Adding a User sends an emailed invite link
 (same token mechanism as password reset) so they set their own password.
 Admins never set or see a User's password.
 
-**Landing page access:** The Landing page requires authentication — it is
+**Landing page access — superseded by ticket #72 (application auth removed; kept as history):** The Landing page requires authentication — it is
 not a public marketing page. Unauthenticated visitors only ever see a
 login screen.
 
-**Bootstrap:** The first Admin account is seeded from `.env` credentials
+**Bootstrap — superseded by ticket #72 (application auth removed; kept as history):** The first Admin account is seeded from `.env` credentials
 on startup (Alembic data migration or startup check), matching the
 project's existing `.env`/`.env.example` convention.
 
-**Bootstrap — inactive sole Admin recovery (ticket #13):** Startup seeding
+**Bootstrap — inactive sole Admin recovery (ticket #13) — superseded by ticket #72 (application auth removed; kept as history):** Startup seeding
 reactivates the existing Admin row if it's `is_active = false`, rather
 than only checking that an Admin row exists at all. Not reachable through
 the app today (`deactivate_account` refuses to deactivate an Admin, and
@@ -91,7 +82,7 @@ scoped exception to the VIVES-palette styling deviation — the house style
 defines no equivalent, and its 6 study-domain accent colors are reserved
 for identifying study domains only.
 
-**Account removal:** Soft-delete (deactivate) rather than hard-delete —
+**Account removal — superseded by ticket #72 (application auth removed; kept as history):** Soft-delete (deactivate) rather than hard-delete —
 login is blocked, the row is kept, and its outstanding refresh tokens are
 revoked. Deactivating is reversible: an Admin can reactivate the same
 row, restoring `is_active = true` (and thus its email) rather than that
@@ -106,31 +97,31 @@ DB layer stays scoped to active accounts only (needed to let the
 reactivate step itself run without tripping it) — it's the application
 layer, not the schema, that now keeps it to one row per email over time.
 
-**Admin creation:** Only User accounts can be created, deactivated, or
+**Admin creation — superseded by ticket #72 (application auth removed; kept as history):** Only User accounts can be created, deactivated, or
 reactivated through the app; there is exactly one Admin (the
 `.env`-seeded one) for this round. The `role` field itself isn't
 restricted to a single Admin at the data layer — there's just no
 UI/endpoint to create a second one yet.
 
-**Post-login routing:** Both Admin and User land on Home. Admin sees an
+**Post-login routing — superseded by ticket #72 (application auth removed; kept as history):** Both Admin and User land on Home. Admin sees an
 added nav link to the Admin page; User does not.
 
 **Home content:** Static for this round — written directly into the page,
 not editable by an Admin through the UI.
 
-**Session mechanism:** JWT bearer token (not a cookie session) — returned
+**Session mechanism — superseded by ticket #72 (application auth removed; kept as history):** JWT bearer token (not a cookie session) — returned
 on login, sent in an `Authorization` header, not subject to CSRF. Short-
 lived access token + a refresh token checked against the database on each
 refresh, so a deactivated Account is locked out within one refresh cycle
 rather than only once a long-lived token expires. See `docs/adr/0001-jwt-access-refresh-tokens.md`.
 
-**Display name:** Derived automatically from the email's local-part —
+**Display name — superseded by ticket #72 (application auth removed; kept as history):** Derived automatically from the email's local-part —
 the token before the first `.` (e.g. `jan.peeters@vives.be` → "Jan"),
 title-cased. No separate name field is typed at account creation. Two
 accounts sharing a first name are disambiguated in the UI by also showing
 their email address, since only the first token is used.
 
-**Allowed email domains:** Account creation is restricted to
+**Allowed email domains — superseded by ticket #72 (application auth removed; kept as history):** Account creation is restricted to
 `@vives.be` and `@student.vives.be`. Any other domain is rejected at
 creation time — this also protects the display-name derivation, which
 assumes a `name.surname` local-part.
@@ -165,7 +156,7 @@ stays mandatory; only the token *values* configured in it change.
   allowed) — so `border` uses 20% zwart and `muted` uses 40% zwart, rather
   than inventing a new gray or reusing the old blue-neutral scale.
 
-**Brute-force throttling (ticket #7):** In-memory, per-process fixed-window
+**Brute-force throttling (ticket #7) — superseded by ticket #72 except the limiter itself:** the login/refresh/forgot-password limits below went away with those endpoints; the in-memory `rate_limit.py` machinery now guards only media-token issuance and `/media/cuts/info`, keyed per identity. In-memory, per-process fixed-window
 rate limiting (`backend/app/services/rate_limit.py`) — no Redis/shared
 store, since the app runs as a single backend instance (`docker-compose.yml`
 has no replicas); revisit if that ever changes. No `X-Forwarded-For` (or
@@ -209,8 +200,8 @@ browsing. Source Video browsing is explicitly out of scope for this round
 — add later as a separate extension once Test/Cut and Dataset browsing
 are proven out.
 
-**Media browser — access:** Every authenticated Account (User and Admin
-alike) gets full access to this feature — search Tests, play/inspect/
+**Media browser — access:** Everyone past Mechatronics (no per-role or
+per-person gating since ticket #72) gets full access to this feature — search Tests, play/inspect/
 download Cuts, browse Datasets. No extra per-role gating.
 
 **Media browser — Dataset interaction:** Datasets are view/browse only in
@@ -274,13 +265,13 @@ the user actually clicks Play or Download on a specific Cut, not eagerly
 for every Cut in a Test's listing.
 
 **Media browser — abuse protection:** Media-token issuance is rate
-limited per Account, reusing the `rate_limit.py` machinery built for
+limited per identity (per Account before ticket #72), reusing the `rate_limit.py` machinery built for
 ticket #7 — streaming a Cut is exactly the "expensive operation" that
 `ENGINEERING-STANDARDS.md`'s Denial-of-Service section says must not be
 "triggered repeatedly without appropriate controls." The streaming
 endpoint itself isn't separately rate limited — it can't be reached
 without a valid, already-rate-limited token in the first place.
-`GET /media/cuts/info` (ticket #22) gets the same per-Account limiter — a
+`GET /media/cuts/info` (ticket #22) gets the same per-identity limiter — a
 cache miss there does a full S3 download plus an `ffprobe` subprocess
 call, the same expense class as token issuance.
 
@@ -739,6 +730,8 @@ long-lived local Postgres instance and corrupt later runs.
 
 **Production architecture / auth-removal round — settled so far (pre-
 implementation planning; grilling in progress, not everything below is
+
+> **Implemented by ticket #72** — see "Application-level authentication removed (ticket #72)" at the end of this file for what actually shipped and where it deviated from the plan below.
 final):**
 
 - **Development VM vs. production VM, named:** `lynn-delaere`
@@ -838,7 +831,7 @@ that this replaces are marked superseded in place.
   optional and omitted when empty, but it's the exception to "compose's
   defaults apply": neither compose nor the backend reads it yet, so writing
   it to `.env` is currently a no-op until ticket #72's header discovery.
-- **Transitional bridge, remove with ticket #72:** the backend still reads
+- **Transitional bridge — removed by ticket #72:** the backend still reads
   its media-token signing key as `JWT_SECRET_KEY`, and `docker-compose.yml`
   still hard-requires `FIRST_ADMIN_EMAIL`/`FIRST_ADMIN_PASSWORD` (app-level
   auth isn't removed until #72). The ticket's Environment list names only
@@ -850,7 +843,7 @@ that this replaces are marked superseded in place.
   so the failure message says which GitHub Environment entry is missing.
   Ticket #72 deletes all three lines when it renames the setting and drops
   the auth variables.
-- **Also passed through, optional (found in review):** `SMTP_HOST`/
+- **Also passed through, optional (found in review) — removed by ticket #72:** `SMTP_HOST`/
   `SMTP_PORT`/`SMTP_USERNAME`/`SMTP_FROM_EMAIL`/`SMTP_USE_TLS` (variables),
   `SMTP_PASSWORD` (secret) and `FRONTEND_BASE_URL` (variable). The old hand-
   kept `.env` carried these; a regenerated one that silently dropped them
@@ -860,7 +853,7 @@ that this replaces are marked superseded in place.
   lifetimes and rate-limit knobs are *not* carried — compose's defaults
   already match `.env.example`, so a value only needs adding if production
   ever deviates. All of these go away with #72.
-- **`.env.example` deliberately does not yet list `MEDIA_TOKEN_SECRET_KEY`
+- **(Resolved by ticket #72 — `.env.example` now lists both.) `.env.example` deliberately did not yet list `MEDIA_TOKEN_SECRET_KEY`
   or `IDENTITY_HEADER_NAME`:** nothing in the application or compose reads
   either today (the backend still reads `JWT_SECRET_KEY`), so documenting
   them there now would describe variables that do nothing. Ticket #72 adds
@@ -915,3 +908,152 @@ that this replaces are marked superseded in place.
 - **Follow-up, not done here:** ADR-0003's body still describes one runner on
   one box; it now carries an amendment note pointing at this section rather
   than being rewritten, since the ADR records the original reasoning.
+
+**Application-level authentication removed (ticket #72):** the app no longer
+authenticates anyone. Mechatronics authenticates the person in front of it and
+forwards their identity in an HTTP header; the backend reads that purely for
+attribution. Supersedes ADR-0001 in full (see
+`docs/adr/0004-trust-mega-tronics-remove-application-auth.md`). Removed:
+login/refresh/forgot-password/set-password/invite/`accounts`/`admin` endpoints,
+the Admin/User role, password hashing, access/refresh JWTs, SMTP, the first-
+admin seeding, the login/reset rate limits, and on the frontend the login/
+forgot-password/set-password/Admin views, the session store and every
+`Authorization` header. `argon2-cffi` and `email-validator` are dropped from
+`backend/requirements.txt`.
+
+- **Identity is read by one FastAPI dependency (`get_identity`, `app/api/deps.py`),
+  configured by `IDENTITY_HEADER_NAME`.** Unset or empty (`.env` may carry
+  `IDENTITY_HEADER_NAME=`) means "read nothing" — also what local development
+  runs with. The value is untrusted input, so it is trimmed, a blank value is
+  treated as absent, and it is *truncated* (not rejected) at 320 characters —
+  the `requested_by_identity` column length. Truncating rather than 400ing
+  means an oversized header can neither 500 from the database nor lock someone
+  out of the whole app over a header they don't control. There is deliberately
+  no check that the header really came from Mechatronics (ADR-0004: the network
+  topology is what makes that safe).
+- **`GET /whoami` echoes the identity back** (`{"identity": string | null}`) so
+  Home can show "Signed in as …". No `/api` prefix yet — that arrives with the
+  reverse proxy (ticket #3). A failed lookup just hides the line on Home.
+- **`AnalysisJob.requested_by` (FK to `accounts`) became `requested_by_identity`**
+  (`String(320)`, nullable, no FK) and is exposed on `AnalysisJobOut` so history
+  and detail views can show who ran each analysis. Every analysis is now visible
+  to, and cancellable and downloadable by, everyone (issue #44's "no cross-user
+  visibility" decision is gone).
+- **`list_analysis_jobs` is now capped at the newest 500** (`MAX_LISTED_ANALYSIS_JOBS`)
+  and eager-loads each job's videos: with per-account scoping gone it would
+  otherwise be an unbounded query over every job ever run, plus one query per
+  row (ENGINEERING-STANDARDS.md §5, DoS). Not in the issue; a direct
+  consequence of it. Real pagination is deferred until the cap is ever hit.
+- **Migration `0006_remove_application_auth`** adds `requested_by_identity`,
+  backfills it from `accounts.email` (deactivated accounts included), *then*
+  drops `requested_by`, the three auth tables and the `account_role` /
+  `account_action_token_purpose` enum types. **Irreversible** — `downgrade()`
+  raises, since the account rows and password hashes can't be reconstructed.
+  `test_migration_remove_application_auth.py` migrates a scratch database to
+  `0005`, seeds accounts/tokens/jobs, upgrades, and asserts both the backfill
+  and the drops; the scratch database is created on the test server, so it
+  needs `CREATEDB` (CI's Postgres user is a superuser).
+- **Rate limits are keyed by identity, and never skipped.** The media-token and
+  `/media/cuts/info` limits (`*_per_identity` settings, renamed from
+  `*_per_account`; not wired through compose or `.env.example`, so nothing else
+  to rename) use `identity_rate_limit_key`. With no identity every caller shares
+  one `anonymous` bucket rather than the check being skipped: a limit that
+  vanishes whenever the header is missing would leave the expensive operations
+  it guards unprotected exactly when something is misconfigured. **Production
+  consequence to be aware of:** until `IDENTITY_HEADER_NAME` is set on
+  `dogtrace-app`, *every real user* falls into that one shared bucket — 30 token
+  mints and 30 `/media/cuts/info` calls per 5 minutes for the whole group, each
+  Play/Download/Info click consuming one. That's a real availability risk
+  (ENGINEERING-STANDARDS.md §5: controls must not become an easy DoS against
+  legitimate users), accepted here only because the alternatives were worse
+  (skip the limit, or key on a client IP that is just the proxy's). Set the
+  header name promptly after discovery, or raise
+  `MEDIA_TOKEN_RATE_LIMIT_MAX_ATTEMPTS_PER_IDENTITY` /
+  `CUT_INFO_RATE_LIMIT_MAX_ATTEMPTS_PER_IDENTITY` (settings, not yet wired
+  through compose) in the meantime. Anyone who can reach the backend directly can
+  also rotate identity values to dodge a per-identity limit — accepted under
+  ADR-0004's "reaching the backend at all means you passed Mechatronics"
+  premise. Expired windows are pruned in O(1) per hit, so memory is bounded by
+  the number of distinct keys seen within one window, not by history — not an
+  absolute cap. `RateLimiter.peek` (login's pre-auth check) had no other caller
+  and was removed.
+- **Media tokens: "kept, renamed" — the issue's default — because the gate could
+  not be run.** Whether a native `<video src>`/`<a download>` request carries
+  Mechatronics' identity header needs a live `dogtrace-app`, which this work had
+  no access to. So `create_media_token`/`decode_media_token` stay, signed with
+  `media_token_secret_key` (env `MEDIA_TOKEN_SECRET_KEY`, renamed from
+  `jwt_secret_key`), and `POST /media/cuts/token` and the stream endpoint work as
+  before. Consequence to keep in mind (see ADR-0002's amendment): with login
+  gone `POST /media/cuts/token` is itself open to anyone who can reach the
+  backend, so a token buys only a 15-minute single-Cut scope, not access
+  control. **Still to do, by a human:** run the gate on `dogtrace-app`; if it
+  passes, follow the "If the gate passes" list in issue #72 (delete the token
+  mechanism, key the stream endpoint on the Cut key directly with its own shape
+  validation, decide explicitly whether the stream endpoint or Nginx/
+  Mechatronics owns its DoS limit, drop `MEDIA_TOKEN_SECRET_KEY`).
+- **Open: the backend port is still published.** `docker-compose.yml` still maps
+  `8000:8000` on the `backend` service. ADR-0004 calls the network topology
+  "load-bearing" (only Mechatronics' routed path should reach the backend, since
+  the identity header is trusted unverified), so a host-published backend port is
+  now part of what that decision depends on. Left alone here — it is the reverse-
+  proxy work in ticket #3 (which also brings the `/api` prefix `GET /whoami`
+  lacks) — but that ticket, or whoever deploys before it, must close it.
+- **The 500-row cap is silent.** `list_analysis_jobs` drops jobs beyond the newest
+  500 with no indication in the History or per-Test views, which sits awkwardly
+  with "see every analysis that's been run". Fine at today's volume; the fix is
+  pagination or a "showing newest 500" hint, not raising the cap indefinitely.
+- **Identity attribution is the trimmed/truncated header, not the raw one** the
+  issue describes; truncation at 320 characters can alter a (pathologically
+  long) value silently. Chosen over rejecting the request for the reasons above.
+- **CORS:** `allow_credentials` is unset (it always was) — there is no cookie or
+  session for a cross-origin page to ride on. `CORS_ORIGINS` narrowing to the
+  production origin is a deploy-configuration matter (the `production`
+  Environment's `CORS_ORIGINS` variable), not a code change.
+- **The worker no longer logs an owner.** Its log lines carried the numeric
+  `account_id`; the replacement would be an identity that is likely an email
+  address, i.e. personal data in logs. `analysis_id` already lets anyone look the
+  owner up in the database, so the field was dropped instead of replaced.
+- **Deploy-side cleanup done in this ticket** (the #70 transitional bridge):
+  `deploy.yml`'s "Generate .env" no longer requires `FIRST_ADMIN_EMAIL`/
+  `FIRST_ADMIN_PASSWORD`, no longer passes `SMTP_*`/`FRONTEND_BASE_URL` through,
+  and no longer writes the `JWT_SECRET_KEY` alias — `MEDIA_TOKEN_SECRET_KEY` is
+  written under its own name. `docker-compose.yml`'s `backend` service drops the
+  JWT/first-admin/SMTP/token-lifetime/login-and-reset-rate-limit variables and
+  gains `MEDIA_TOKEN_SECRET_KEY` (required) and `IDENTITY_HEADER_NAME` (optional).
+  `.env.example` lists both new variables. The generator script was re-run
+  locally (extracted verbatim from the workflow): happy path (mode `600`, no
+  temp file left), a missing `MEDIA_TOKEN_SECRET_KEY` failing by name, and a
+  clean-environment `docker compose config` read-back of a `$`/`"`/`#`-bearing
+  secret.
+- **Manual GitHub steps still to do** (an agent shouldn't set or delete
+  Environment secrets): in the `production` Environment delete the now-unused
+  `FIRST_ADMIN_EMAIL`, `FIRST_ADMIN_PASSWORD`, `SMTP_PASSWORD`, `SMTP_HOST`,
+  `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_FROM_EMAIL`, `SMTP_USE_TLS` and
+  `FRONTEND_BASE_URL`; keep `MEDIA_TOKEN_SECRET_KEY` (see the media-token
+  decision above); set `IDENTITY_HEADER_NAME` once the real header is known.
+  **Order matters on the first deploy of this change:** the old application
+  still expects the removed variables, but the new `.env` no longer provides
+  them, so deploy the new images together with this workflow (they ship in the
+  same merge) rather than redeploying an old tag afterwards — a rollback
+  `workflow_dispatch` to a pre-#72 tag will fail at `docker compose`'s `:?`
+  checks for `JWT_SECRET_KEY`/`FIRST_ADMIN_*`, the same one-time,
+  self-resolving gap ticket #54 accepted for its own rollback limitation. And the
+  migration cannot be rolled back, so a pre-#72 image would not find its
+  `accounts` table anyway.
+- **Identity-header discovery is still open.** The real header name is unknown
+  until `dogtrace-app` is live behind Mechatronics. The issue's suggested
+  temporary `GET /api/debug/request-headers` diagnostic was **not** added: an
+  endpoint echoing every request header would also echo any credential-bearing
+  header Mechatronics forwards, and shipping it to reach a production box was
+  not something to do unilaterally. Until it's known, `IDENTITY_HEADER_NAME`
+  stays empty and analyses are attributed to no one (`requested_by_identity`
+  `null`); analyses that existed before this change keep the email they were
+  backfilled with.
+- **Amendments to earlier decisions.** "Analysis report download (ticket #49)"
+  and "Analysis detail/progress view (ticket #52)" describe the report download
+  as bearer-authenticated and the view as handling an expired session — there is
+  no bearer token or session any more; the download is a plain `fetch` + `Blob`
+  and `AnalysisView` simply retries generic errors (the 401 / silent-refresh
+  handling, ticket #63's territory, was deleted with the mechanism it served).
+  "Analyses history (ticket #53)" lists every analysis, not "the current
+  Account's own".

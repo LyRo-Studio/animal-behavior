@@ -28,65 +28,23 @@ class Settings(BaseSettings):
     )
     cors_origins: str = "http://localhost:5173"
 
-    # Same "safe placeholder for standalone pytest/ruff" spirit as above —
-    # docker-compose.yml requires all four of these explicitly via `:?` and
-    # never falls back to these values in a deployed environment.
-    jwt_secret_key: str = "dev-only-insecure-secret-do-not-use-in-production"
-    access_token_expire_minutes: int = 15
-    refresh_token_expire_days: int = 7
-    first_admin_email: str = "admin@vives.be"
-    first_admin_password: str = "dev-only-insecure-password"
+    # Ticket #72: the app no longer authenticates anyone itself — Mechatronics
+    # does (docs/adr/0004-trust-mega-tronics-remove-application-auth.md) — and
+    # forwards the person's identity in an HTTP header, which the backend
+    # reads purely for attribution (never authorization). The real header
+    # name is unknown until `dogtrace-app` is live behind it, so it's
+    # configuration, not code; unset (or empty — `.env` may carry
+    # `IDENTITY_HEADER_NAME=` with nothing after it) means "read no identity
+    # at all", which is also what local development (no Mechatronics in
+    # front) runs with.
+    identity_header_name: str | None = None
 
-    # Ticket #4 (Admin adds a User): invite links, and the mail transport
-    # that sends them. SMTP host has no default: an unset SMTP_HOST means
-    # "no real mail server configured", which `get_mail_transport` reads as
-    # "log instead of sending" — a safe dev/test fallback, not a broken
-    # deployment (docker-compose.yml doesn't require these).
-    smtp_host: str | None = None
-    smtp_port: int = 587
-    smtp_username: str | None = None
-    smtp_password: str | None = None
-    smtp_from_email: str = "no-reply@vives.be"
-    smtp_use_tls: bool = True
-    invite_token_expire_hours: int = 72
-    # Used to build the invite link emailed to a new User — not itself a
-    # secret, so (like cors_origins) it's safe to default to the frontend's
-    # local dev origin.
-    frontend_base_url: str = "http://localhost:5173"
-
-    # Ticket #5 (Forgot-password reset): shorter-lived than an invite link,
-    # since it's requested and used in one sitting rather than waiting on
-    # an Admin-invited User to first check their email.
-    password_reset_token_expire_hours: int = 1
-
-    # Ticket #7 (Brute-force throttling): fixed-window limits on the
-    # unauthenticated auth endpoints — see app/services/rate_limit.py and
-    # app/api/auth.py.
-    #
-    # Login/refresh only count *failed* attempts (a successful login/
-    # refresh never consumes the budget) — so many legitimate users behind
-    # one shared IP (a campus NAT, say) succeeding normally can never
-    # exhaust it; only a run of failures, the actual brute-force signal,
-    # does. Login additionally tracks failures per-account (by email), on
-    # top of per-IP: safe to do now that only failures count (a real
-    # user's occasional typo stays far under the threshold), and it closes
-    # the gap a pure per-IP limit leaves open against an attacker
-    # distributing attempts across several source IPs at one victim
-    # account.
-    #
-    # Forgot-password counts *every* request (there's no failure/success
-    # distinction meaningful to a caller — the response is always the same
-    # empty 204). Its per-email limit is safe in a way login's per-account
-    # one wouldn't be if it counted every request too: exceeding it never
-    # blocks logging in, only requesting more reset emails for a bit.
-    login_rate_limit_max_failed_attempts_per_ip: int = 10
-    login_rate_limit_max_failed_attempts_per_email: int = 10
-    login_rate_limit_window_seconds: int = 300
-    refresh_rate_limit_max_failed_attempts_per_ip: int = 30
-    refresh_rate_limit_window_seconds: int = 300
-    forgot_password_rate_limit_max_attempts_per_ip: int = 10
-    forgot_password_rate_limit_max_attempts_per_email: int = 5
-    forgot_password_rate_limit_window_seconds: int = 900
+    # Signs the short-lived Cut streaming/download tokens (ADR-0002) — the
+    # only thing left the backend signs. Same "safe placeholder for
+    # standalone pytest/ruff" spirit as database_url above; docker-compose.yml
+    # requires it explicitly via `:?` and never falls back to this value in a
+    # deployed environment.
+    media_token_secret_key: str = "dev-only-insecure-secret-do-not-use-in-production"
 
     # Ticket #18 (S3 access foundation, part of #17's media browser): the
     # bucket holding Tests/Cuts/Datasets — see CONTEXT.md's "Media browser"
@@ -95,7 +53,7 @@ class Settings(BaseSettings):
     # configured", which `get_s3_client` treats as a hard failure rather than
     # falling through to boto3's ambient credential chain against whatever
     # bucket/endpoint ends up resolved — there's no safe "log instead of"
-    # fallback for object storage the way there is for SMTP below.
+    # fallback for object storage.
     # docker-compose.yml requires all four explicitly via `:?`.
     s3_bucket: str | None = None
     s3_endpoint: str | None = None
@@ -107,10 +65,10 @@ class Settings(BaseSettings):
     # single-action-scoped tokens for the backend-proxied streaming
     # endpoint — see app/core/security.py's create_media_token and
     # docs/adr/0002-media-access-tokens-in-url.md. Issuance is rate
-    # limited per Account (CONTEXT.md's "Media browser — abuse
+    # limited per identity (CONTEXT.md's "Media browser — abuse
     # protection" decision), reusing app/services/rate_limit.py.
     media_token_expire_minutes: int = 15
-    media_token_rate_limit_max_attempts_per_account: int = 30
+    media_token_rate_limit_max_attempts_per_identity: int = 30
     media_token_rate_limit_window_seconds: int = 300
 
     # Ticket #22 (Inspect probed media info for a Cut): the `ffprobe`
@@ -125,8 +83,8 @@ class Settings(BaseSettings):
     # call — the same class of "expensive operation" media_token issuance
     # above is rate limited for, and ENGINEERING-STANDARDS.md's DoS section
     # requires guarding against. Reuses the same rate_limit.py machinery,
-    # keyed per Account like the token endpoint.
-    cut_info_rate_limit_max_attempts_per_account: int = 30
+    # keyed per identity like the token endpoint.
+    cut_info_rate_limit_max_attempts_per_identity: int = 30
     cut_info_rate_limit_window_seconds: int = 300
 
     # Ticket #47 (Analysis worker, part of #44): polling interval and the

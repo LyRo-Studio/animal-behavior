@@ -4,35 +4,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app.services.mail import MailMessage
 from app.services.media_prober import ProbedMediaInfo
 from app.services.s3_client import S3ObjectInfo, S3ObjectNotFoundError
-
-
-@dataclass
-class FakeMailTransport:
-    """Records sent messages instead of delivering them.
-
-    The injected fake mail transport tests use in place of real SMTP, per
-    issue #1's testing decisions ("Email-sending is exercised through this
-    same [HTTP API] seam via an injected fake mail transport... rather than
-    hitting real SMTP").
-    """
-
-    sent: list[MailMessage] = field(default_factory=list)
-
-    def send(self, message: MailMessage) -> None:
-        self.sent.append(message)
-
-
-@dataclass
-class FailingMailTransport:
-    """Raises on every send — simulates an SMTP outage for tests that
-    assert a mail-transport failure never changes an endpoint's response
-    (see test_forgot_password.py's account-enumeration regression test)."""
-
-    def send(self, message: MailMessage) -> None:
-        raise RuntimeError("simulated SMTP failure")
 
 
 @dataclass
@@ -41,7 +14,7 @@ class FakeS3Client:
     app/services/s3_client.py's `S3Client` protocol and issue #1's testing
     decisions. Seed `objects` directly rather than via a constructor arg, so
     a test can mutate it (e.g. add a Cut mid-test) the same way it would
-    with `FakeMailTransport.sent`.
+    with any other plain dataclass field.
     """
 
     objects: dict[str, bytes] = field(default_factory=dict)

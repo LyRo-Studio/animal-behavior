@@ -1,7 +1,7 @@
 import pytest
 
 from app.models.analysis_job import AnalysisJob, AnalysisJobStatus
-from tests.helpers import create_account, login_headers
+from tests.helpers import identity_headers
 
 # Ticket #46's acceptance criteria: exercised through the HTTP API. No
 # worker exists yet (ticket #47), so a job is only ever `queued` through
@@ -10,12 +10,7 @@ from tests.helpers import create_account, login_headers
 # will do once it exists.
 
 
-def _user_headers(client, db_session, *, email="jan.peeters@vives.be"):
-    create_account(db_session, email=email)
-    return login_headers(client, email)
-
-
-def _create_job(client, headers, *, test_id="T001", cut="cuts/T001/T001_C2_ME_F1.mp4"):
+def _create_job(client, headers=None, *, test_id="T001", cut="cuts/T001/T001_C2_ME_F1.mp4"):
     response = client.post("/analyses", json={"test_id": test_id, "cuts": [cut]}, headers=headers)
     assert response.status_code == 201, response.text
     return response.json()["id"]
@@ -29,16 +24,15 @@ def _set_status(db_session, analysis_id: int, status: AnalysisJobStatus) -> None
 
 
 def test_cancel_a_queued_job_sets_status_to_cancelled(client, db_session):
-    headers = _user_headers(client, db_session)
-    analysis_id = _create_job(client, headers)
+    analysis_id = _create_job(client)
 
-    response = client.post(f"/analyses/{analysis_id}/cancel", headers=headers)
+    response = client.post(f"/analyses/{analysis_id}/cancel")
 
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "cancelled"
     assert response.json()["finished_at"] is not None
 
-    get_response = client.get(f"/analyses/{analysis_id}", headers=headers)
+    get_response = client.get(f"/analyses/{analysis_id}")
     assert get_response.json()["status"] == "cancelled"
     assert get_response.json()["finished_at"] is not None
 
@@ -54,36 +48,30 @@ def test_cancel_a_queued_job_sets_status_to_cancelled(client, db_session):
     ],
 )
 def test_cancel_a_non_queued_job_is_rejected_and_status_unchanged(client, db_session, status):
-    headers = _user_headers(client, db_session)
-    analysis_id = _create_job(client, headers)
+    analysis_id = _create_job(client)
     _set_status(db_session, analysis_id, status)
 
-    response = client.post(f"/analyses/{analysis_id}/cancel", headers=headers)
+    response = client.post(f"/analyses/{analysis_id}/cancel")
 
     assert response.status_code == 409
-    get_response = client.get(f"/analyses/{analysis_id}", headers=headers)
+    get_response = client.get(f"/analyses/{analysis_id}")
     assert get_response.json()["status"] == status.value
 
 
-def test_cancel_another_accounts_job_is_rejected(client, db_session):
-    owner_headers = _user_headers(client, db_session, email="owner@vives.be")
-    analysis_id = _create_job(client, owner_headers)
-    other_headers = _user_headers(client, db_session, email="other@vives.be")
+def test_cancel_a_job_created_by_another_identity_succeeds(client):
+    """Analyses are fully shared (ticket #72): anyone past Mechatronics may
+    cancel a queued job, whoever ran it."""
+    analysis_id = _create_job(client, identity_headers("owner@vives.be"))
 
-    response = client.post(f"/analyses/{analysis_id}/cancel", headers=other_headers)
+    response = client.post(
+        f"/analyses/{analysis_id}/cancel", headers=identity_headers("other@vives.be")
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+
+
+def test_cancel_an_unknown_job_is_not_found(client):
+    response = client.post("/analyses/999999/cancel")
 
     assert response.status_code == 404
-    get_response = client.get(f"/analyses/{analysis_id}", headers=owner_headers)
-    assert get_response.json()["status"] == "queued"
-
-
-def test_cancel_an_unknown_job_is_not_found(client, db_session):
-    headers = _user_headers(client, db_session)
-
-    response = client.post("/analyses/999999/cancel", headers=headers)
-
-    assert response.status_code == 404
-
-
-def test_cancel_unauthenticated_is_rejected(client, db_session):
-    assert client.post("/analyses/1/cancel").status_code == 401

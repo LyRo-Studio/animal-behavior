@@ -1,99 +1,72 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRouter, createWebHistory } from 'vue-router'
-
-import { session } from '@/stores/session'
 
 import HomeView from '../HomeView.vue'
 
-const logoutMock = vi.hoisted(() => vi.fn())
+const fetchIdentityMock = vi.hoisted(() => vi.fn())
 
-vi.mock('@/stores/session', () => ({
-  session: { logout: logoutMock, currentAccount: { value: null } },
-}))
+vi.mock('@/services/whoami', () => ({ fetchIdentity: fetchIdentityMock }))
 
 function createTestRouter() {
   return createRouter({
     history: createWebHistory(),
     routes: [
       { path: '/', name: 'home', component: HomeView },
-      { path: '/login', name: 'login', component: { template: '<div>login</div>' } },
       { path: '/media', name: 'media', component: { template: '<div>media</div>' } },
       {
         path: '/analyses',
         name: 'analyses-history',
         component: { template: '<div>analyses</div>' },
       },
-      { path: '/admin', name: 'admin', component: { template: '<div>admin</div>' } },
     ],
   })
 }
 
+async function mountHome() {
+  const router = createTestRouter()
+  router.push('/')
+  await router.isReady()
+  const wrapper = mount(HomeView, { global: { plugins: [router] } })
+  await flushPromises()
+  return wrapper
+}
+
 describe('HomeView', () => {
   beforeEach(() => {
-    session.currentAccount.value = {
-      id: 1,
-      email: 'jan.peeters@vives.be',
-      displayName: 'Jan',
-      role: 'user',
-    }
+    fetchIdentityMock.mockReset()
+    fetchIdentityMock.mockResolvedValue('jan.peeters@vives.be')
   })
 
-  afterEach(() => {
-    logoutMock.mockReset()
+  it('shows who the person is, as forwarded by Mechatronics', async () => {
+    const wrapper = await mountHome()
+
+    expect(wrapper.get('[data-testid="identity"]').text()).toContain('jan.peeters@vives.be')
   })
 
-  it("renders the current account's display name", async () => {
-    const router = createTestRouter()
-    router.push('/')
-    await router.isReady()
+  it('shows no identity when none was forwarded (e.g. local development)', async () => {
+    fetchIdentityMock.mockResolvedValue(null)
 
-    const wrapper = mount(HomeView, { global: { plugins: [router] } })
+    const wrapper = await mountHome()
 
-    expect(wrapper.text()).toContain('Jan')
+    expect(wrapper.find('[data-testid="identity"]').exists()).toBe(false)
   })
 
-  it('logs out and navigates to Login when the logout button is clicked', async () => {
-    logoutMock.mockResolvedValue(undefined)
-    const router = createTestRouter()
-    router.push('/')
-    await router.isReady()
+  it('still renders the page when the identity lookup fails', async () => {
+    fetchIdentityMock.mockRejectedValue(new Error('boom'))
 
-    const wrapper = mount(HomeView, { global: { plugins: [router] } })
-    await wrapper.find('button').trigger('click')
-    await flushPromises()
+    const wrapper = await mountHome()
 
-    expect(logoutMock).toHaveBeenCalledOnce()
-    expect(router.currentRoute.value.name).toBe('login')
-  })
-
-  it('does not show an Admin link for a User account, but shows Media Browser and Analyses', async () => {
-    const router = createTestRouter()
-    router.push('/')
-    await router.isReady()
-
-    const wrapper = mount(HomeView, { global: { plugins: [router] } })
-
-    expect(wrapper.text()).not.toContain('Admin')
+    expect(wrapper.find('[data-testid="identity"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('Media Browser')
-    expect(wrapper.text()).toContain('Analyses')
   })
 
-  it('shows both the Media Browser and Admin links for an Admin account', async () => {
-    session.currentAccount.value = {
-      id: 2,
-      email: 'admin.person@vives.be',
-      displayName: 'Admin',
-      role: 'admin',
-    }
-    const router = createTestRouter()
-    router.push('/')
-    await router.isReady()
-
-    const wrapper = mount(HomeView, { global: { plugins: [router] } })
+  it('links to Media Browser and Analyses, with no Admin link and no logout', async () => {
+    const wrapper = await mountHome()
 
     const links = wrapper.findAllComponents({ name: 'RouterLink' })
-    expect(links.some((link) => link.text() === 'Media Browser')).toBe(true)
-    expect(links.some((link) => link.text() === 'Admin')).toBe(true)
+    expect(links.map((link) => link.text())).toEqual(['Media Browser', 'Analyses'])
+    expect(wrapper.text()).not.toContain('Admin')
+    expect(wrapper.find('button').exists()).toBe(false)
   })
 })

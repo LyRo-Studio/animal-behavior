@@ -33,6 +33,9 @@ class AnalysisJobOut(BaseModel):
 
     id: int
     test_id: str
+    # Who ran it, as forwarded by Mechatronics (ticket #72) — null if no
+    # identity header was present at the time.
+    requested_by_identity: str | None
     status: AnalysisJobStatus
     dogtrace_version: str | None
     report_available: bool

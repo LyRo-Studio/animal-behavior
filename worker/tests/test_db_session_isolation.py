@@ -1,6 +1,6 @@
 """Guards ticket #60's fix in worker/tests/conftest.py — same rationale as
 backend/tests/test_db_session_isolation.py, exercised here against
-`create_account`/`create_analysis_job` (both commit internally), matching
+`create_analysis_job` (which commits internally), matching
 how worker/tests actually drives `db_session` through real service-layer
 calls rather than raw ORM adds.
 
@@ -19,7 +19,6 @@ from app.services.analyses import create_analysis_job
 from sqlalchemy import create_engine, select
 
 from tests.conftest import db_session as _db_session_fixture
-from tests.helpers import create_account
 
 _LEAK_CHECK_TEST_ID = "T999"
 
@@ -28,10 +27,9 @@ def test_create_analysis_job_inside_a_test_does_not_leak_past_teardown(db_connec
     generator = _db_session_fixture.__wrapped__(db_connection)
     session = next(generator)
 
-    account = create_account(session)
     create_analysis_job(
         session,
-        requested_by=account.id,
+        requested_by_identity=None,
         test_id=_LEAK_CHECK_TEST_ID,
         cut_keys=[f"cuts/{_LEAK_CHECK_TEST_ID}/{_LEAK_CHECK_TEST_ID}_C2_ME_F1.mp4"],
     )

@@ -40,3 +40,14 @@ trade-off acceptable:
   exists, and this entire token mechanism could be removed rather than merely kept/renamed. Not
   something to act on without confirming that assumption empirically (same diagnostic step as
   discovering the identity header's name/format — see issue #72) — flagged here, not decided.
+- **Amended by ticket #72 (application-level auth removed):** the token mechanism is *kept*,
+  renamed away from its "JWT access token" framing — it now signs with its own
+  `MEDIA_TOKEN_SECRET_KEY` — because the empirical check above could not be run (it needs a live
+  `dogtrace-app` behind Mechatronics). The premise about the app's own `Authorization` header is
+  no longer literally true, but the mechanism's remaining job is unchanged: scoping a
+  browser-issued request to one Cut and one action for 15 minutes. One consequence worth stating
+  plainly: with login gone, `POST /media/cuts/token` is itself reachable by anyone who can reach
+  the backend, so a token now buys that expiry and single-Cut scoping, *not* access control —
+  Mechatronics is the access control. That, plus the fact that the token issuance limiter is the
+  only thing throttling streaming, is the case for removing the mechanism outright if the
+  empirical check passes; the removal checklist is in issue #72's "Media-token decision" section.

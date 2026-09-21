@@ -10,10 +10,6 @@ vi.mock('@/services/analyses', () => ({
   listAnalyses: listAnalysesMock,
 }))
 
-vi.mock('@/stores/session', () => ({
-  session: { accessToken: { value: 'a-token' } },
-}))
-
 function createTestRouter() {
   return createRouter({
     history: createWebHistory(),
@@ -33,6 +29,7 @@ function job(overrides: Record<string, unknown> = {}) {
   return {
     id: 42,
     testId: 'T001',
+    requestedByIdentity: 'jan.peeters@vives.be',
     status: 'completed',
     dogtraceVersion: '1.1.1',
     reportAvailable: true,
@@ -59,7 +56,7 @@ describe('AnalysesHistoryView', () => {
     listAnalysesMock.mockReset()
   })
 
-  it("loads and lists the current Account's own analyses with status and date", async () => {
+  it('loads and lists every analysis with status and date', async () => {
     listAnalysesMock.mockResolvedValue([
       job({ id: 42, testId: 'T001', status: 'completed' }),
       job({ id: 41, testId: 'T002', status: 'failed' }),
@@ -67,11 +64,24 @@ describe('AnalysesHistoryView', () => {
 
     const wrapper = await mountView()
 
-    expect(listAnalysesMock).toHaveBeenCalledWith('a-token')
+    expect(listAnalysesMock).toHaveBeenCalledWith()
     expect(wrapper.text()).toContain('T001')
     expect(wrapper.text()).toContain('completed')
     expect(wrapper.text()).toContain('T002')
     expect(wrapper.text()).toContain('failed')
+  })
+
+  it('shows who ran each analysis, and leaves it out when unattributed', async () => {
+    listAnalysesMock.mockResolvedValue([
+      job({ id: 42, requestedByIdentity: 'jan.peeters@vives.be' }),
+      job({ id: 41, requestedByIdentity: null }),
+    ])
+
+    const wrapper = await mountView()
+
+    const runBy = wrapper.findAll('[data-testid="analysis-history-requested-by"]')
+    expect(runBy).toHaveLength(1)
+    expect(runBy[0].text()).toContain('jan.peeters@vives.be')
   })
 
   it("links each row to that job's detail page", async () => {
@@ -84,7 +94,7 @@ describe('AnalysesHistoryView', () => {
     expect(link.attributes('href')).toBe('/analyses/42')
   })
 
-  it('shows an empty state when the Account has no analyses yet', async () => {
+  it('shows an empty state when there are no analyses yet', async () => {
     listAnalysesMock.mockResolvedValue([])
 
     const wrapper = await mountView()

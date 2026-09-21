@@ -1,113 +1,31 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-const ensureSessionMock = vi.hoisted(() => vi.fn())
+import router from '../index'
 
-vi.mock('@/stores/session', () => ({
-  session: { ensureSession: ensureSessionMock, currentAccount: { value: null } },
-}))
-
-describe('router navigation guard', () => {
-  beforeEach(() => {
-    vi.resetModules()
-    ensureSessionMock.mockReset()
-  })
-
-  afterEach(() => {
-    vi.unstubAllGlobals()
-  })
-
-  it('redirects an unauthenticated visitor to Login, preserving the intended destination', async () => {
-    ensureSessionMock.mockResolvedValue(false)
-
-    const { default: router } = await import('../index')
-    await router.push('/')
+// Ticket #72: the app has no login of its own, so there is no navigation
+// guard to test — what's worth pinning down is that every page is reachable
+// straight away and that the removed auth/admin routes stay gone.
+describe('router', () => {
+  it.each([
+    ['/', 'home'],
+    ['/status', 'status'],
+    ['/media', 'media'],
+    ['/analyses', 'analyses-history'],
+    ['/analyses/7', 'analysis-detail'],
+  ])('lets a visitor straight onto %s', async (path, name) => {
+    await router.push(path)
     await router.isReady()
 
-    expect(router.currentRoute.value.name).toBe('login')
-    expect(router.currentRoute.value.query.redirect).toBe('/')
+    expect(router.currentRoute.value.name).toBe(name)
   })
 
-  it('allows navigation to a protected route once a session is established', async () => {
-    ensureSessionMock.mockResolvedValue(true)
+  it('has no login, password or admin routes', () => {
+    const names = router.getRoutes().map((route) => route.name)
 
-    const { default: router } = await import('../index')
-    await router.push('/')
-    await router.isReady()
-
-    expect(router.currentRoute.value.name).toBe('home')
-  })
-
-  it('never checks for a session on the public Login route', async () => {
-    const { default: router } = await import('../index')
-    await router.push('/login')
-    await router.isReady()
-
-    expect(router.currentRoute.value.name).toBe('login')
-    expect(ensureSessionMock).not.toHaveBeenCalled()
-  })
-
-  it('never checks for a session on the public set-password route', async () => {
-    const { default: router } = await import('../index')
-    await router.push({ name: 'set-password', query: { token: 'abc' } })
-    await router.isReady()
-
-    expect(router.currentRoute.value.name).toBe('set-password')
-    expect(ensureSessionMock).not.toHaveBeenCalled()
-  })
-
-  it('never checks for a session on the public forgot-password route', async () => {
-    const { default: router } = await import('../index')
-    await router.push({ name: 'forgot-password' })
-    await router.isReady()
-
-    expect(router.currentRoute.value.name).toBe('forgot-password')
-    expect(ensureSessionMock).not.toHaveBeenCalled()
-  })
-
-  it('requires a session for the status route too — only Login and set-password are exempt', async () => {
-    ensureSessionMock.mockResolvedValue(false)
-
-    const { default: router } = await import('../index')
-    await router.push('/status')
-    await router.isReady()
-
-    expect(router.currentRoute.value.name).toBe('login')
-    expect(ensureSessionMock).toHaveBeenCalled()
-  })
-
-  it('redirects a non-Admin away from the Admin route, to Home', async () => {
-    ensureSessionMock.mockResolvedValue(true)
-
-    const { session } = await import('@/stores/session')
-    session.currentAccount.value = {
-      id: 1,
-      email: 'jan.peeters@vives.be',
-      displayName: 'Jan',
-      role: 'user',
+    for (const removed of ['login', 'forgot-password', 'set-password', 'admin']) {
+      expect(names).not.toContain(removed)
     }
-
-    const { default: router } = await import('../index')
-    await router.push('/admin')
-    await router.isReady()
-
-    expect(router.currentRoute.value.name).toBe('home')
-  })
-
-  it('allows an Admin to reach the Admin route', async () => {
-    ensureSessionMock.mockResolvedValue(true)
-
-    const { session } = await import('@/stores/session')
-    session.currentAccount.value = {
-      id: 2,
-      email: 'admin.person@vives.be',
-      displayName: 'Admin',
-      role: 'admin',
-    }
-
-    const { default: router } = await import('../index')
-    await router.push('/admin')
-    await router.isReady()
-
-    expect(router.currentRoute.value.name).toBe('admin')
+    expect(router.resolve('/login').matched).toHaveLength(0)
+    expect(router.resolve('/admin').matched).toHaveLength(0)
   })
 })

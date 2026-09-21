@@ -4,7 +4,6 @@ import pytest
 from app.models.analysis_job import AnalysisJob, AnalysisJobStatus, AnalysisJobVideoStatus
 from app.services.analyses import create_analysis_job
 
-from tests.helpers import create_account
 from worker.__main__ import requeue_orphaned_jobs
 
 # Ticket #50's acceptance criteria: `requeue_orphaned_jobs` is the worker's
@@ -18,10 +17,9 @@ from worker.__main__ import requeue_orphaned_jobs
 
 
 def _create_job(db_session, *, test_id="T001", email="jan.peeters@vives.be") -> AnalysisJob:
-    account = create_account(db_session, email=email)
     return create_analysis_job(
         db_session,
-        requested_by=account.id,
+        requested_by_identity=email,
         test_id=test_id,
         cut_keys=[f"cuts/{test_id}/{test_id}_C2_ME_F1.mp4"],
     )

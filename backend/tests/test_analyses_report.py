@@ -1,5 +1,5 @@
 from app.models.analysis_job import AnalysisJob, AnalysisJobStatus, AnalysisJobVideoStatus
-from tests.helpers import create_account, login_headers
+from tests.helpers import identity_headers
 
 # Ticket #49's acceptance criteria: exercised through the HTTP API against
 # the fake S3 client (the `s3_client` fixture) — no worker, no real bucket.
@@ -8,12 +8,7 @@ from tests.helpers import create_account, login_headers
 # would otherwise leave behind once a job reaches a terminal state.
 
 
-def _user_headers(client, db_session, *, email="jan.peeters@vives.be"):
-    create_account(db_session, email=email)
-    return login_headers(client, email)
-
-
-def _create_job(client, headers, *, test_id="T001", cut="cuts/T001/T001_C2_ME_F1.mp4"):
+def _create_job(client, headers=None, *, test_id="T001", cut="cuts/T001/T001_C2_ME_F1.mp4"):
     response = client.post("/analyses", json={"test_id": test_id, "cuts": [cut]}, headers=headers)
     assert response.status_code == 201, response.text
     return response.json()["id"]
@@ -37,8 +32,7 @@ def _finish_job(
 
 
 def test_download_report_for_completed_job_returns_the_xlsx_bytes(client, db_session, s3_client):
-    headers = _user_headers(client, db_session)
-    analysis_id = _create_job(client, headers)
+    analysis_id = _create_job(client)
     prefix = f"reports/T001/{analysis_id}/"
     s3_client.objects[f"{prefix}casiop_report.xlsx"] = b"fake-xlsx-bytes"
     s3_client.objects[f"{prefix}track_report.csv"] = b"not exposed"
@@ -46,7 +40,7 @@ def test_download_report_for_completed_job_returns_the_xlsx_bytes(client, db_ses
         db_session, analysis_id, status=AnalysisJobStatus.COMPLETED, report_s3_prefix=prefix
     )
 
-    response = client.get(f"/analyses/{analysis_id}/report", headers=headers)
+    response = client.get(f"/analyses/{analysis_id}/report")
 
     assert response.status_code == 200
     assert response.content == b"fake-xlsx-bytes"
@@ -59,8 +53,7 @@ def test_download_report_for_completed_job_returns_the_xlsx_bytes(client, db_ses
 def test_download_report_for_completed_with_errors_job_returns_the_xlsx_bytes(
     client, db_session, s3_client
 ):
-    headers = _user_headers(client, db_session)
-    analysis_id = _create_job(client, headers)
+    analysis_id = _create_job(client)
     prefix = f"reports/T001/{analysis_id}/"
     s3_client.objects[f"{prefix}casiop_report.xlsx"] = b"fake-xlsx-bytes"
     _finish_job(
@@ -70,37 +63,34 @@ def test_download_report_for_completed_with_errors_job_returns_the_xlsx_bytes(
         report_s3_prefix=prefix,
     )
 
-    response = client.get(f"/analyses/{analysis_id}/report", headers=headers)
+    response = client.get(f"/analyses/{analysis_id}/report")
 
     assert response.status_code == 200
     assert response.content == b"fake-xlsx-bytes"
 
 
 def test_download_report_for_a_queued_job_is_rejected(client, db_session, s3_client):
-    headers = _user_headers(client, db_session)
-    analysis_id = _create_job(client, headers)
+    analysis_id = _create_job(client)
 
-    response = client.get(f"/analyses/{analysis_id}/report", headers=headers)
+    response = client.get(f"/analyses/{analysis_id}/report")
 
     assert response.status_code == 409
 
 
 def test_download_report_for_a_running_job_is_rejected(client, db_session, s3_client):
-    headers = _user_headers(client, db_session)
-    analysis_id = _create_job(client, headers)
+    analysis_id = _create_job(client)
     job = db_session.get(AnalysisJob, analysis_id)
     job.status = AnalysisJobStatus.RUNNING
     db_session.add(job)
     db_session.commit()
 
-    response = client.get(f"/analyses/{analysis_id}/report", headers=headers)
+    response = client.get(f"/analyses/{analysis_id}/report")
 
     assert response.status_code == 409
 
 
 def test_download_report_for_a_failed_job_is_rejected(client, db_session, s3_client):
-    headers = _user_headers(client, db_session)
-    analysis_id = _create_job(client, headers)
+    analysis_id = _create_job(client)
     _finish_job(
         db_session,
         analysis_id,
@@ -109,60 +99,54 @@ def test_download_report_for_a_failed_job_is_rejected(client, db_session, s3_cli
         video_status=AnalysisJobVideoStatus.FAILED,
     )
 
-    response = client.get(f"/analyses/{analysis_id}/report", headers=headers)
+    response = client.get(f"/analyses/{analysis_id}/report")
 
     assert response.status_code == 409
 
 
 def test_download_report_for_a_cancelled_job_is_rejected(client, db_session, s3_client):
-    headers = _user_headers(client, db_session)
-    analysis_id = _create_job(client, headers)
+    analysis_id = _create_job(client)
     job = db_session.get(AnalysisJob, analysis_id)
     job.status = AnalysisJobStatus.CANCELLED
     db_session.add(job)
     db_session.commit()
 
-    response = client.get(f"/analyses/{analysis_id}/report", headers=headers)
+    response = client.get(f"/analyses/{analysis_id}/report")
 
     assert response.status_code == 409
 
 
-def test_download_report_for_another_accounts_job_is_not_found(client, db_session, s3_client):
-    owner_headers = _user_headers(client, db_session, email="owner@vives.be")
-    analysis_id = _create_job(client, owner_headers)
+def test_download_report_for_a_job_run_by_another_identity_succeeds(client, db_session, s3_client):
+    """Reports are fully shared (ticket #72): whoever ran the analysis."""
+    analysis_id = _create_job(client, identity_headers("owner@vives.be"))
     prefix = f"reports/T001/{analysis_id}/"
     s3_client.objects[f"{prefix}casiop_report.xlsx"] = b"fake-xlsx-bytes"
     _finish_job(
         db_session, analysis_id, status=AnalysisJobStatus.COMPLETED, report_s3_prefix=prefix
     )
-    other_headers = _user_headers(client, db_session, email="other@vives.be")
 
-    response = client.get(f"/analyses/{analysis_id}/report", headers=other_headers)
+    response = client.get(
+        f"/analyses/{analysis_id}/report", headers=identity_headers("other@vives.be")
+    )
 
-    assert response.status_code == 404
+    assert response.status_code == 200
+    assert response.content == b"fake-xlsx-bytes"
 
 
-def test_download_report_for_an_unknown_job_is_not_found(client, db_session, s3_client):
-    headers = _user_headers(client, db_session)
-
-    response = client.get("/analyses/999999/report", headers=headers)
+def test_download_report_for_an_unknown_job_is_not_found(client, s3_client):
+    response = client.get("/analyses/999999/report")
 
     assert response.status_code == 404
 
 
 def test_download_report_missing_from_s3_is_not_found(client, db_session, s3_client):
-    headers = _user_headers(client, db_session)
-    analysis_id = _create_job(client, headers)
+    analysis_id = _create_job(client)
     prefix = f"reports/T001/{analysis_id}/"
     # Deliberately never seeded into s3_client.objects.
     _finish_job(
         db_session, analysis_id, status=AnalysisJobStatus.COMPLETED, report_s3_prefix=prefix
     )
 
-    response = client.get(f"/analyses/{analysis_id}/report", headers=headers)
+    response = client.get(f"/analyses/{analysis_id}/report")
 
     assert response.status_code == 404
-
-
-def test_download_report_unauthenticated_is_rejected(client, db_session):
-    assert client.get("/analyses/1/report").status_code == 401

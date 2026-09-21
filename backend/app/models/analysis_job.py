@@ -6,6 +6,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
+# Sized for an email address, the shape of identity Mechatronics is expected
+# to forward. `app.api.deps.get_identity` truncates to this before anything
+# reaches the column; migration 0006 hard-codes the same length (a migration
+# must not import application code that can change after it).
+REQUESTED_BY_IDENTITY_MAX_LENGTH = 320
+
 
 class AnalysisJobStatus(str, enum.Enum):
     """An AnalysisJob's lifecycle (ticket #45, part of #44's job state
@@ -44,8 +50,12 @@ class AnalysisJob(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     test_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
-    requested_by: Mapped[int] = mapped_column(
-        ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True
+    # Ticket #72: the raw identity Mechatronics forwarded when the job was
+    # requested (docs/adr/0004-...) — attribution only, so a plain nullable
+    # string rather than a foreign key to any account/identity table. Null
+    # when no identity header was present (e.g. local development).
+    requested_by_identity: Mapped[str | None] = mapped_column(
+        String(REQUESTED_BY_IDENTITY_MAX_LENGTH), nullable=True
     )
     status: Mapped[AnalysisJobStatus] = mapped_column(
         Enum(

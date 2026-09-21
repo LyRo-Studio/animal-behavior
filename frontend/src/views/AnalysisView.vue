@@ -4,13 +4,11 @@ import { useRoute } from 'vue-router'
 
 import {
   AnalysisNotFoundError,
-  AnalysisUnauthorizedError,
   cancelAnalysis,
   downloadAnalysisReport,
   getAnalysis,
   type AnalysisJob,
 } from '@/services/analyses'
-import { session } from '@/stores/session'
 import { triggerBrowserDownload } from '@/utils/download'
 
 const route = useRoute()
@@ -20,7 +18,6 @@ const job = ref<AnalysisJob | null>(null)
 const isLoading = ref(true)
 const loadError = ref<string | null>(null)
 const notFound = ref(false)
-const sessionExpired = ref(false)
 
 // Frequent enough that "2/5 videos, current: ..." feels live (issue #52's
 // acceptance criteria) without hammering the backend — same shape as
@@ -38,17 +35,11 @@ let pollTimer: ReturnType<typeof setTimeout> | undefined
 // analysisToken/searchToken guards against out-of-order responses.
 let requestGeneration = 0
 
-// `isRetryAfterRefresh` marks a call as the one-shot retry right after a
-// successful silent token rotation below — so a 401 on *that* retry can't
-// trigger a second rotation attempt and loop. A fresh rotation attempt is
-// always available again on the next independent 401 (e.g. the next poll
-// cycle), since this flag isn't persisted anywhere.
-async function loadJob(isRetryAfterRefresh = false) {
-  if (!session.accessToken.value) return
+async function loadJob() {
   const generation = requestGeneration
 
   try {
-    const result = await getAnalysis(session.accessToken.value, analysisId)
+    const result = await getAnalysis(analysisId)
     if (generation !== requestGeneration) return
     job.value = result
     loadError.value = null
@@ -61,35 +52,9 @@ async function loadJob(isRetryAfterRefresh = false) {
   } catch (err) {
     if (generation !== requestGeneration) return
     if (err instanceof AnalysisNotFoundError) {
-      // Non-transient — this Account will never be able to see this job id,
-      // so there's nothing to retry (unlike the generic-error branch below).
+      // Non-transient — there is no such job id, so there's nothing to
+      // retry (unlike the generic-error branch below).
       notFound.value = true
-    } else if (err instanceof AnalysisUnauthorizedError) {
-      // A 401 here most often just means the short-lived access token
-      // expired mid-poll, not that the whole session (refresh token) is
-      // gone — session.ensureSession() can't be reused for this (it
-      // short-circuits to true once currentAccount is already cached from
-      // login/navigation, so it would never actually rotate a now-stale
-      // access token). Try rotating it once via the refresh token and
-      // silently retry before bothering the user; only show the
-      // session-expired message if that rotation itself fails (refresh
-      // token also expired/invalid) or a retry right after a rotation
-      // still 401s.
-      if (!isRetryAfterRefresh && (await session.refreshAccessToken())) {
-        if (generation !== requestGeneration) return
-        await loadJob(true)
-        return
-      }
-      // Non-transient in the same sense as AnalysisNotFoundError above — an
-      // expired/invalid session never becomes valid again on its own, so
-      // retrying every 2s would just spam the backend with 401s forever (as
-      // it did before this branch existed) while the page kept showing a
-      // now-stale job snapshot alongside the error. Replacing the whole
-      // view with a dedicated message (rather than layering it onto
-      // loadError, which renders next to the stale status) makes the stale
-      // snapshot disappear too.
-      sessionExpired.value = true
-      job.value = null
     } else {
       loadError.value = err instanceof Error ? err.message : 'Failed to load analysis.'
       pollTimer = setTimeout(loadJob, POLL_INTERVAL_MS)
@@ -150,12 +115,12 @@ const isCancelling = ref(false)
 const cancelError = ref<string | null>(null)
 
 async function cancel() {
-  if (!session.accessToken.value || !job.value || isCancelling.value) return
+  if (!job.value || isCancelling.value) return
 
   isCancelling.value = true
   cancelError.value = null
   try {
-    job.value = await cancelAnalysis(session.accessToken.value, job.value.id)
+    job.value = await cancelAnalysis(job.value.id)
     // The job just left {queued, running} for good — no more polling
     // needed, and any poll response still in flight from before this
     // resolved must not be allowed to overwrite it (see requestGeneration).
@@ -172,16 +137,16 @@ const isDownloading = ref(false)
 const downloadError = ref<string | null>(null)
 
 async function downloadReport() {
-  if (!session.accessToken.value || !job.value || isDownloading.value) return
+  if (!job.value || isDownloading.value) return
 
   isDownloading.value = true
   downloadError.value = null
   try {
-    const blob = await downloadAnalysisReport(session.accessToken.value, job.value.id)
-    // A plain bearer-authenticated fetch (CONTEXT.md's "Analysis report
-    // download" decision), unlike mediaBrowser.ts's token-in-URL Cut
-    // download — the browser never requests this URL itself, so the file
-    // has to be saved via a Blob object URL instead of a native href.
+    const blob = await downloadAnalysisReport(job.value.id)
+    // A plain fetch (CONTEXT.md's "Analysis report download" decision),
+    // unlike mediaBrowser.ts's token-in-URL Cut download — the browser
+    // never requests this URL itself, so the file has to be saved via a
+    // Blob object URL instead of a native href.
     const objectUrl = URL.createObjectURL(blob)
     triggerBrowserDownload(objectUrl, 'casiop_report.xlsx')
     URL.revokeObjectURL(objectUrl)
@@ -206,20 +171,14 @@ async function downloadReport() {
       <p v-if="isLoading" class="text-sm text-muted">Loading…</p>
       <p v-else-if="notFound" class="text-sm text-danger" role="alert">Analysis not found.</p>
 
-      <div v-else-if="sessionExpired" data-testid="session-expired">
-        <p class="text-sm text-danger" role="alert">
-          Your session has expired. Log in again to keep watching this analysis.
-        </p>
-        <RouterLink
-          :to="{ name: 'login', query: { redirect: route.fullPath } }"
-          class="mt-3 inline-block text-sm font-medium text-primary hover:underline"
-        >
-          Log in again
-        </RouterLink>
-      </div>
-
       <template v-else-if="job">
         <h2 class="text-lg font-medium text-foreground">Test {{ job.testId }}</h2>
+        <p v-if="job.requestedByIdentity" class="mt-1 text-sm text-muted">
+          Run by
+          <span class="font-medium text-foreground" data-testid="requested-by">{{
+            job.requestedByIdentity
+          }}</span>
+        </p>
         <p class="mt-1 text-sm text-muted">
           Status:
           <span class="font-medium text-foreground" data-testid="status">{{ job.status }}</span>
