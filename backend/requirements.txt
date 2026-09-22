@@ -5,5 +5,8 @@ alembic>=1.13,<1.14
 psycopg[binary]>=3.2,<3.3
 pydantic>=2.9,<3
 pydantic-settings>=2.5,<3
-pyjwt>=2.9,<3
+# [crypto]: RS256 support, needed by app.api.deps.get_verified_identity to
+# verify authentik's JWKS-signed JWTs (ticket #82, ADR-0005) — the existing
+# media-token use (app/core/security.py) is HS256 only and didn't need it.
+pyjwt[crypto]>=2.9,<3
 boto3>=1.34,<2

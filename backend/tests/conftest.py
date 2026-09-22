@@ -1,10 +1,11 @@
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Connection
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.orm import Session, SessionTransaction, sessionmaker
 
 from alembic import command
@@ -31,6 +32,34 @@ def _migrated_schema() -> None:
     """
     alembic_config = Config(str(_ALEMBIC_INI))
     command.upgrade(alembic_config, "head")
+
+
+@pytest.fixture()
+def scratch_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """A fresh, empty database, with `settings.database_url` pointed at it
+    for the test's duration (alembic/env.py reads the URL from settings).
+
+    For a migration test that needs to control exactly which revisions are
+    applied (ticket #72's `test_migration_remove_application_auth.py`,
+    ticket #82's `test_migration_audit_log.py`) — the shared, already-
+    head-migrated schema `_migrated_schema`/`db_session` use can't be
+    reused for that, since it's already past the revisions being tested.
+    """
+    base_url = make_url(settings.database_url)
+    # A generated hex name, never user input — DDL can't take a bound
+    # parameter for an identifier.
+    name = f"migration_test_{uuid4().hex[:12]}"
+    admin_engine = create_engine(base_url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin_engine.connect() as admin:
+            admin.execute(text(f'CREATE DATABASE "{name}"'))
+        scratch_url = base_url.set(database=name).render_as_string(hide_password=False)
+        monkeypatch.setattr(settings, "database_url", scratch_url)
+        yield scratch_url
+    finally:
+        with admin_engine.connect() as admin:
+            admin.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin_engine.dispose()
 
 
 @pytest.fixture()
