@@ -45,6 +45,10 @@ The behavioral condition a Cut was recorded under, encoded as `ME` (Met Eigenaar
 **Phase**:
 Which segment of a Test a Cut represents, encoded as `F1`–`F8` (Fase 1–8, Dutch for "phase") in its filename — matches "individual test phases," the language already used for how `cuts/` relates to `source/`.
 
+**Audit log** (`audit_log`, Feature A, ticket #79):
+An immutable, accountability-purpose record of "who did what, to what, when" for meaningful application actions — not every click. Distinct from **Job History** (an `AnalysisJob`'s own lifecycle, already readable directly off its own table — no separate storage needed for that) and from an **Activity Feed** (a friendly, best-effort "what's been happening" view — not yet built, deferred). Rows are never edited; the retention prune removes them after a fixed window, which is deletion under a stated policy, not the kind of edit/rewrite immutability rules out. See "Audit log (Feature A)" below for the finalized design.
+_Avoid_: "activity log" for this specific table — an earlier draft (issue #79) used that name; renamed once the table's accountability purpose was confirmed over a looser "convenience" reading (Session 0 grilling).
+
 ## Decisions & Approved Deviations
 
 **Scope (this round) — superseded by ticket #72 (application auth removed; kept as history):** Covers only Account/Admin/User management (login,
@@ -1252,4 +1256,105 @@ firewall then drops the connection, hence the hang.
   `:8000` `location /` stops any later `set` in that location, which left the
   variable empty (caught by `nginx/test.sh`). The token-redaction map now matches
   `/media/stream` with or without `/api`.
+
+**Feature decomposition (Session 0, grilling — pre-implementation):** the next
+three extensions to this application — activity/audit history, multi-Test
+analysis, and video cutting + S3 ingestion — are deliberately **three separate
+features**, not one combined effort, despite sharing infrastructure (DB
+models, background jobs, S3 access, frontend components). Grilled and
+recorded before any of them is built; only the first (Audit log, below) has a
+finished design.
+
+- **Video cutting and S3 ingestion is itself two features, not one:**
+  *ingestion* (getting source videos and a timestamp Excel file into the
+  system) and *cutting* (turning source + timestamps into Cuts under
+  `cuts/<Test>/`) are separable the same way the existing Media Browser
+  (consumes S3) and Analysis Worker (also consumes S3) are already one-
+  produces/one-consumes. May still ship together; designed separately. Both
+  are greenfield today — no upload endpoint or ingestion code exists yet, and
+  Source Video browsing is explicitly out of scope for the app in every round
+  so far (see Language).
+- **Multi-Test analysis is a real schema change, not a UI tweak — not
+  designed yet.** `AnalysisJob.test_id` is a single required column; the
+  worker's report S3 path (`reports/<test_id>/<analysis_id>/`),
+  `_validate_cut_key`'s Test-match check, and the per-Test "previous
+  analyses" panel all assume exactly one Test per job. Needs its own
+  grilling session before implementation.
+- **Build order: Audit log first.** It's the one piece the other two will
+  both eventually write into (a cutting job completing, a multi-Test
+  analysis starting) — designing "what a loggable event looks like" once,
+  before either exists, avoids retrofitting two more features' worth of call
+  sites later.
+
+**Audit log (Feature A, ticket #79) — design finalized, not yet built:** an
+immutable accountability record of meaningful application actions — not
+every click, not a convenience feed (that's a separate, deferred future
+ticket once this table exists). Supersedes #79's original draft; this is the
+resolved design, not a proposal.
+
+- **Why immutable, and why job-lifecycle events get their own rows instead
+  of being read off `AnalysisJob`:** `requeue_stuck_running_jobs` (crash
+  recovery) resets a `running` job's `started_at` back to `null` and its
+  status back to `queued` — a real, already-shipped mutation that would
+  silently erase "this job started at time X" from the source table if the
+  audit log ever just queried `AnalysisJob` live instead of recording the
+  fact at the moment it happened.
+- **Schema:** `id`; `occurred_at` (timestamptz, `server_default now()`);
+  `identity` (`String(320)`, nullable — same truncation convention as
+  `AnalysisJob.requested_by_identity`); `identity_verified` (bool, not null
+  — see attribution below); `action` (enum, lowercase stored value / upper-
+  snake Python member, matching `AnalysisJobStatus`'s existing convention,
+  not the upper-snake the ticket's own examples used); `target_type` +
+  `target` (string pair, e.g. `"analysis_job"`/`"42"`, `"cut"`/a Cut key — no
+  dedicated `analysis_job_id` column; the generic pair already covers "every
+  row about job 42" once something actually queries it); `failure_reason`
+  (nullable, short bounded string, same rule as
+  `AnalysisJobVideo.failure_reason` — never a stack trace).
+- **No FK from `target` to the row it names** — same reasoning as
+  `requested_by_identity` having no FK to `accounts`: the audit trail must
+  survive independent of whatever it's describing being deleted or changed
+  later.
+- **Events, this round (existing functionality only):** `ANALYSIS_STARTED`,
+  `ANALYSIS_COMPLETED`, `ANALYSIS_COMPLETED_WITH_ERRORS`, `ANALYSIS_FAILED`,
+  `ANALYSIS_CANCELLED`, `REPORT_DOWNLOADED`, `CUT_PLAY_REQUESTED`,
+  `CUT_DOWNLOAD_REQUESTED`. The Cut events are named "requested," not
+  "played"/"downloaded": they're logged at media-token mint time
+  (`POST /media/cuts/token`) — the only reliably-attributed point — not at
+  the actual `/media/stream` request, whose identity-carrying is still
+  unconfirmed (the media-token gate was decided "keep, don't remove" without
+  ever running it — see the ticket #72 media-token decision above). Minting
+  a token isn't proof playback happened. Report downloads don't have this
+  gap — `GET /analyses/{id}/report` is the actual byte-serving endpoint, so
+  `REPORT_DOWNLOADED` is logged there directly.
+- **Deliberately excluded as noise:** `GET /media/cuts/info` lookups, Test
+  search, Dataset browsing.
+- **Attribution is JWT-verified, scoped to this table only** — see
+  `docs/adr/0005-jwt-verified-identity-for-audit-log-only.md`.
+  `X-authentik-jwt`, verified against the JWKS at `X-authentik-meta-jwks`,
+  via `PyJWKClient` (already-installed `pyjwt`, no new dependency) with its
+  default in-process caching (auto-refetches on an unrecognized `kid`; no
+  custom TTL). This is a deliberately *higher* trust bar than everywhere
+  else identity is read (`get_identity`, used for `AnalysisJob` attribution,
+  rate-limit keys, `whoami`) — chosen specifically because this table's
+  whole purpose is accountability, but not applied everywhere to avoid
+  unrelated scope creep. Verification failure (missing/expired/bad
+  signature/JWKS unreachable) never blocks the action it would have logged
+  — the row is still written from the plain header value, with
+  `identity_verified=false`.
+- **Writes are best-effort, always.** Same principle for both the audit
+  write itself and the JWT verification step: a failure here must never
+  turn the real action (starting an analysis, downloading a Cut) into a
+  500.
+- **Retention: 3 months, rolling 90 days from `occurred_at`.** Pruned by a
+  lightweight in-process daily background task started in the backend's own
+  process — no new infrastructure (cron container, systemd timer, task
+  queue); matches the existing single-backend-instance assumption
+  `rate_limit.py`'s in-memory store already relies on.
+- **No read surface this round — write-only.** No UI, no endpoint; reading
+  is direct SQL for now. Who may eventually view it, and whether visibility
+  is shared or per-person, is deliberately deferred to a separate future
+  ticket once the table exists and is being written to correctly.
+- **Not addressed here:** #79 also raised showing `X-authentik-name` instead
+  of email on Home — unrelated to audit logging, split out rather than
+  folded in.
 
