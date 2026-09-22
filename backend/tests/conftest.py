@@ -111,6 +111,21 @@ def db_session(db_connection: Connection) -> Generator[Session, None, None]:
 
 
 @pytest.fixture(autouse=True)
+def _audit_log_pruning_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ticket #87's background prune task has no per-request `Depends` seam
+    to override the way `get_db`/`get_s3_client`/... do below — it's
+    lifespan-level, opening its own `Session` directly against
+    `settings.database_url`. Left enabled, every test using `client` (which
+    triggers real ASGI lifespan startup) would fire a real, immediately-
+    committed DELETE against whichever database this suite runs against,
+    bypassing `db_session`'s per-test SAVEPOINT rollback entirely (caught
+    in review). Disabled here for every test; the pruning logic itself is
+    exercised directly against a real DB by test_audit_log_retention.py.
+    """
+    monkeypatch.setattr(settings, "audit_log_prune_enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def _identity_header_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point `settings.identity_header_name` at `tests.helpers.IDENTITY_HEADER`
     for every test (ticket #72) — production reads it from `.env`, and a
