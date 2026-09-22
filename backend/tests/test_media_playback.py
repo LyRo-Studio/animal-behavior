@@ -2,9 +2,11 @@ from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
+from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.security import create_media_token
+from app.models.audit_log import AuditAction, AuditLog
 from tests.helpers import identity_headers
 
 # Ticket #21's acceptance criteria: exercised entirely through the HTTP API
@@ -26,6 +28,52 @@ def test_mint_token_for_a_well_formed_cut_key_succeeds(client, db_session, s3_cl
     body = response.json()
     assert body["token"]
     assert body["expires_in"] == settings.media_token_expire_minutes * 60
+
+
+def test_mint_token_for_play_writes_a_cut_play_requested_audit_row(client, db_session, s3_client):
+    """Ticket #86 / issue #79: named "requested," not "played" — minting a
+    token isn't proof playback happened, attributed via
+    `get_verified_identity` like every other audit call site."""
+    s3_client.objects[_CUT_KEY] = b"video-bytes"
+
+    response = client.post("/api/media/cuts/token", json={"key": _CUT_KEY, "action": "play"})
+
+    assert response.status_code == 200
+    row = db_session.scalar(
+        select(AuditLog).where(AuditLog.action == AuditAction.CUT_PLAY_REQUESTED)
+    )
+    assert row is not None
+    assert row.target_type == "cut"
+    assert row.target == _CUT_KEY
+    assert row.identity_verified is False
+
+
+def test_mint_token_for_download_writes_a_cut_download_requested_audit_row(
+    client, db_session, s3_client
+):
+    s3_client.objects[_CUT_KEY] = b"video-bytes"
+
+    response = client.post("/api/media/cuts/token", json={"key": _CUT_KEY, "action": "download"})
+
+    assert response.status_code == 200
+    row = db_session.scalar(
+        select(AuditLog).where(AuditLog.action == AuditAction.CUT_DOWNLOAD_REQUESTED)
+    )
+    assert row is not None
+    assert row.target_type == "cut"
+    assert row.target == _CUT_KEY
+    assert row.identity_verified is False
+
+
+def test_mint_token_does_not_write_an_audit_row_for_a_rejected_request(
+    client, db_session, s3_client
+):
+    response = client.post(
+        "/api/media/cuts/token", json={"key": "source/secret.mp4", "action": "play"}
+    )
+
+    assert response.status_code == 404
+    assert db_session.scalar(select(AuditLog).where(AuditLog.target_type == "cut")) is None
 
 
 def test_mint_token_rejects_a_key_outside_cuts(client, db_session, s3_client):

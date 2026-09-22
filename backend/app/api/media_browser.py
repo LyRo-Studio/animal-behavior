@@ -6,10 +6,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_identity, identity_rate_limit_key, raise_if_throttled
+from app.api.deps import (
+    get_identity,
+    get_verified_identity,
+    identity_rate_limit_key,
+    raise_if_throttled,
+)
 from app.core.config import settings
 from app.core.security import create_media_token, decode_media_token
 from app.db.session import get_db
+from app.models.audit_log import AuditAction
 from app.schemas.media_browser import (
     CutMediaInfoOut,
     CutOut,
@@ -18,6 +24,7 @@ from app.schemas.media_browser import (
     MediaTokenRequest,
     MediaTokenResponse,
 )
+from app.services.audit_log import record_audit_event
 from app.services.cut_media_info import get_cut_media_info
 from app.services.media_browser import (
     CutNotFoundError,
@@ -120,11 +127,47 @@ def get_cut_info(
     return CutMediaInfoOut.model_validate(info)
 
 
+# Ticket #86 / issue #79: named "requested," not "played"/"downloaded" —
+# minting a token here isn't proof the bytes were actually streamed by the
+# separate, unauthenticated `/media/stream` request it's later redeemed
+# against (CONTEXT.md's "Events, this round" decision).
+_AUDIT_ACTION_BY_MEDIA_TOKEN_ACTION = {
+    MediaTokenAction.PLAY: AuditAction.CUT_PLAY_REQUESTED,
+    MediaTokenAction.DOWNLOAD: AuditAction.CUT_DOWNLOAD_REQUESTED,
+}
+
+
+def _record_verified_audit_event(
+    db: Session, request: Request, *, action: AuditAction, target_type: str, target: str
+) -> None:
+    """Mirrors `app.api.analyses._record_verified_audit_event` (ticket #86,
+    issue #79) — logged with the audit log's own, more strongly verified
+    identity (`get_verified_identity`), independent of `get_identity`
+    (used only to key the rate limiter above). `record_audit_event` never
+    raises (it isolates its own failure internally) but never commits
+    either — this always commits the caller's transaction afterward, so a
+    future call site copied without also copying that commit can't
+    silently drop the audit row.
+    """
+    verified_identity, identity_verified = get_verified_identity(request)
+    record_audit_event(
+        db,
+        identity=verified_identity,
+        identity_verified=identity_verified,
+        action=action,
+        target_type=target_type,
+        target=target,
+    )
+    db.commit()
+
+
 @router.post("/cuts/token", response_model=MediaTokenResponse)
 def mint_media_token(
     payload: MediaTokenRequest,
+    request: Request,
     identity: str | None = Depends(get_identity),
     limiter: RateLimiter = Depends(get_rate_limiter),
+    db: Session = Depends(get_db),
 ) -> MediaTokenResponse:
     """Mint a short-lived, single-Cut-scoped, single-action-scoped media
     token (ticket #21) for `payload.key`/`payload.action`. Rate limited per
@@ -145,6 +188,14 @@ def mint_media_token(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Cut not found."
         ) from None
+
+    _record_verified_audit_event(
+        db,
+        request,
+        action=_AUDIT_ACTION_BY_MEDIA_TOKEN_ACTION[payload.action],
+        target_type="cut",
+        target=payload.key,
+    )
 
     token = create_media_token(cut_key=payload.key, action=payload.action.value)
     return MediaTokenResponse(token=token, expires_in=settings.media_token_expire_minutes * 60)
