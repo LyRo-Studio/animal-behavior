@@ -4,6 +4,7 @@ from app.models.analysis_job import (
     AnalysisJobVideo,
     AnalysisJobVideoStatus,
 )
+from app.models.audit_log import AuditAction, AuditLog
 from app.models.cut_media_info import CutMediaInfo
 
 __all__ = [
@@ -11,5 +12,7 @@ __all__ = [
     "AnalysisJobStatus",
     "AnalysisJobVideo",
     "AnalysisJobVideoStatus",
+    "AuditAction",
+    "AuditLog",
     "CutMediaInfo",
 ]

@@ -1,14 +1,9 @@
-from collections.abc import Iterator
 from pathlib import Path
-from uuid import uuid4
 
-import pytest
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.engine import make_url
 
 from alembic import command
 from alembic.config import Config
-from app.core.config import settings
 
 # Ticket #72's migration-safety test (same spirit as ticket #60's
 # test_db_session_isolation.py): the migration that retires the account
@@ -19,30 +14,10 @@ from app.core.config import settings
 # Runs against a throwaway database created on the same Postgres server as
 # the rest of the suite, migrated only as far as revision 0005 first — the
 # shared test schema (already at head, see conftest.py) can't be used since
-# the accounts table no longer exists there.
+# the accounts table no longer exists there. `scratch_database` is a shared
+# fixture in conftest.py (ticket #82 reuses it for its own migration test).
 
 _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
-
-
-@pytest.fixture()
-def scratch_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    """A fresh, empty database, with `settings.database_url` pointed at it
-    for the test's duration (alembic/env.py reads the URL from settings)."""
-    base_url = make_url(settings.database_url)
-    # A generated hex name, never user input — DDL can't take a bound
-    # parameter for an identifier.
-    name = f"migration_test_{uuid4().hex[:12]}"
-    admin_engine = create_engine(base_url, isolation_level="AUTOCOMMIT")
-    try:
-        with admin_engine.connect() as admin:
-            admin.execute(text(f'CREATE DATABASE "{name}"'))
-        scratch_url = base_url.set(database=name).render_as_string(hide_password=False)
-        monkeypatch.setattr(settings, "database_url", scratch_url)
-        yield scratch_url
-    finally:
-        with admin_engine.connect() as admin:
-            admin.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
-        admin_engine.dispose()
 
 
 def _seed_accounts_and_jobs(scratch_url: str) -> dict[str, int]:

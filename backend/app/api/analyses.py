@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_identity
+from app.api.deps import get_identity, get_verified_identity
 from app.db.session import get_db
 from app.models.analysis_job import AnalysisJob
+from app.models.audit_log import AuditAction
 from app.schemas.analyses import AnalysisJobOut, CreateAnalysisRequest
 from app.services.analyses import (
     REPORT_FILENAME,
@@ -19,6 +20,7 @@ from app.services.analyses import (
     get_analysis_report_key,
     list_analysis_jobs,
 )
+from app.services.audit_log import record_audit_event
 from app.services.s3_client import S3Client, S3ObjectNotFoundError, get_s3_client
 from app.services.s3_client import iter_object_range as _iter_range
 
@@ -30,12 +32,13 @@ router = APIRouter(prefix="/analyses", tags=["analyses"])
 
 @router.post("", response_model=AnalysisJobOut, status_code=status.HTTP_201_CREATED)
 def create_analysis(
+    request: Request,
     payload: CreateAnalysisRequest,
     identity: str | None = Depends(get_identity),
     db: Session = Depends(get_db),
 ) -> AnalysisJob:
     try:
-        return create_analysis_job(
+        job = create_analysis_job(
             db, requested_by_identity=identity, test_id=payload.test_id, cut_keys=payload.cuts
         )
     except EmptyCutSelectionError:
@@ -47,6 +50,22 @@ def create_analysis(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="One or more selected Cuts are not valid C2 analysis input for this Test.",
         ) from None
+
+    # Ticket #82 / issue #79: logged with the audit log's own, more strongly
+    # verified identity (get_verified_identity), independent of `identity`
+    # above (which only ever attributes the job itself — get_identity, never
+    # verified — docs/adr/0004-...).
+    verified_identity, identity_verified = get_verified_identity(request)
+    record_audit_event(
+        db,
+        identity=verified_identity,
+        identity_verified=identity_verified,
+        action=AuditAction.ANALYSIS_STARTED,
+        target_type="analysis_job",
+        target=str(job.id),
+    )
+    db.commit()
+    return job
 
 
 @router.get("/{analysis_id}", response_model=AnalysisJobOut)

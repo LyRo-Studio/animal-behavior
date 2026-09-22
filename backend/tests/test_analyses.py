@@ -1,10 +1,62 @@
+from sqlalchemy import select
+
 from app.models.analysis_job import AnalysisJob
+from app.models.audit_log import AuditAction, AuditLog
 from tests.helpers import identity_headers
 
 # Ticket #45's acceptance criteria: exercised entirely through the HTTP API
 # against the real (Alembic-migrated) database — no worker/S3 access in
 # this ticket, jobs just sit `queued`. Since ticket #72 there is no login: a
 # request may carry an identity header (attribution only) or none at all.
+
+
+def test_create_analysis_writes_an_analysis_started_audit_row(client, db_session):
+    """Ticket #82 / issue #79: every successful call writes ANALYSIS_STARTED,
+    attributed via `get_verified_identity` — independent of the ordinary,
+    unverified `requested_by_identity` attribution above (no
+    `X-authentik-email` sent here, so it's unverified: `identity=None`)."""
+    response = client.post(
+        "/api/analyses",
+        json={"test_id": "T001", "cuts": ["cuts/T001/T001_C2_ME_F1.mp4"]},
+    )
+    job_id = response.json()["id"]
+
+    row = db_session.scalar(select(AuditLog))
+    assert row is not None
+    assert row.action == AuditAction.ANALYSIS_STARTED
+    assert row.target_type == "analysis_job"
+    assert row.target == str(job_id)
+    assert row.identity is None
+    assert row.identity_verified is False
+
+
+def test_create_analysis_audit_row_carries_the_authentik_email_header_unverified(
+    client, db_session
+):
+    """No JWT/JWKS headers sent, so the row is unverified — but the plain
+    `X-authentik-email` value is still recorded (ADR-0005: a verification
+    failure falls back to the plain header, it never blocks or blanks the
+    action being logged)."""
+    response = client.post(
+        "/api/analyses",
+        json={"test_id": "T001", "cuts": ["cuts/T001/T001_C2_ME_F1.mp4"]},
+        headers={"X-authentik-email": "jan.peeters@vives.be"},
+    )
+    assert response.status_code == 201
+
+    row = db_session.scalar(select(AuditLog))
+    assert row.identity == "jan.peeters@vives.be"
+    assert row.identity_verified is False
+
+
+def test_create_analysis_does_not_write_an_audit_row_on_a_rejected_request(client, db_session):
+    response = client.post(
+        "/api/analyses",
+        json={"test_id": "T001", "cuts": ["cuts/T001/T001_C1_ME_F1.mp4"]},
+    )
+
+    assert response.status_code == 400
+    assert db_session.scalar(select(AuditLog)) is None
 
 
 def test_create_analysis_with_valid_c2_cuts_creates_a_queued_job(client, db_session):
