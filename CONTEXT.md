@@ -1736,3 +1736,95 @@ didn't pin down exactly:
   #82). Deferred to whichever future ticket adds the cutting-worker, same
   as `ANALYSIS_STARTED` etc. arrived after the worker existed.
 
+**Cutting worker (ticket #95) — shipped; mirrors ticket #47's own scoping
+for the analysis worker.** A new `cutting-worker/` service (own Docker
+Compose profile, CPU-only, no GPU device reservation), `VideoCutter`
+Protocol (`RealVideoCutter`/`FakeVideoCutter`), `orchestrator.py`'s
+`process_next_job`, and `app/services/cutting_jobs.py`'s own
+`claim_next_queued_cutting_job`/`finalize_cutting_job`/
+`requeue_stuck_running_cutting_jobs` (issue #93's Test seams named these
+three; ticket #94 only shipped `create_cutting_job`/`get_cutting_job`).
+Per-phase live progress (ticket #98) and audit log events (ticket #99) are
+explicitly out of scope here, same as `ANALYSIS_STARTED`/ticket #48's
+progress callback both arrived after ticket #47's own worker. Several
+implementation-time judgment calls:
+
+- **`assist`'s own `assist/__init__.py` runs its Click CLI at import time.**
+  Found by reading `assist`'s source directly (github.com/vives-devbit/assist
+  @master) while building `RealVideoCutter`: `from .assist import assist;
+  assist()` at module scope, in a bare `except Exception` that still lets
+  Click's own `SystemExit` through. Importing *any* `assist.*` submodule (not
+  just the top-level package) triggers this. Worked around in
+  `cutting_worker/video_cutter.py`'s `_import_assist()`: clears `sys.argv`
+  and swallows `SystemExit` for the one, first `import assist` in the
+  process; every later `import assist.<submodule>` hits Python's module
+  cache and re-triggers none of it. This is a real bug in `assist` itself,
+  not something `pinned at master` can dodge — revisit (or upstream a fix)
+  if a future `assist` release changes this.
+- **`VideoCutter.cut()`'s per-phase orchestration is new code, not reused
+  from `assist`.** `assist.phase_slicer.PhaseSlicer` (the module that
+  actually loops phases/cameras and calls `Slicer`/`LagCorrelation`/
+  `FrameGrabber` together) is the orchestration layer issue #93 already
+  said not to reuse — this ticket's `RealVideoCutter.cut()` re-derives the
+  same slicing math (`[phase's start, next phase's start)`, the
+  non-reference camera's `delta_time = desync_delay + its own first-frame
+  start_time`) directly against this app's `phase_timestamps: dict[str,
+  int]` (keyed by `assist.phase.Phase.name`, e.g. `"ME_F1"`) instead of
+  `assist.test.Test`'s positional 16-element list. Confirmed against
+  `PhaseSlicer.slice_video_files`'s actual source, not guessed.
+- **Per-phase isolation, deliberately not matching `assist`'s own
+  behavior:** `PhaseSlicer` has no try/except around its own
+  `Slicer.slice()` call — one bad phase aborts the whole run. `RealVideoCutter
+  .cut()` instead catches and logs a single phase's slicing failure and
+  keeps going with the rest, matching this app's own per-CuttingJobOutput
+  status model (closer in spirit to how DogTrace isolates one video's
+  failure from the rest of an AnalysisJob) rather than replicating
+  `assist`'s crash-the-whole-batch behavior. A phase that doesn't get its
+  output file is caught the same way either way — by
+  `orchestrator.py`'s post-hoc scan of `output_dir` against each expected
+  `CuttingJobOutput`, since `assist` has no progress callback on any branch
+  (issue #93) — so this only affects whether the *rest* of the job still
+  gets a chance to succeed, not how a single failure is detected.
+- **`CuttingJobStatus` has no `completed_with_errors` middle ground (unlike
+  `AnalysisJobStatus`) — `finalize_cutting_job` is all-or-nothing:**
+  `succeeded` only when every expected `CuttingJobOutput` succeeded,
+  `failed` otherwise. The model (ticket #94) already shipped with only two
+  terminal non-cancelled statuses, so this wasn't actually a new choice to
+  make — it's what makes "only discard the source upload on `succeeded`"
+  (issue #93: "on success the local upload is discarded immediately... on
+  failure it's retained") a clean, simple gate: a job left `failed` over
+  even one bad phase keeps its whole multi-GB source around for a cheap
+  retry, rather than a partial success silently costing the researcher a
+  re-upload to fix one mis-timed phase.
+- **How a source upload is discarded:** `orchestrator.py`'s
+  `_discard_source_uploads` removes the *whole* upload directory (`meta.json`
+  + `blob`, see `app/services/cutting_uploads.py`) that `job.c1_source_path`/
+  `c2_source_path` point into — not just the video file — via a plain
+  `shutil.rmtree(Path(source_path).parent, ...)`, rather than routing
+  through `cutting_uploads.py`'s own `discard_upload(root, upload_id)`
+  (exposed by ticket #94 for exactly this future step). Reasoning: the
+  stored source paths are already absolute filesystem paths, and deriving
+  `root`/`upload_id` back out of one just to call `discard_upload` would add
+  an indirection with no behavioral difference — both end up deleting the
+  same directory.
+- **Volume sharing with `backend`:** the cutting-worker container mounts the
+  *same* `cutting_uploads_data` volume backend writes uploads into, at the
+  same path (`${CUTTING_UPLOAD_TEMP_DIR:-/data/cutting-uploads}` in both
+  services' compose definitions) — required because `CuttingJob.c1_source_
+  path`/`c2_source_path` are absolute paths written by the backend process;
+  the cutting-worker reads the same files back by that same absolute path,
+  never a copy.
+- **CI/deploy parity with `worker`:** ci.yml gets its own `cutting-worker`
+  job (real Postgres on port 5435, its own venv — never installs the real
+  `assist` package, same "GPU/heavy deps only inside the real image" stance
+  `worker/requirements.txt` already takes for `torch`/`dogtrace`); deploy.yml
+  builds/pushes a `cutting-worker` image and adds `--profile cutting-worker`
+  alongside `--profile worker` in the production `docker compose up`.
+- **Opt-in real-assist test:** `test_real_assist_integration.py` mirrors
+  `test_real_gpu_inference.py`'s/`test_s3_client_real_bucket.py`'s "skip, not
+  fail, when a prerequisite is missing" pattern, gated by two env vars
+  naming a real local C1/C2 source video pair on disk (never bundled into
+  the repo) rather than a hardcoded path — no such sample pair was available
+  during this ticket to run it against for real; it's wired up and ready,
+  not yet exercised.
+

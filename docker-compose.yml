@@ -110,6 +110,38 @@ services:
               count: 1
               capabilities: [gpu]
 
+  cutting-worker:
+    build:
+      context: .
+      dockerfile: cutting-worker/Dockerfile
+    restart: unless-stopped
+    # CPU-only (CONTEXT.md's Feature C "New CPU-only service, not `worker`"
+    # decision: `assist`'s ffmpeg/scipy/numpy workload has no CUDA
+    # involvement) — its own profile all the same, so a bare `docker compose
+    # up` still leaves it out by default alongside `worker`; include it
+    # explicitly with `docker compose --profile cutting-worker up`.
+    profiles: ["cutting-worker"]
+    environment:
+      # Same DB/S3 config as `backend`/`worker`, reused as-is (ticket #95).
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-animal_behavior}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}@db:5432/${POSTGRES_DB:-animal_behavior}
+      S3_BUCKET: ${S3_BUCKET:?Set S3_BUCKET in .env (see .env.example)}
+      S3_ENDPOINT: ${S3_ENDPOINT:?Set S3_ENDPOINT in .env (see .env.example)}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID in .env (see .env.example)}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY in .env (see .env.example)}
+      S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
+      CUTTING_WORKER_POLL_INTERVAL_SECONDS: ${CUTTING_WORKER_POLL_INTERVAL_SECONDS:-5}
+      CUTTING_WORKER_WORK_DIR: ${CUTTING_WORKER_WORK_DIR:-/data/cutting-worker}
+    volumes:
+      # The same volume `backend` writes uploaded source videos into,
+      # mounted at the same path (see `backend`'s own CUTTING_UPLOAD_TEMP_DIR
+      # above) — a CuttingJob's `c1_source_path`/`c2_source_path` are
+      # absolute paths written by the backend, so this container must see
+      # them at the exact same location to read the files back (ticket #95).
+      - cutting_uploads_data:${CUTTING_UPLOAD_TEMP_DIR:-/data/cutting-uploads}
+    depends_on:
+      db:
+        condition: service_healthy
+
   frontend:
     build:
       context: ./frontend

@@ -1,0 +1,4 @@
+-r requirements.txt
+alembic>=1.13,<1.14
+pytest>=8.3,<9
+ruff>=0.6,<0.7

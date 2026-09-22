@@ -1,0 +1,26 @@
+[project]
+name = "animal-behavior-cutting-worker"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+# `../backend` resolves `app.*` to the backend's own source (see
+# cutting-worker/Dockerfile's COPY steps for the runtime equivalent) — never
+# a duplicated copy on disk for tests. Mirrors worker/pyproject.toml.
+pythonpath = [".", "../backend"]
+testpaths = ["tests"]
+# Ticket #95: the real-assist/real-ffmpeg smoke test opts in via `-m
+# real_assist` (which overrides this default), so a plain `pytest` run — and
+# CI, which has neither ffmpeg nor the real `assist` package installed —
+# never touches either.
+addopts = "-m \"not real_assist\""
+markers = [
+    "real_assist: exercises the real assist package against real ffmpeg and a real sample source video pair (opt-in — run with `pytest -m real_assist`)",
+]

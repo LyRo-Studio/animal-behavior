@@ -6,11 +6,18 @@ API before the worker exists").
 """
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.cutting_job import CuttingJob, CuttingJobOutput, CuttingJobOutputStatus
+from app.models.cutting_job import (
+    CuttingJob,
+    CuttingJobOutput,
+    CuttingJobOutputStatus,
+    CuttingJobStatus,
+)
 from app.services.cutting_uploads import source_filename_matches_camera
 from app.services.media_prober import MediaProbeError, MediaProber
 from app.services.s3_client import S3Client, S3ObjectNotFoundError
@@ -212,3 +219,105 @@ def get_cutting_job(db: Session, *, cutting_job_id: int) -> CuttingJob:
     if job is None:
         raise CuttingJobNotFoundError(cutting_job_id)
     return job
+
+
+def claim_next_queued_cutting_job(db: Session) -> CuttingJob | None:
+    """Atomically claim the oldest still-`queued` CuttingJob for the
+    cutting-worker (ticket #95) to run, or None if the queue is empty.
+
+    `SELECT ... FOR UPDATE SKIP LOCKED`, mirroring `claim_next_queued_job`'s
+    own reasoning (app/services/analyses.py) — with exactly one cutting-worker
+    instance (CONTEXT.md's Feature C "exactly one CuttingJob running at a
+    time platform-wide" decision) this never actually contends, but it's what
+    makes the design safe to later run more than one instance without
+    double-processing a job.
+
+    Sets `status=running` and `started_at` as part of the same claim, same
+    "never observably queued with no owner" reasoning as the analysis
+    worker's own claim — there's no per-job version field to record here
+    (unlike `dogtrace_version`): a CuttingJob always runs against whichever
+    `assist` build the cutting-worker image was built from, not something
+    worth recording per job.
+    """
+    job = db.scalar(
+        select(CuttingJob)
+        .where(CuttingJob.status == CuttingJobStatus.QUEUED)
+        .order_by(CuttingJob.created_at.asc())
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+    if job is None:
+        return None
+
+    job.status = CuttingJobStatus.RUNNING
+    job.started_at = datetime.now(UTC)
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def finalize_cutting_job(db: Session, job: CuttingJob) -> CuttingJob:
+    """Set `job`'s terminal status from its outputs' already-recorded final
+    statuses. Unlike `finalize_analysis_job`, there's no
+    `completed_with_errors` middle ground (CuttingJobStatus only has
+    `succeeded`/`failed` as terminal non-cancelled outcomes) — `succeeded`
+    only when *every* expected CuttingJobOutput succeeded, `failed`
+    otherwise, including a job that errored before any output could be
+    attempted (the caller marks every such output `failed` before calling
+    this). This all-or-nothing shape is deliberate: the cutting-worker
+    (ticket #95) only discards a CuttingJob's local source upload once the
+    job reaches `succeeded` (see `orchestrator.py`) — a job left `failed`
+    over even one bad phase keeps its source around for a cheap retry,
+    rather than forcing a researcher to re-upload a multi-GB video to fix
+    one mis-timed phase.
+
+    Call only after any produced Cuts are already durably uploaded to S3.
+
+    `job.outputs` is never expected to be empty in practice (a CuttingJob's
+    Excel row needs at least one non-skipped phase to have been created at
+    all), but a bare `{...} <= {SUCCEEDED}` is vacuously true for an empty
+    set — without the explicit `output_statuses` check below, a job with no
+    outputs at all would be marked `succeeded` and have its source upload
+    discarded despite producing zero Cuts (caught in review).
+    """
+    output_statuses = {output.status for output in job.outputs}
+    if output_statuses and output_statuses <= {CuttingJobOutputStatus.SUCCEEDED}:
+        job.status = CuttingJobStatus.SUCCEEDED
+    else:
+        job.status = CuttingJobStatus.FAILED
+
+    job.finished_at = datetime.now(UTC)
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def requeue_stuck_running_cutting_jobs(db: Session) -> list[CuttingJob]:
+    """Reset every CuttingJob still `running` back to `queued` (and its
+    outputs back to `pending`, clearing any failure_reason), returning the
+    jobs that were reset.
+
+    Meant to be called once, before the cutting-worker (ticket #95) starts
+    polling, mirroring `requeue_stuck_running_jobs`'s own reasoning — exactly
+    one cutting-worker instance ever processes jobs, so a CuttingJob still
+    `running` at startup can only mean a previous process crashed or was
+    restarted mid-job. Requeuing (not failing) is safe here specifically
+    because a CuttingJob's local source upload is only ever discarded on a
+    *finalized* `succeeded` job (see `finalize_cutting_job`/
+    `orchestrator.py`) — a job stuck `running` never reached that point, so
+    its source is still on disk to retry against.
+    """
+    jobs = list(db.scalars(select(CuttingJob).where(CuttingJob.status == CuttingJobStatus.RUNNING)))
+    for job in jobs:
+        job.status = CuttingJobStatus.QUEUED
+        job.started_at = None
+        db.add(job)
+        for output in job.outputs:
+            output.status = CuttingJobOutputStatus.PENDING
+            output.failure_reason = None
+            db.add(output)
+    if jobs:
+        db.commit()
+    return jobs

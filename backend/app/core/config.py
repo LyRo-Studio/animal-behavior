@@ -147,6 +147,18 @@ class Settings(BaseSettings):
     cutting_upload_init_rate_limit_max_attempts_per_identity: int = 30
     cutting_upload_init_rate_limit_window_seconds: int = 300
 
+    # Ticket #95 (Cutting worker, part of issue #93's Feature C): polling
+    # interval and the job-scoped scratch directory for the separate
+    # `cutting-worker` Docker service — mirrors analysis_worker_poll_interval_
+    # seconds/analysis_worker_work_dir above. Reused as-is by the
+    # cutting-worker process (no FastAPI dependency of its own); meaningless
+    # to the backend process itself. Only holds each job's *output* Cuts
+    # before they're uploaded to S3 — the source video(s) it cuts from are
+    # read directly out of cutting_upload_temp_dir above, never copied here
+    # (CONTEXT.md's Feature C "Upload mechanics" decision).
+    cutting_worker_poll_interval_seconds: float = 5.0
+    cutting_worker_work_dir: str = "/data/cutting-worker"
+
     @property
     def cors_origin_list(self) -> list[str]:
         """CORS_ORIGINS as a comma-separated env var, split into a list."""

@@ -26,6 +26,7 @@ env:
   BACKEND_IMAGE: ghcr.io/lyro-studio/animal-behavior-backend
   FRONTEND_IMAGE: ghcr.io/lyro-studio/animal-behavior-frontend
   WORKER_IMAGE: ghcr.io/lyro-studio/animal-behavior-worker
+  CUTTING_WORKER_IMAGE: ghcr.io/lyro-studio/animal-behavior-cutting-worker
   NGINX_IMAGE: ghcr.io/lyro-studio/animal-behavior-nginx
 
 jobs:
@@ -213,6 +214,20 @@ jobs:
             ${{ env.WORKER_IMAGE }}:${{ steps.image.outputs.tag }}
             ${{ env.WORKER_IMAGE }}:latest
 
+      # Build context is the repo root, not `cutting-worker` — same reasoning
+      # as `worker` above: cutting-worker/Dockerfile needs it to COPY files
+      # out of `backend/app`.
+      - name: Build and push cutting-worker image
+        if: steps.image.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: cutting-worker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.CUTTING_WORKER_IMAGE }}:${{ steps.image.outputs.tag }}
+            ${{ env.CUTTING_WORKER_IMAGE }}:latest
+
       # Config-only image (nginx/Dockerfile) — the reverse proxy that is the
       # only thing published on the production box (ticket #71).
       - name: Build and push nginx image
@@ -230,28 +245,31 @@ jobs:
           BACKEND_IMAGE_REF: ${{ env.BACKEND_IMAGE }}:${{ steps.image.outputs.tag }}
           FRONTEND_IMAGE_REF: ${{ env.FRONTEND_IMAGE }}:${{ steps.image.outputs.tag }}
           WORKER_IMAGE_REF: ${{ env.WORKER_IMAGE }}:${{ steps.image.outputs.tag }}
+          CUTTING_WORKER_IMAGE_REF: ${{ env.CUTTING_WORKER_IMAGE }}:${{ steps.image.outputs.tag }}
           NGINX_IMAGE_REF: ${{ env.NGINX_IMAGE }}:${{ steps.image.outputs.tag }}
-        # --profile worker: `worker` sits behind Compose's `profiles:
-        # ["worker"]` gate (ticket #47 — keeps a GPU-less `docker compose
-        # up` from failing outright on a machine without one). Without this
-        # flag here, `worker` would silently never start on deploy even
-        # with its image built/pushed/overridden correctly — found and
-        # filed as a gap in this ticket's own issue comment before this was
-        # implemented, since backend/frontend health-checking successfully
-        # would otherwise mask it indefinitely.
+        # --profile worker/--profile cutting-worker: `worker`/`cutting-worker`
+        # each sit behind their own Compose `profiles:` gate (ticket #47,
+        # ticket #95 — keeps a GPU-less `docker compose up` from failing
+        # outright on a machine without one). Without these flags here,
+        # neither would ever start on deploy even with its image built/
+        # pushed/overridden correctly — found and filed as a gap in ticket
+        # #47's own issue comment before that flag was added, since
+        # backend/frontend health-checking successfully would otherwise mask
+        # it indefinitely.
         # --pull always: always fetch the exact tag from GHCR rather than
         # trusting whatever local image cache happens to be on the box.
         # --no-build: docker-compose.prod.yml layers `image:` on top of the
         # base file's `build:` — this guarantees compose uses the pulled
         # image rather than rebuilding from source on the box.
         # --wait: blocks until db/backend/frontend/nginx all report healthy, and
-        # worker (no healthcheck of its own) is at least running (or fails
-        # the step — see docker-compose.yml's healthchecks). Timeout was
-        # 300s (sized for the db ~50s -> backend ~55s -> frontend ~55s
-        # sequential health chain, ~160s, plus pull headroom); bumped to
-        # 600s now that a slow `--pull always` also has to fetch worker's
-        # image, built FROM a CUDA/torch/ultralytics base that's multiple
-        # GB larger than backend/frontend's.
+        # worker/cutting-worker (no healthcheck of their own) are at least
+        # running (or fails the step — see docker-compose.yml's
+        # healthchecks). Timeout was 300s (sized for the db ~50s -> backend
+        # ~55s -> frontend ~55s sequential health chain, ~160s, plus pull
+        # headroom); bumped to 600s now that a slow `--pull always` also has
+        # to fetch worker's image, built FROM a CUDA/torch/ultralytics base
+        # that's multiple GB larger than backend/frontend's.
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile worker \
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+            --profile worker --profile cutting-worker \
             up -d --pull always --no-build --wait --wait-timeout 600
