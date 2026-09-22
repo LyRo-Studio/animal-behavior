@@ -11,9 +11,13 @@ FROM python:3.12-slim
 
 # ffmpeg provides both the `ffmpeg` binary `assist.slicer.Slicer` shells out
 # to (via the `ffmpeg-python` bindings) and `ffprobe`, which `assist` also
-# uses internally for start-time/sample-rate probing.
+# uses internally for start-time/sample-rate probing. git is needed only to
+# satisfy the `pip install git+https://...` below — `python:3.12-slim` has
+# neither preinstalled (unlike a full `python` image), and pip's own VCS
+# support shells out to the real `git` binary rather than speaking the
+# protocol itself.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /cutting-worker
