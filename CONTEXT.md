@@ -1651,3 +1651,88 @@ pinned at `master`), rather than the ad-hoc, manual process used today.
   metadata in Postgres, only Cuts in S3 — exactly `AnalysisJob`'s existing
   split, not challenged further.
 
+**Cutting job foundation (ticket #94) — shipped; mirrors ticket #45's own
+scoping for `AnalysisJob`.** `cutting_jobs`/`cutting_job_outputs` (migration
+0009), `app/services/timestamp_excel.py`, the chunked/resumable upload
+intake, ffprobe validation, and `create_cutting_job`. No cutting-worker
+exists yet — a created job just sits `queued`, same as `AnalysisJob` before
+ticket #47. Several implementation-time judgment calls the design above
+didn't pin down exactly:
+
+- **Excel header names (unconfirmed against a real production sheet):**
+  `timestamp_excel.py` expects literal headers `"Test ID"`, `"Dog ID"`,
+  `"C1/C2"` (the reference-camera column), and `"ME_F1"`..`"ME_F8"`/
+  `"ZE_F1"`..`"ZE_F8"` for the sixteen phase columns. No real sample
+  workbook was available during this ticket to confirm these against — same
+  "unconfirmed, revisit" caveat already carried elsewhere in this file (e.g.
+  the JWT email-claim name in `app/api/deps.py`). Adjust the header
+  constants at the top of `timestamp_excel.py` if a real sheet differs.
+- **The `HH:MM:SS`-means-`MM:SS` conversion, precisely:** interpreted as
+  `elapsed_seconds = hour * 60 + minute`, discarding whatever's in the
+  seconds slot, applied unconditionally to every parsed time-shaped cell.
+  Reasoning: Excel parses a 2-component time entry (e.g. typing "12:34"
+  intending 12 minutes 34 seconds) as H:MM, not M:SS — so the two numbers a
+  person actually typed land in the hour/minute slots, with seconds always
+  0. Reading them back as minutes/seconds recovers exactly what was typed.
+  This assumes every phase-timestamp cell in these sheets follows that same
+  2-component-entry convention; revisit if a real sheet turns out to mix in
+  genuinely-3-component entries with real (non-`:00`) seconds meaning
+  something else.
+- **Source-video S3-collision key, precisely:** `_derive_source_collision_key`
+  (app/services/cutting_jobs.py) checks `source/<test_id>/<filename>` — the
+  spec named the *policy* ("an uploaded source video whose derived filename
+  already matches an existing S3 object is rejected outright") but not the
+  exact derivation. Chosen to mirror `cuts/<test_id>/`'s existing
+  convention. Revisit once a real collision case clarifies what legacy
+  `source/` objects are actually named.
+- **Upload protocol:** a small custom tus-like protocol (`POST
+  /cutting-jobs/uploads` to start, `PATCH .../uploads/{id}` with an
+  `Upload-Offset` header to append a chunk, `GET .../uploads/{id}` to read
+  the current offset back) rather than adopting the full tus.io spec —
+  issue #93 named the requirement ("chunked/resumable... resumes after a
+  dropped connection") but not a specific protocol. Tracked entirely on the
+  local filesystem (a `blob` file's own size on disk *is* the received-byte
+  count — see `app/services/cutting_uploads.py`'s module docstring), not in
+  Postgres.
+- **Disk-usage cap default (unverified):** `cutting_upload_storage_cap_bytes`
+  defaults to 50 GiB, `cutting_upload_max_file_size_bytes` to 20 GiB —
+  issue #93's own "Further Notes" already flagged that the real number needs
+  checking against `dogtrace-app`'s actual free space, unreachable during
+  design. Still unreachable during this ticket's implementation; these
+  remain placeholders, not measured values.
+- **Caught in review:** `create_cutting_job`/`start_upload` validated an
+  uploaded filename against the caller's raw, un-normalized `test_id`
+  (e.g. "513") instead of the normalized `T`-prefixed form the Excel row
+  itself normalizes to and everything downstream compares against —
+  falsely rejecting a legitimately-named "T513_C1_..." upload. Both now
+  normalize `test_id` up front, before any filename check. Also caught: a
+  2-component text timestamp cell ("00:00") bypassed the 00:00:00-skip
+  check entirely (early-`return`); `_parse_time_cell` now computes its
+  final value before the shared skip check runs, for every input shape.
+  Also caught, unrelated to Excel parsing: `append_upload_chunk` had no
+  per-upload lock, so two genuinely concurrent PATCH calls for the same
+  upload_id could both pass the offset check and both write, silently
+  corrupting the blob while still reporting `complete`; and
+  `_upload_dir` built a filesystem path straight from the caller-supplied
+  `upload_id` with no shape validation, a latent path-traversal opening
+  (mitigated in practice by requiring `meta.json`/`blob` to already exist
+  at the resolved path, but not defended at the boundary the way
+  `media_browser.py`'s `_TEST_ID_RE`/`_CUT_KEY_RE` already defend an
+  equivalent case). Fixed: a per-`upload_id` `asyncio.Lock` serializes
+  `append_upload_chunk`, and every upload_id is validated against the
+  exact shape `start_upload` mints (`uuid.uuid4().hex`) before it's used
+  to build any path.
+- **No cleanup/retry/cancel path yet:** a failed job's uploaded source is
+  meant to be retained until explicitly retried or cancelled (issue #93),
+  and a succeeded job's source discarded — neither retry/cancel endpoints
+  nor a cutting-worker exist yet to do either, so nothing currently deletes
+  an upload once a `CuttingJob` is created from it (`discard_upload` is
+  exposed for that future step to call). Out of scope for this ticket's own
+  acceptance criteria.
+- **Audit log events not wired up here:** issue #93 names
+  `CUTTING_STARTED`/`CUTTING_COMPLETED`/`CUTTING_FAILED` events, but this
+  ticket's own acceptance criteria don't ask for them (mirrors ticket #45,
+  which also shipped without audit events — those came later, via ticket
+  #82). Deferred to whichever future ticket adds the cutting-worker, same
+  as `ANALYSIS_STARTED` etc. arrived after the worker existed.
+

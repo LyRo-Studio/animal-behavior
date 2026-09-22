@@ -49,6 +49,16 @@ services:
       # unchanged.
       FFPROBE_PATH: ${FFPROBE_PATH:-ffprobe}
       FFPROBE_TIMEOUT_SECONDS: ${FFPROBE_TIMEOUT_SECONDS:-30}
+      # Cutting job foundation (ticket #94, part of issue #93's Feature C)
+      # — see app/services/cutting_uploads.py. Backed by the
+      # cutting_uploads_data volume below so an upload retained after a
+      # failed job (or mid-transfer, if the backend restarts) survives a
+      # container restart.
+      CUTTING_UPLOAD_TEMP_DIR: ${CUTTING_UPLOAD_TEMP_DIR:-/data/cutting-uploads}
+      CUTTING_UPLOAD_STORAGE_CAP_BYTES: ${CUTTING_UPLOAD_STORAGE_CAP_BYTES:-53687091200}
+      CUTTING_UPLOAD_MAX_FILE_SIZE_BYTES: ${CUTTING_UPLOAD_MAX_FILE_SIZE_BYTES:-21474836480}
+    volumes:
+      - cutting_uploads_data:/data/cutting-uploads
     # No host port (ticket #71): only `nginx` is reachable from outside the
     # Docker network, so nothing can bypass Mechatronics by hitting the
     # backend directly (ADR-0004). docker-compose.override.yml re-publishes
@@ -140,3 +150,4 @@ services:
 
 volumes:
   postgres_data:
+  cutting_uploads_data:

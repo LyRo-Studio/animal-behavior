@@ -13,6 +13,7 @@ from alembic.config import Config
 from app.core.config import settings
 from app.db.session import get_db
 from app.main import app
+from app.services.cutting_uploads import get_cutting_upload_root
 from app.services.media_prober import get_media_prober
 from app.services.rate_limit import RateLimiter, get_rate_limiter
 from app.services.s3_client import get_s3_client
@@ -148,26 +149,38 @@ def media_prober() -> FakeMediaProber:
 
 
 @pytest.fixture()
+def cutting_upload_root(tmp_path: Path) -> Path:
+    """Ticket #94: the scoped local temp directory cutting-job uploads land
+    in for this test, injected in place of `settings.cutting_upload_temp_dir`
+    — never a real shared directory, same "point the seam at tmp_path"
+    approach as `s3_client`/`media_prober` above use fakes for."""
+    return tmp_path / "cutting-uploads"
+
+
+@pytest.fixture()
 def client(
     db_session: Session,
     rate_limiter: RateLimiter,
     s3_client: FakeS3Client,
     media_prober: FakeMediaProber,
+    cutting_upload_root: Path,
 ) -> Generator[TestClient, None, None]:
     """A test client for the FastAPI app, hitting real routes end-to-end.
 
     The app's own `get_db`/`get_rate_limiter`/`get_s3_client`/
-    `get_media_prober` dependencies are overridden to use the per-test
-    transactional session, fresh rate limiter, fake S3 client, and fake
-    media prober above, so requests made through this client see (and roll
-    back) the same data a test sets up directly, never touch the real
-    bucket or run the real `ffprobe` binary, and start with a clean
-    rate-limit slate every test.
+    `get_media_prober`/`get_cutting_upload_root` dependencies are
+    overridden to use the per-test transactional session, fresh rate
+    limiter, fake S3 client, fake media prober, and scoped tmp_path above,
+    so requests made through this client see (and roll back) the same data
+    a test sets up directly, never touch the real bucket or run the real
+    `ffprobe` binary, never write outside pytest's own tmp_path, and start
+    with a clean rate-limit slate every test.
     """
     app.dependency_overrides[get_db] = lambda: db_session
     app.dependency_overrides[get_rate_limiter] = lambda: rate_limiter
     app.dependency_overrides[get_s3_client] = lambda: s3_client
     app.dependency_overrides[get_media_prober] = lambda: media_prober
+    app.dependency_overrides[get_cutting_upload_root] = lambda: cutting_upload_root
     try:
         with TestClient(app) as test_client:
             yield test_client

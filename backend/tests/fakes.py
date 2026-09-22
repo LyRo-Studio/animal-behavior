@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app.services.media_prober import ProbedMediaInfo
+from app.services.media_prober import MediaProbeError, ProbedMediaInfo
 from app.services.s3_client import S3ObjectInfo, S3ObjectNotFoundError
 
 
@@ -95,7 +95,13 @@ class FakeMediaProber:
         )
     )
     calls: list[Path] = field(default_factory=list)
+    # Ticket #94: set to simulate a non-decodable upload (e.g.
+    # app/services/cutting_jobs.py's ffprobe-rejects-non-video path) without
+    # needing a real broken video file.
+    error: MediaProbeError | None = None
 
     def probe(self, path: Path) -> ProbedMediaInfo:
         self.calls.append(Path(path))
+        if self.error is not None:
+            raise self.error
         return self.result

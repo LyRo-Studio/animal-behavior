@@ -6,6 +6,12 @@ from app.models.analysis_job import (
 )
 from app.models.audit_log import AuditAction, AuditLog
 from app.models.cut_media_info import CutMediaInfo
+from app.models.cutting_job import (
+    CuttingJob,
+    CuttingJobOutput,
+    CuttingJobOutputStatus,
+    CuttingJobStatus,
+)
 
 __all__ = [
     "AnalysisJob",
@@ -15,4 +21,8 @@ __all__ = [
     "AuditAction",
     "AuditLog",
     "CutMediaInfo",
+    "CuttingJob",
+    "CuttingJobOutput",
+    "CuttingJobOutputStatus",
+    "CuttingJobStatus",
 ]
