@@ -18,7 +18,6 @@ from app.schemas.media_browser import (
     MediaTokenRequest,
     MediaTokenResponse,
 )
-from app.services import request_diagnostics
 from app.services.cut_media_info import get_cut_media_info
 from app.services.media_browser import (
     CutNotFoundError,
@@ -253,14 +252,6 @@ def stream_cut(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Token not valid for this Cut/action."
         )
-
-    # Ticket #72's media-token gate: note which headers this native request
-    # carried (a no-op unless the diagnostic is enabled). Only once the token
-    # checks out, so junk requests can't crowd the real one out of the small
-    # buffer.
-    request_diagnostics.record_media_request(
-        request.headers, identity_present=get_identity(request) is not None
-    )
 
     try:
         filename = parse_cut_key(key)

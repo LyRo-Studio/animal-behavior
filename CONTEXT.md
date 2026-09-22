@@ -981,20 +981,19 @@ forgot-password/set-password/Admin views, the session store and every
   the number of distinct keys seen within one window, not by history — not an
   absolute cap. `RateLimiter.peek` (login's pre-auth check) had no other caller
   and was removed.
-- **Media tokens: "kept, renamed" — the issue's default — because the gate could
-  not be run.** Whether a native `<video src>`/`<a download>` request carries
-  Mechatronics' identity header needs a live `dogtrace-app`, which this work had
-  no access to. So `create_media_token`/`decode_media_token` stay, signed with
-  `media_token_secret_key` (env `MEDIA_TOKEN_SECRET_KEY`, renamed from
-  `jwt_secret_key`), and `POST /media/cuts/token` and the stream endpoint work as
-  before. Consequence to keep in mind (see ADR-0002's amendment): with login
-  gone `POST /media/cuts/token` is itself open to anyone who can reach the
+- **Media tokens: kept, renamed — decided final.** `create_media_token`/
+  `decode_media_token` stay, signed with `media_token_secret_key` (env
+  `MEDIA_TOKEN_SECRET_KEY`, renamed from `jwt_secret_key`), and
+  `POST /media/cuts/token` and the stream endpoint work as before. The
+  issue's gate (whether a native `<video src>`/`<a download>` request carries
+  Mechatronics' identity header, which would have let the mechanism be
+  removed outright) was never run on `dogtrace-app` — the owner chose to keep
+  the token mechanism regardless once #78's go-live work reached this point,
+  so the "if the gate passes" removal list in issue #72 does not apply.
+  Consequence to keep in mind (see ADR-0002's amendment): with login gone
+  `POST /media/cuts/token` is itself open to anyone who can reach the
   backend, so a token buys only a 15-minute single-Cut scope, not access
-  control. **Still to do, by a human:** run the gate on `dogtrace-app`; if it
-  passes, follow the "If the gate passes" list in issue #72 (delete the token
-  mechanism, key the stream endpoint on the Cut key directly with its own shape
-  validation, decide explicitly whether the stream endpoint or Nginx/
-  Mechatronics owns its DoS limit, drop `MEDIA_TOKEN_SECRET_KEY`).
+  control.
 - **Resolved by ticket #71 — the backend port is no longer published.** (Cited
   there and in the PR as "ticket #3", which is actually the closed Login &
   session ticket; the reverse-proxy work is #71.) It used to be open:
@@ -1045,17 +1044,13 @@ forgot-password/set-password/Admin views, the session store and every
   self-resolving gap ticket #54 accepted for its own rollback limitation. And the
   migration cannot be rolled back, so a pre-#72 image would not find its
   `accounts` table anyway.
-- **Identity-header discovery is still open** (the "diagnostic was *not* added"
-  decision below is superseded by "Identity-header diagnostic (ticket #72,
-  follow-up)" at the end of this file). The real header name is unknown
-  until `dogtrace-app` is live behind Mechatronics. The issue's suggested
-  temporary `GET /api/debug/request-headers` diagnostic was **not** added: an
-  endpoint echoing every request header would also echo any credential-bearing
-  header Mechatronics forwards, and shipping it to reach a production box was
-  not something to do unilaterally. Until it's known, `IDENTITY_HEADER_NAME`
-  stays empty and analyses are attributed to no one (`requested_by_identity`
-  `null`); analyses that existed before this change keep the email they were
-  backfilled with.
+- **Identity-header discovery — resolved.** (Historical: this bullet originally
+  said discovery was still open, and was superseded in place by "Identity-header
+  diagnostic (ticket #72, follow-up)" further down — that diagnostic has since
+  done its job and been removed, see below.) The header is `X-authentik-email`
+  (Mechatronics fronts the app with authentik's proxy), confirmed live on
+  `dogtrace-app` and set as `IDENTITY_HEADER_NAME` in the `production`
+  Environment. Analyses are now attributed by that header's value.
 - **Amendments to earlier decisions.** "Analysis report download (ticket #49)"
   and "Analysis detail/progress view (ticket #52)" describe the report download
   as bearer-authenticated and the view as handling an expired session — there is
@@ -1162,13 +1157,18 @@ from the frontend container and `/api/` from the backend container.
   anything), but it sits awkwardly with ADR-0004's "only Mechatronics' route
   should reach the app's data" and should be closed the same way.
 
-**Identity-header diagnostic (ticket #72, follow-up):** `GET /api/debug/request-headers`
-(`app/api/debug.py`, `app/services/request_diagnostics.py`) exists so the real
-identity header — and the media-token gate (does a native `<video>` request carry
-it?) — can be discovered from the browser console on the hosted site. Procedure in
-the README's "Discovering the identity header". It supersedes the "not added"
-decision under "Identity-header discovery is still open" above, on the owner's
-request, with the safeguards that decision was missing.
+**Identity-header diagnostic (ticket #72, follow-up) — done its job, removed (kept as history):**
+`GET /api/debug/request-headers` (`app/api/debug.py`,
+`app/services/request_diagnostics.py`) existed so the real identity header could
+be discovered from the browser console on the hosted site. It found
+`X-authentik-email` (confirmed live on `dogtrace-app`, set as
+`IDENTITY_HEADER_NAME`). The media-token gate itself was not run — see "Media
+tokens: kept, renamed — decided final" above — the owner chose to keep the
+token mechanism regardless. Per its own "to remove it" plan below, the
+endpoint, its schema, `request_diagnostics.py`, its test, the router wiring,
+the `record_media_request` call in `stream_cut`, the `debug_request_headers_enabled`
+setting and the `DEBUG_REQUEST_HEADERS_ENABLED` variable (compose/`.env.example`/
+`deploy.yml`/`production` Environment) are all gone.
 
 - **Approved deviation from ENGINEERING-STANDARDS.md §5** ("Session or
   authentication state must not be exposed through … client-visible debugging
@@ -1207,17 +1207,18 @@ request, with the safeguards that decision was missing.
   (`backend/Dockerfile`); with more workers the record would be partial.
 - **An empty `DEBUG_REQUEST_HEADERS_ENABLED=` means off**, as an empty
   `IDENTITY_HEADER_NAME=` means "read none" — it must not stop the app starting.
-- **To remove it (when #72 is closed out):** delete `app/api/debug.py`,
+  (Historical — the setting no longer exists.)
+- **Removed as planned, once #72/#78 closed out:** `app/api/debug.py`,
   `app/schemas/debug.py`, `app/services/request_diagnostics.py` and
-  `tests/test_debug_request_headers.py`; the router line in `app/main.py`; the
-  `record_media_request` call in `stream_cut` (`app/api/media_browser.py`); the
-  setting and its validator in `app/core/config.py`; and the variable in
-  `docker-compose.yml`, `.env.example` and `deploy.yml`. A middleware registered
-  only while the flag is on was considered to keep the hook out of `stream_cut`, and
-  declined: a per-request middleware is no less cross-cutting, and this list is
-  short.
-- Not in the OpenAPI schema. No frontend change — it is called with a one-line
-  `fetch` from the console.
+  `tests/test_debug_request_headers.py` deleted; the router line in `app/main.py`,
+  the `record_media_request` call in `stream_cut` (`app/api/media_browser.py`),
+  the setting and its validator in `app/core/config.py`, and the variable in
+  `docker-compose.yml`, `.env.example` and `deploy.yml` all removed with it. A
+  middleware registered only while the flag was on was considered to keep the
+  hook out of `stream_cut`, and declined: a per-request middleware is no less
+  cross-cutting, and the list was short.
+- It was never in the OpenAPI schema, and had no frontend counterpart — it was
+  called with a one-line `fetch` from the console.
 
 **nginx :8000 API-only listener (stopgap for Mechatronics' `/api` route):** after
 #71 deployed, every `/api/*` request through `https://dogtrace.mechatronics.be`
