@@ -2,7 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_identity, get_verified_identity
+from app.api.deps import (
+    get_identity,
+    get_verified_identity,
+    identity_rate_limit_key,
+    raise_if_throttled,
+)
+from app.core.config import settings
 from app.db.session import get_db
 from app.models.analysis_job import AnalysisJob
 from app.models.audit_log import AuditAction
@@ -12,8 +18,11 @@ from app.services.analyses import (
     AnalysisJobNotCancellableError,
     AnalysisJobNotFoundError,
     AnalysisReportNotAvailableError,
+    CutsWithMultipleTestsError,
     EmptyCutSelectionError,
     InvalidCutSelectionError,
+    TooManyTestsError,
+    TooManyVideosError,
     cancel_analysis_job,
     create_analysis_job,
     get_analysis_job,
@@ -21,6 +30,8 @@ from app.services.analyses import (
     list_analysis_jobs,
 )
 from app.services.audit_log import record_audit_event
+from app.services.media_browser import TestNotFoundError
+from app.services.rate_limit import RateLimiter, enforce_all, get_rate_limiter
 from app.services.s3_client import S3Client, S3ObjectNotFoundError, get_s3_client
 from app.services.s3_client import iter_object_range as _iter_range
 
@@ -36,10 +47,29 @@ def create_analysis(
     payload: CreateAnalysisRequest,
     identity: str | None = Depends(get_identity),
     db: Session = Depends(get_db),
+    s3: S3Client = Depends(get_s3_client),
+    limiter: RateLimiter = Depends(get_rate_limiter),
 ) -> AnalysisJob:
+    """Ticket #89 / issue #88's Feature B: rate limited per identity
+    (reusing rate_limit.py, same pattern as media-token issuance and
+    /media/cuts/info) — a generous budget, sized so it doesn't affect normal
+    single-job usage, since a job is now a more expensive thing to trigger
+    repeatedly than before this feature (CONTEXT.md's Feature B decision).
+    """
+    result = limiter.hit(
+        identity_rate_limit_key("create-analysis", identity),
+        limit=settings.create_analysis_rate_limit_max_attempts_per_identity,
+        window_seconds=settings.create_analysis_rate_limit_window_seconds,
+    )
+    raise_if_throttled(enforce_all(result))
+
     try:
         job = create_analysis_job(
-            db, requested_by_identity=identity, test_id=payload.test_id, cut_keys=payload.cuts
+            db,
+            requested_by_identity=identity,
+            test_ids=payload.test_ids,
+            cut_keys=payload.cuts,
+            s3=s3,
         )
     except EmptyCutSelectionError:
         raise HTTPException(
@@ -49,6 +79,26 @@ def create_analysis(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="One or more selected Cuts are not valid C2 analysis input for this Test.",
+        ) from None
+    except CutsWithMultipleTestsError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Hand-picked cuts are only allowed when selecting exactly one Test.",
+        ) from None
+    except TooManyTestsError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Select at most 10 Tests per analysis.",
+        ) from None
+    except TooManyVideosError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The selected Tests/Cuts resolve to too many videos for one analysis.",
+        ) from None
+    except TestNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="One or more selected Tests were not found.",
         ) from None
 
     # Ticket #82 / issue #79: logged with the audit log's own, more strongly

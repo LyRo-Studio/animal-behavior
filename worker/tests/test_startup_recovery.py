@@ -20,7 +20,7 @@ def _create_job(db_session, *, test_id="T001", email="jan.peeters@vives.be") -> 
     return create_analysis_job(
         db_session,
         requested_by_identity=email,
-        test_id=test_id,
+        test_ids=[test_id],
         cut_keys=[f"cuts/{test_id}/{test_id}_C2_ME_F1.mp4"],
     )
 

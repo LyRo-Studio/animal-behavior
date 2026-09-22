@@ -1367,7 +1367,9 @@ resolved design, not a proposal.
   of email on Home — unrelated to audit logging, split out rather than
   folded in.
 
-**Multi-test analysis (Feature B) — design finalized, not yet built:** an
+**Multi-test analysis (Feature B) — foundation implemented by ticket #89;
+worker/report generation (the analysis-id-first S3 prefix, per-Test report
+splitting) still not built, see that decision's amendment below.** an
 `AnalysisJob` currently belongs to exactly one Test (`test_id`, a single
 required column). This lets one job span up to 10 Tests at once, submitted
 from a single "Analyze selected Tests" action, while keeping today's
@@ -1473,6 +1475,55 @@ single-Test flow byte-for-byte unchanged.
   future ticket: it applies equally to today's single-Test analyses, so
   bundling it here would mix two unrelated concerns into one set of
   tickets.
+
+**Multi-test analysis — foundation (ticket #89):** shipped the schema/API
+half of Feature B above (`CreateAnalysisRequest`, wholesale derivation, the
+10-Test/300-video limits, `AnalysisJobOut`'s Test list). The worker/report
+generation half (analysis-id-first S3 prefix, per-Test report splitting) is
+explicitly deferred to a later ticket, per issue #88's own decomposition —
+not done here.
+
+- **`AnalysisJob.test_id` replaced by a new `analysis_job_tests` table**
+  (`AnalysisJobTest`: `id`, `analysis_id` FK, `test_id`, unique on
+  `(analysis_id, test_id)`, indexed on both `analysis_id` and `test_id`),
+  not a comma-joined string column or a derivation off
+  `analysis_job_videos.cut_key` — matches the design's own reasoning for
+  keeping the per-Test "previous analyses" lookup an indexed join.
+  Migration 0008 backfills existing single-Test rows and is reversible
+  (downgrade collapses a job back to its first associated Test — lossy only
+  for a job that came to span more than one Test after this migration
+  shipped).
+- **A duplicate `test_id` in one request is silently deduped** (order
+  preserved), rather than rejected — selecting the same Test twice is
+  nonsensical, not a real multi-Test request, and would otherwise trip the
+  new `(analysis_id, test_id)` uniqueness constraint. Not spelled out in
+  issue #88's spec; a direct consequence of adding that constraint.
+- **`worker/orchestrator.py` is intentionally *not* updated for real
+  multi-Test processing in this ticket** (that's the deferred
+  "worker/report generation" half above). It now reads `job.test_ids[0]`
+  everywhere it used to read the old `job.test_id` (logging, and the
+  `reports/<test_id>/<id>/` prefix) — correct byte-for-byte for every
+  single-Test job, which is everything the worker has ever processed so
+  far. A multi-Test job *can* now be created (this ticket enables that at
+  the API/service layer, even with no frontend multi-select yet), and if
+  one is, today's worker still runs it correctly end-to-end (same combined
+  `run_reporting` call, Test-oblivious) but files its one combined report
+  under only that job's first Test's prefix — a known, temporary gap closed
+  by the next ticket, not a correctness bug in this one.
+- **Rate limit budget chosen: 10 attempts / 5 minutes per identity**
+  (`create_analysis_rate_limit_*` settings) — deliberately tighter than
+  media-token issuance's 30/5m, since a job (up to 300 videos of real GPU
+  work) is a much heavier action to trigger repeatedly than minting a
+  playback token.
+- **Frontend adapted mechanically, not extended:** `analyses.ts`/
+  `AnalysisView.vue`/`AnalysesHistoryView.vue` were updated to the new
+  `test_ids`/`test_id` wire shape (`createAnalysis` now sends
+  `{test_ids: [testId], cuts}`; the job type exposes `testIds: string[]`)
+  so the existing single-Test flow keeps working end-to-end — this was
+  necessary, not optional, since the old `{test_id, cuts}` request shape is
+  no longer accepted. The multi-select "Analyze selected Tests" UI itself
+  (CONTEXT.md's Feature B "Frontend" bullet above) is still unbuilt; no
+  checkbox/wholesale UI was added here.
 
 **Video cutting + S3 ingestion (Feature C) — design finalized, not yet built:**
 lets a researcher upload a Test's source video(s) and have them sliced into

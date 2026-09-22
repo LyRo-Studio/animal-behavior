@@ -18,7 +18,7 @@ def _create_job(db_session, *, test_id="T001", cut="cuts/T001/T001_C2_ME_F1.mp4"
     return create_analysis_job(
         db_session,
         requested_by_identity="jan.peeters@vives.be",
-        test_id=test_id,
+        test_ids=[test_id],
         cut_keys=[cut],
     )
 
@@ -27,13 +27,13 @@ def test_claim_next_queued_job_claims_oldest_and_sets_running(db_session):
     older = create_analysis_job(
         db_session,
         requested_by_identity="jan.peeters@vives.be",
-        test_id="T001",
+        test_ids=["T001"],
         cut_keys=["cuts/T001/T001_C2_ME_F1.mp4"],
     )
     create_analysis_job(
         db_session,
         requested_by_identity="jan.peeters@vives.be",
-        test_id="T002",
+        test_ids=["T002"],
         cut_keys=["cuts/T002/T002_C2_ME_F1.mp4"],
     )
 
@@ -76,7 +76,7 @@ def test_finalize_analysis_job_partial_success_is_completed_with_errors(db_sessi
     job = create_analysis_job(
         db_session,
         requested_by_identity="jan.peeters@vives.be",
-        test_id="T001",
+        test_ids=["T001"],
         cut_keys=["cuts/T001/T001_C2_ME_F1.mp4", "cuts/T001/T001_C2_ME_F2.mp4"],
     )
     job.videos[0].status = AnalysisJobVideoStatus.SUCCEEDED

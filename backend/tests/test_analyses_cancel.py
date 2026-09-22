@@ -12,7 +12,7 @@ from tests.helpers import identity_headers
 
 def _create_job(client, headers=None, *, test_id="T001", cut="cuts/T001/T001_C2_ME_F1.mp4"):
     response = client.post(
-        "/api/analyses", json={"test_id": test_id, "cuts": [cut]}, headers=headers
+        "/api/analyses", json={"test_ids": [test_id], "cuts": [cut]}, headers=headers
     )
     assert response.status_code == 201, response.text
     return response.json()["id"]

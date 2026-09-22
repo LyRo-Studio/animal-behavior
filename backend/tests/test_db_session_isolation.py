@@ -41,7 +41,7 @@ def test_a_session_commit_inside_a_test_does_not_leak_past_teardown(db_connectio
     create_analysis_job(
         session,
         requested_by_identity=_LEAK_CHECK_IDENTITY,
-        test_id="T001",
+        test_ids=["T001"],
         cut_keys=["cuts/T001/T001_C2_ME_F1.mp4"],
     )
 

@@ -172,7 +172,7 @@ async function downloadReport() {
       <p v-else-if="notFound" class="text-sm text-danger" role="alert">Analysis not found.</p>
 
       <template v-else-if="job">
-        <h2 class="text-lg font-medium text-foreground">Test {{ job.testId }}</h2>
+        <h2 class="text-lg font-medium text-foreground">Test {{ job.testIds.join(', ') }}</h2>
         <p v-if="job.requestedByIdentity" class="mt-1 text-sm text-muted">
           Run by
           <span class="font-medium text-foreground" data-testid="requested-by">{{

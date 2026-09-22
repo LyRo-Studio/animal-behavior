@@ -41,15 +41,15 @@ class AnalysisJobVideoStatus(str, enum.Enum):
 
 class AnalysisJob(Base):
     """A request to run the DogTrace/CASOP pipeline on one or more C2 Cuts
-    of a Test (issue #44). Created `queued` by `POST /analyses`; ticket #47
-    adds the worker that actually claims and runs it — this ticket only
-    creates and persists the row.
+    spanning 1-10 Tests (issue #44; ticket #89 / issue #88's Feature B lets
+    a job span more than one Test). Created `queued` by `POST /analyses`;
+    ticket #47 adds the worker that actually claims and runs it — this
+    ticket only creates and persists the row.
     """
 
     __tablename__ = "analysis_jobs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    test_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     # Ticket #72: the raw identity Mechatronics forwarded when the job was
     # requested (docs/adr/0004-...) — attribution only, so a plain nullable
     # string rather than a foreign key to any account/identity table. Null
@@ -83,6 +83,11 @@ class AnalysisJob(Base):
         cascade="all, delete-orphan",
         order_by="AnalysisJobVideo.position",
     )
+    tests: Mapped[list["AnalysisJobTest"]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="AnalysisJobTest.id",
+    )
 
     @property
     def report_available(self) -> bool:
@@ -92,6 +97,38 @@ class AnalysisJob(Base):
         `report_s3_prefix` itself keeps the API from leaking the internal S3
         layout to the frontend."""
         return self.report_s3_prefix is not None
+
+    @property
+    def test_ids(self) -> list[str]:
+        """Every Test this job touches, in submission order (ticket #89:
+        `AnalysisJobOut` exposes the job's Test association as a list,
+        replacing the old single `test_id` column)."""
+        return [test.test_id for test in self.tests]
+
+
+class AnalysisJobTest(Base):
+    """One Test a given AnalysisJob touches (ticket #89 / issue #88's
+    Feature B) — a job spans 1-10 Tests. Stored once at creation and never
+    mutated afterward, same immutable-after-creation lifecycle the old
+    single `AnalysisJob.test_id` column had, and kept as its own indexed
+    table (rather than derived from `analysis_job_videos.cut_key`, which
+    already embeds a Test id per row) so the per-Test "previous analyses"
+    lookup (ticket #53's `list_analysis_jobs`) stays an indexed join instead
+    of a per-row string match.
+    """
+
+    __tablename__ = "analysis_job_tests"
+    __table_args__ = (
+        UniqueConstraint("analysis_id", "test_id", name="uq_analysis_job_tests_analysis_test"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    analysis_id: Mapped[int] = mapped_column(
+        ForeignKey("analysis_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    test_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+
+    job: Mapped["AnalysisJob"] = relationship(back_populates="tests")
 
 
 class AnalysisJobVideo(Base):

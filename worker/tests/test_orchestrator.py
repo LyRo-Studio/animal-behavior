@@ -20,7 +20,7 @@ def _create_job(
     return create_analysis_job(
         db_session,
         requested_by_identity="jan.peeters@vives.be",
-        test_id=test_id,
+        test_ids=[test_id],
         cut_keys=list(cuts),
     )
 
@@ -229,7 +229,7 @@ def test_process_next_job_processes_only_one_job_at_a_time(db_session, work_root
     second_job = create_analysis_job(
         db_session,
         requested_by_identity="other@vives.be",
-        test_id="T002",
+        test_ids=["T002"],
         cut_keys=["cuts/T002/T002_C2_ME_F1.mp4"],
     )
     s3_client = FakeS3Client()

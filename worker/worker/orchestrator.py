@@ -55,9 +55,9 @@ def process_next_job(
         return False
 
     logger.info(
-        "analysis_id=%s test_id=%s claimed by worker",
+        "analysis_id=%s test_ids=%s claimed by worker",
         job.id,
-        job.test_id,
+        job.test_ids,
     )
 
     job_dir = work_root / str(job.id)
@@ -81,9 +81,9 @@ def process_next_job(
             # after being requeued on restart, crash-loop forever without
             # ever reaching the next queued job.
             logger.exception(
-                "analysis_id=%s test_id=%s unhandled error while processing job",
+                "analysis_id=%s test_ids=%s unhandled error while processing job",
                 job.id,
-                job.test_id,
+                job.test_ids,
             )
             _fail_after_unhandled_error(db, job)
     finally:
@@ -159,9 +159,9 @@ def _run_claimed_job(
             )
         except Exception:
             logger.exception(
-                "analysis_id=%s test_id=%s run_reporting failed before completing every video",
+                "analysis_id=%s test_ids=%s run_reporting failed before completing every video",
                 job.id,
-                job.test_id,
+                job.test_ids,
             )
             # A video already resolved (e.g. a download failure above, or a
             # progress callback that already reached a terminal status)
@@ -189,10 +189,10 @@ def _run_claimed_job(
             for video in job.videos:
                 if video.status in _OPEN_STATUSES:
                     logger.warning(
-                        "analysis_id=%s test_id=%s cut_key=%s never "
+                        "analysis_id=%s test_ids=%s cut_key=%s never "
                         "reached a terminal status from dogtrace's progress callback",
                         job.id,
-                        job.test_id,
+                        job.test_ids,
                         video.cut_key,
                     )
                     video.status = AnalysisJobVideoStatus.FAILED
@@ -223,9 +223,9 @@ def _download_video(
         s3_client.download_file(video.cut_key, local_path)
     except S3ObjectNotFoundError:
         logger.warning(
-            "analysis_id=%s test_id=%s cut_key=%s not found in storage",
+            "analysis_id=%s test_ids=%s cut_key=%s not found in storage",
             job.id,
-            job.test_id,
+            job.test_ids,
             video.cut_key,
         )
         video.status = AnalysisJobVideoStatus.FAILED
@@ -287,11 +287,21 @@ def _upload_artifacts(s3_client: S3Client, output_dir: Path, job: AnalysisJob) -
     failed for every requested Cut) — `report_s3_prefix`/
     `AnalysisJob.report_available` must never point at an S3 prefix with
     nothing in it.
+
+    Uses `job.test_ids[0]` — the job's *first* Test in submission order —
+    to lead the prefix, same value `job.test_id` (the single-Test column
+    ticket #89 replaced) always held for the single-Test jobs this worker
+    has only ever processed so far. CONTEXT.md's Feature B design flips
+    this to an analysis-id-first prefix plus a per-Test report split once a
+    job can genuinely span more than one Test — deliberately a separate,
+    later ticket ("Worker/report generation"), not part of #89's
+    schema/API-only scope. A multi-Test job run through today's worker
+    still files its one combined report here, under only its first Test.
     """
     if not output_dir.exists():
         return None
 
-    prefix = f"reports/{job.test_id}/{job.id}/"
+    prefix = f"reports/{job.test_ids[0]}/{job.id}/"
     uploaded_anything = False
     for local_path in sorted(output_dir.rglob("*")):
         if not local_path.is_file():

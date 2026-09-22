@@ -87,6 +87,17 @@ class Settings(BaseSettings):
     cut_info_rate_limit_max_attempts_per_identity: int = 30
     cut_info_rate_limit_window_seconds: int = 300
 
+    # Ticket #89 (Multi-Test job foundation, part of issue #88's Feature B):
+    # POST /analyses is now a more expensive thing to trigger repeatedly
+    # than a plain single-Test submission was (up to 10 Tests/300 videos
+    # wholesale-derived per call) — rate limited per identity, same
+    # rate_limit.py machinery as media-token issuance and /media/cuts/info.
+    # A generous budget: sized not to affect normal single-job usage
+    # (CONTEXT.md's Feature B decision), unlike those two which guard a
+    # much cheaper-to-legitimately-repeat action.
+    create_analysis_rate_limit_max_attempts_per_identity: int = 10
+    create_analysis_rate_limit_window_seconds: int = 300
+
     # Ticket #47 (Analysis worker, part of #44): polling interval and the
     # job-scoped temp-file root for the separate `worker` Docker service —
     # see CONTEXT.md's "Analysis worker" decisions. Settings is reused as-is
