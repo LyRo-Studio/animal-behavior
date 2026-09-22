@@ -2,7 +2,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.models.analysis_job import AnalysisJob, AnalysisJobStatus, AnalysisJobVideoStatus
+from app.models.audit_log import AuditAction, AuditLog
 from app.services.analyses import create_analysis_job
+from sqlalchemy import select
 
 from tests.doubles import FakeDogTraceRunner, FakeS3Client
 from worker.dogtrace_runner import ProgressCallback
@@ -27,6 +29,20 @@ def _create_job(
 
 def _seed_cut(s3_client: FakeS3Client, cut_key: str) -> None:
     s3_client.objects[cut_key] = b"fake-video-bytes"
+
+
+def _audit_rows_for(db_session, job: AnalysisJob) -> list[AuditLog]:
+    # Filters on this job's own target rather than assuming `audit_log`
+    # starts empty — this suite runs against a real Postgres database that,
+    # outside CI, may be a long-lived shared instance also written to by
+    # other processes/tests, not a pristine one scoped to this test alone.
+    return list(
+        db_session.scalars(
+            select(AuditLog).where(
+                AuditLog.target_type == "analysis_job", AuditLog.target == str(job.id)
+            )
+        )
+    )
 
 
 def test_process_next_job_returns_false_when_queue_empty(db_session, work_root):
@@ -64,6 +80,50 @@ def test_process_next_job_all_videos_succeed_completes_and_uploads_report(db_ses
     assert f"reports/T001/{job.id}/casiop_report.xlsx" in uploaded_keys
     assert not (work_root / str(job.id)).exists()
 
+    # Ticket #84: a job finishing `completed` writes ANALYSIS_COMPLETED,
+    # attributed to the job's own `requested_by_identity` (no live request
+    # to verify a JWT against, so `identity_verified` is always False).
+    (audit_row,) = _audit_rows_for(db_session, job)
+    assert audit_row.action == AuditAction.ANALYSIS_COMPLETED
+    assert audit_row.target_type == "analysis_job"
+    assert audit_row.target == str(job.id)
+    assert audit_row.identity == "jan.peeters@vives.be"
+    assert audit_row.identity_verified is False
+    assert audit_row.failure_reason is None
+
+
+def test_process_next_job_survives_a_failed_audit_write_after_success(
+    db_session, work_root, monkeypatch
+):
+    # Regression test (caught in review): a failure while recording/
+    # committing the audit row — after `finalize_analysis_job` has already
+    # durably committed the job's real COMPLETED outcome — must never
+    # propagate into `process_next_job`'s generic exception handler. That
+    # handler's recovery (`_fail_after_unhandled_error`) unconditionally
+    # fails every video and re-finalizes the job, which would otherwise
+    # silently overwrite an already-succeeded, already-persisted result
+    # with `failed` and wipe its report prefix.
+    job = _create_job(db_session)
+    s3_client = FakeS3Client()
+    _seed_cut(s3_client, "cuts/T001/T001_C2_ME_F1.mp4")
+    dogtrace_runner = FakeDogTraceRunner()
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("simulated audit write failure")
+
+    monkeypatch.setattr("worker.orchestrator.record_audit_event", _raise)
+
+    processed = process_next_job(
+        db_session, s3_client=s3_client, dogtrace_runner=dogtrace_runner, work_root=work_root
+    )
+
+    assert processed is True
+    db_session.refresh(job)
+    assert job.status == AnalysisJobStatus.COMPLETED
+    assert job.report_s3_prefix == f"reports/T001/{job.id}/"
+    assert job.videos[0].status == AnalysisJobVideoStatus.SUCCEEDED
+    assert _audit_rows_for(db_session, job) == []
+
 
 def test_process_next_job_partial_failure_completes_with_errors(db_session, work_root):
     job = _create_job(
@@ -89,6 +149,18 @@ def test_process_next_job_partial_failure_completes_with_errors(db_session, work
     assert "Traceback" not in failed_video.failure_reason
     assert job.report_s3_prefix == f"reports/T001/{job.id}/"
 
+    # Ticket #84: a job finishing `completed_with_errors` writes
+    # ANALYSIS_COMPLETED_WITH_ERRORS with a short, bounded failure_reason.
+    (audit_row,) = _audit_rows_for(db_session, job)
+    assert audit_row.action == AuditAction.ANALYSIS_COMPLETED_WITH_ERRORS
+    assert audit_row.target_type == "analysis_job"
+    assert audit_row.target == str(job.id)
+    assert audit_row.identity == "jan.peeters@vives.be"
+    assert audit_row.identity_verified is False
+    assert audit_row.failure_reason
+    assert "Traceback" not in audit_row.failure_reason
+    assert len(audit_row.failure_reason) <= 500
+
 
 def test_process_next_job_all_videos_fail_pipeline_is_failed_with_no_report(db_session, work_root):
     job = _create_job(db_session)
@@ -105,6 +177,17 @@ def test_process_next_job_all_videos_fail_pipeline_is_failed_with_no_report(db_s
     assert job.videos[0].status == AnalysisJobVideoStatus.FAILED
     assert job.report_s3_prefix is None
     assert not (work_root / str(job.id)).exists()
+
+    # Ticket #84: a job finishing `failed` writes ANALYSIS_FAILED with a
+    # short, bounded failure_reason.
+    (audit_row,) = _audit_rows_for(db_session, job)
+    assert audit_row.action == AuditAction.ANALYSIS_FAILED
+    assert audit_row.target_type == "analysis_job"
+    assert audit_row.target == str(job.id)
+    assert audit_row.identity == "jan.peeters@vives.be"
+    assert audit_row.identity_verified is False
+    assert audit_row.failure_reason
+    assert "Traceback" not in audit_row.failure_reason
 
 
 def test_process_next_job_missing_cut_fails_only_that_video(db_session, work_root):
@@ -222,6 +305,15 @@ def test_process_next_job_survives_an_unhandled_error_and_fails_only_that_job(
     assert job.videos[0].failure_reason
     assert "RuntimeError" not in job.videos[0].failure_reason
     assert not (work_root / str(job.id)).exists()
+
+    # Ticket #84: `_fail_after_unhandled_error`'s recovery path also reaches
+    # a terminal `failed` status and must write its ANALYSIS_FAILED row,
+    # exactly like the normal path does.
+    (audit_row,) = _audit_rows_for(db_session, job)
+    assert audit_row.action == AuditAction.ANALYSIS_FAILED
+    assert audit_row.identity == "jan.peeters@vives.be"
+    assert audit_row.identity_verified is False
+    assert audit_row.failure_reason
 
 
 def test_process_next_job_processes_only_one_job_at_a_time(db_session, work_root):
