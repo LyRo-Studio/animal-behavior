@@ -20,6 +20,12 @@ services:
   worker:
     image: ${WORKER_IMAGE_REF:?Set WORKER_IMAGE_REF (see .github/workflows/deploy.yml)}
 
+  # `cutting-worker` keeps its base-file `profiles: ["cutting-worker"]` gate
+  # unchanged (ticket #95) — this only swaps its `build:` for an `image:`,
+  # same as `worker` above.
+  cutting-worker:
+    image: ${CUTTING_WORKER_IMAGE_REF:?Set CUTTING_WORKER_IMAGE_REF (see .github/workflows/deploy.yml)}
+
   # 5173 is the port Mechatronics forwards dogtrace.mechatronics.be to — kept
   # so nginx replaces the frontend there without any change on their side.
   # 8000 is nginx's API-only listener, for a Mechatronics `/api` route that
