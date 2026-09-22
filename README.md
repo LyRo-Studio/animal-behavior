@@ -85,24 +85,10 @@ Deploy (`.github/workflows/deploy.yml`) triggers automatically once `ci.yml` suc
 **Production configuration** lives in the repo's `production` GitHub Environment (Settings → Environments), not in a hand-edited file on the box. Each deploy regenerates `.env` from it (`chmod 600`, never logged), so rotating a secret means updating GitHub and redeploying.
 
 - Secrets: `POSTGRES_PASSWORD`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `MEDIA_TOKEN_SECRET_KEY`.
-- Variables: `S3_BUCKET`, `S3_ENDPOINT`; optionally `POSTGRES_USER`, `POSTGRES_DB`, `S3_ADDRESSING_STYLE`, `CORS_ORIGINS` (unused in production since everything is one origin), `IDENTITY_HEADER_NAME` (empty until the real header name is known — the backend then reads no identity).
+- Variables: `S3_BUCKET`, `S3_ENDPOINT`; optionally `POSTGRES_USER`, `POSTGRES_DB`, `S3_ADDRESSING_STYLE`, `CORS_ORIGINS` (unused in production since everything is one origin), `IDENTITY_HEADER_NAME` (the header Mechatronics forwards the caller's identity in — `X-authentik-email` in production; empty means the backend reads no identity, which is also what local development runs with).
 - No value may contain a single quote or a line break, and `POSTGRES_PASSWORD` may only contain letters, digits and `. _ ~ -` (it is embedded unescaped in `DATABASE_URL`). The deploy fails immediately, naming the variable, if not.
 - Recommended: restrict the Environment's deployment branches to `master`.
 - See `CONTEXT.md`'s "CI/CD retarget (ticket #70)" for the reasoning.
-
-### Discovering the identity header
-
-Until `IDENTITY_HEADER_NAME` is set, analyses are attributed to no one. To find the header Mechatronics forwards (and to check whether a native `<video>` request carries it — the media-token question in issue #72):
-
-1. Set the `DEBUG_REQUEST_HEADERS_ENABLED` variable to `true` in the `production` Environment and redeploy (re-run the latest Deploy workflow).
-2. On the hosted site, open the browser console and run:
-   ```js
-   fetch('/api/debug/request-headers').then(r => r.json()).then(d => { console.table(d.headers); console.log(d) })
-   ```
-   Find the header that holds your own identity. Credentials are shown as `[redacted]` — by name (`cookie`, `authorization`, anything with `token`/`secret`/`key`/`session`/… in it) and by value (JWTs, `Bearer …`) — and query strings are cut from every value.
-3. Set `IDENTITY_HEADER_NAME` to that name and redeploy — Home then shows "Signed in as …".
-4. Play a Cut in the Media Browser, then run the same `fetch` again and look at `recent_media_requests`: each entry lists the header *names* of a `/media/stream` request (never values or the token) and `identity_header_present`. `true` for `sec_fetch_dest: "video"` means native requests carry the identity header, so the media-token mechanism can be removed (issue #72's "If the gate passes" list).
-5. Set `DEBUG_REQUEST_HEADERS_ENABLED` back to `false` (or delete it) and redeploy.
 
 A plain local `docker compose up` never touches `docker-compose.prod.yml` and always builds from source, unaffected by any of this. Don't run `docker compose` by hand on the production box without the `-f docker-compose.yml -f docker-compose.prod.yml` pair — without it compose builds from source and publishes no port at all.
 

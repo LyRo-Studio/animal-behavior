@@ -94,13 +94,10 @@ jobs:
           POSTGRES_USER: ${{ vars.POSTGRES_USER }}
           POSTGRES_DB: ${{ vars.POSTGRES_DB }}
           S3_ADDRESSING_STYLE: ${{ vars.S3_ADDRESSING_STYLE }}
-          # May be empty until the real header name is discovered on
-          # `dogtrace-app` (ticket #72's diagnostic step) — empty means the
+          # Ticket #72: name of the header Mechatronics forwards the caller's
+          # identity in (X-authentik-email in production). Empty means the
           # backend reads no identity at all.
           IDENTITY_HEADER_NAME: ${{ vars.IDENTITY_HEADER_NAME }}
-          # Temporary (ticket #72's header discovery): `true` enables the
-          # request-header diagnostic endpoint. Leave unset otherwise.
-          DEBUG_REQUEST_HEADERS_ENABLED: ${{ vars.DEBUG_REQUEST_HEADERS_ENABLED }}
           # Vestigial in production since ticket #71: the site is one origin behind
           # nginx, so no cross-origin request is ever made. Kept optional in case a
           # value is still set; compose's default applies when it is empty.
@@ -116,7 +113,7 @@ jobs:
           )
           optional=(
             POSTGRES_USER POSTGRES_DB S3_ADDRESSING_STYLE IDENTITY_HEADER_NAME
-            CORS_ORIGINS DEBUG_REQUEST_HEADERS_ENABLED
+            CORS_ORIGINS
           )
 
           missing=()
