@@ -1,6 +1,8 @@
 import pytest
+from sqlalchemy import select
 
 from app.models.analysis_job import AnalysisJob, AnalysisJobStatus
+from app.models.audit_log import AuditAction, AuditLog
 from tests.helpers import identity_headers
 
 # Ticket #46's acceptance criteria: exercised through the HTTP API. No
@@ -37,6 +39,59 @@ def test_cancel_a_queued_job_sets_status_to_cancelled(client, db_session):
     get_response = client.get(f"/api/analyses/{analysis_id}")
     assert get_response.json()["status"] == "cancelled"
     assert get_response.json()["finished_at"] is not None
+
+
+def test_cancel_a_queued_job_writes_an_analysis_cancelled_audit_row(client, db_session):
+    """Ticket #83 / issue #79: mirrors test_analyses.py's own
+    ANALYSIS_STARTED coverage — attributed via `get_verified_identity`,
+    independent of the ordinary, unverified attribution on the job itself.
+    `_create_job` already writes its own ANALYSIS_STARTED row, so this
+    filters by action rather than assuming this is the only row."""
+    analysis_id = _create_job(client)
+
+    response = client.post(f"/api/analyses/{analysis_id}/cancel")
+
+    assert response.status_code == 200, response.text
+    row = db_session.scalar(
+        select(AuditLog).where(AuditLog.action == AuditAction.ANALYSIS_CANCELLED)
+    )
+    assert row is not None
+    assert row.target_type == "analysis_job"
+    assert row.target == str(analysis_id)
+    assert row.identity is None
+    assert row.identity_verified is False
+
+
+def test_cancel_audit_row_carries_the_authentik_email_header_unverified(client, db_session):
+    """No JWT/JWKS headers sent, so the row is unverified — but the plain
+    `X-authentik-email` value is still recorded (ADR-0005), same as
+    test_analyses.py's own equivalent coverage for ANALYSIS_STARTED."""
+    analysis_id = _create_job(client)
+
+    response = client.post(
+        f"/api/analyses/{analysis_id}/cancel",
+        headers={"X-authentik-email": "jan.peeters@vives.be"},
+    )
+    assert response.status_code == 200
+
+    row = db_session.scalar(
+        select(AuditLog).where(AuditLog.action == AuditAction.ANALYSIS_CANCELLED)
+    )
+    assert row.identity == "jan.peeters@vives.be"
+    assert row.identity_verified is False
+
+
+def test_cancel_a_non_queued_job_does_not_write_an_analysis_cancelled_audit_row(client, db_session):
+    analysis_id = _create_job(client)
+    _set_status(db_session, analysis_id, AnalysisJobStatus.RUNNING)
+
+    response = client.post(f"/api/analyses/{analysis_id}/cancel")
+
+    assert response.status_code == 409
+    assert (
+        db_session.scalar(select(AuditLog).where(AuditLog.action == AuditAction.ANALYSIS_CANCELLED))
+        is None
+    )
 
 
 @pytest.mark.parametrize(
