@@ -49,6 +49,9 @@ Which segment of a Test a Cut represents, encoded as `F1`–`F8` (Fase 1–8, Du
 An immutable, accountability-purpose record of "who did what, to what, when" for meaningful application actions — not every click. Distinct from **Job History** (an `AnalysisJob`'s own lifecycle, already readable directly off its own table — no separate storage needed for that) and from an **Activity Feed** (a friendly, best-effort "what's been happening" view — not yet built, deferred). Rows are never edited; the retention prune removes them after a fixed window, which is deletion under a stated policy, not the kind of edit/rewrite immutability rules out. See "Audit log (Feature A)" below for the finalized design.
 _Avoid_: "activity log" for this specific table — an earlier draft (issue #79) used that name; renamed once the table's accountability purpose was confirmed over a looser "convenience" reading (Session 0 grilling).
 
+**Wholesale (Test selection), Feature B:**
+Selecting a Test for analysis without hand-picking its individual Cuts — every C2-eligible Cut the Test currently has is included automatically. Distinct from ordinary (per-video) selection, where the caller names exact Cut keys. Wholesale is the only mode once more than one Test is selected; per-video hand-picking stays available only when exactly one Test is selected. See "Multi-test analysis (Feature B)" below.
+
 ## Decisions & Approved Deviations
 
 **Scope (this round) — superseded by ticket #72 (application auth removed; kept as history):** Covers only Account/Admin/User management (login,
@@ -1357,4 +1360,111 @@ resolved design, not a proposal.
 - **Not addressed here:** #79 also raised showing `X-authentik-name` instead
   of email on Home — unrelated to audit logging, split out rather than
   folded in.
+
+**Multi-test analysis (Feature B) — design finalized, not yet built:** an
+`AnalysisJob` currently belongs to exactly one Test (`test_id`, a single
+required column). This lets one job span up to 10 Tests at once, submitted
+from a single "Analyze selected Tests" action, while keeping today's
+single-Test flow byte-for-byte unchanged.
+
+- **Selection is wholesale for multi-Test, per-video for single-Test.**
+  Checking more than one Test includes every C2-eligible Cut in each
+  automatically (see Language's "Wholesale"); hand-picking individual Cuts
+  stays available only when exactly one Test is selected — the existing
+  flow, unchanged, including its 1–200 Cut range. A "select all Cuts in
+  this Test" convenience is added for the single-Test case too, since it
+  doesn't exist today even there.
+- **`dogtrace.runner.run_reporting` (the externally-versioned
+  `dogtrace-core` package) is already entirely Test-oblivious** — a flat
+  list of video paths in, the model loaded once for the whole call (ticket
+  #48), one combined `casiop_report.xlsx` out, with every row already
+  carrying `info_video`/`info_test_id` parsed from the filename. This is
+  what makes the rest of this feature cheap: no change to that package is
+  needed anywhere.
+- **API request shape unifies into one schema, not two:**
+  `{test_ids: list[str], cuts: list[str] | None}`. `cuts` given is only
+  valid when `test_ids` has exactly one entry (today's exact request,
+  unchanged in meaning). `cuts` omitted means wholesale — the backend
+  derives every listed Test's C2-eligible Cuts itself, reusing
+  `media_browser.py`'s existing S3-listing service rather than a second,
+  parallel Cut-discovery path.
+- **`AnalysisJob.test_id` (singular) is replaced by a stored, indexed
+  multi-Test association**, set once at job creation and never mutated
+  afterward — same immutable-after-creation lifecycle `test_id` already
+  has today, chosen over deriving "which Tests does this job touch" from
+  `analysis_job_videos.cut_key` on every query, which would turn the
+  existing indexed "previous analyses for Test X" lookup (ticket #53) into
+  a per-row string match.
+- **Cut filenames are already globally unique across Tests**
+  (`T041_C2_ME_F1.mp4` vs. `T002_C2_ME_F1.mp4`, ...), confirmed against
+  the real bucket — the worker's existing flat per-job input directory
+  needs no structural change to hold videos from several Tests in one job.
+  The per-video download/progress-callback/failure-handling loop
+  (tickets #47/#48) is likewise already Test-oblivious and needs no
+  change.
+- **Report generation, once a job spans more than one Test:** the same
+  single `run_reporting` call (all the job's videos together, one model
+  load) still produces one combined report; the worker additionally
+  groups that same already-produced, already-per-row-attributed data by
+  `info_test_id` and writes one file per Test — pure post-processing
+  inside `worker/dogtrace_runner.py` (the sole seam into DogTrace), not a
+  second `run_reporting` call and not a change to `dogtrace-core`. A
+  single-Test job produces only the one combined file, exactly as today —
+  splitting it would just duplicate it.
+- **S3 report prefix flips to analysis-id-first:**
+  `reports/<analysis_id>/casiop_report.xlsx` (combined, every job) and
+  `reports/<analysis_id>/<test_id>/casiop_report.xlsx` (per-Test splits,
+  multi-Test jobs only) — replaces `reports/<test_id>/<analysis_id>/`,
+  which only made sense when a job had exactly one Test to lead with.
+  Existing report objects at the old path aren't touched or migrated;
+  `report_s3_prefix` is stored per job, so old and new jobs each keep
+  whatever prefix scheme was current when they ran.
+- **Download surface unchanged.** `GET /analyses/{id}/report` still serves
+  only the combined file — per-Test split files land in S3 but aren't
+  individually downloadable this round (same "only casiop_report.xlsx is
+  exposed in v1" scoping as ticket #49).
+- **No new job status.** The existing `completed`/`completed_with_errors`/
+  `failed` tri-state is computed exactly as today, purely from the set of
+  `AnalysisJobVideo` statuses — it was already unaware of how many Tests
+  those videos span. A per-Test/per-video breakdown (e.g. "T041: 8/8,
+  T002: 6/7, T003: 5/5") is a display/aggregation concern, computed by
+  grouping existing per-video data by the Test embedded in each
+  `cut_key` — not a new stored value. A genuinely independent per-Test
+  status was considered and rejected: it would mean a multi-Test job
+  isn't really one job, closer to several jobs sharing one submission
+  action — a much bigger redesign than this feature needs.
+- **Limits: 10 Tests per job, 300 total videos per job (backstop),
+  requests over either limit are rejected outright (400) — no
+  auto-splitting into multiple jobs.** A fully-populated Test structurally
+  tops out at 16 C2 videos (2 conditions × Phase F1–F8, confirmed against
+  the real bucket — `cuts/T001/` has exactly 16), so 10 Tests caps out
+  around 160 in the normal case; 300 is headroom insurance, not an
+  expected ceiling. Auto-splitting into several jobs was considered and
+  rejected: it introduces a new "logical batch spanning several
+  `AnalysisJob` rows" concept, needing its own grouped-progress UI and
+  history treatment, for a problem a clear rejection message already
+  solves.
+- **No cap on queued-job depth, no new disk-space check, no worker/GPU
+  concurrency change.** A `queued` row costs one DB row regardless of job
+  size — the actual constraints (worker time, disk, GPU) are already
+  bounded per-job by the limits above. Disk: ~14.4GB worst case at 160
+  videos × ~90MB (confirmed against real object sizes), well within
+  `dogtrace-app`'s free space. GPU: confirmed against the real box
+  (`nvidia-smi`: RTX 4000 SFF Ada, 20GB VRAM, ~312MiB in use) — the worker
+  already processes exactly one video at a time regardless of job size
+  (no batching at the GPU level), so a bigger job means longer duration,
+  not higher peak load. Still exactly one worker instance, one job at a
+  time, unchanged by this feature.
+- **New per-identity rate limit on `POST /analyses`** (reusing
+  `rate_limit.py`, same machinery as media-token issuance and
+  `/media/cuts/info`) — a job is now a more expensive thing to trigger
+  repeatedly than it was before this feature.
+- **Out of scope, deliberately:** per-video trace-image downloads (`_dog_
+  trace.jpg`/`_fp_trace.jpg`/`_tp_trace.jpg`/`_contact_trace.jpg` —
+  already produced and uploaded to S3 for every analysis today, single-
+  Test included, just never exposed as a download, per ticket #49's
+  original v1 scoping). Raised during this session but split into its own
+  future ticket: it applies equally to today's single-Test analyses, so
+  bundling it here would mix two unrelated concerns into one set of
+  tickets.
 
