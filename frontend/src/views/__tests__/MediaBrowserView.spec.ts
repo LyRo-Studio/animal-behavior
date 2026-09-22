@@ -680,7 +680,7 @@ describe('MediaBrowserView', () => {
   it('starts an analysis for the selected C2 Cuts and navigates to its detail page', async () => {
     listTestIdsMock.mockResolvedValue(['T001'])
     listCutsMock.mockResolvedValue([C1_CUT, C2_CUT])
-    createAnalysisMock.mockResolvedValue({ id: 42, testId: 'T001' })
+    createAnalysisMock.mockResolvedValue({ id: 42, testIds: ['T001'] })
     const router = createTestRouter()
     router.push('/media')
     await router.isReady()
@@ -768,7 +768,7 @@ describe('MediaBrowserView', () => {
     listTestIdsMock.mockResolvedValue(['T001'])
     listCutsMock.mockResolvedValue([C2_CUT])
     listAnalysesMock.mockResolvedValue([
-      { id: 42, testId: 'T001', status: 'completed', createdAt: '2026-01-02T10:00:00Z' },
+      { id: 42, testIds: ['T001'], status: 'completed', createdAt: '2026-01-02T10:00:00Z' },
     ])
     const wrapper = await mountView()
     await searchForSampleCut(wrapper)
@@ -786,14 +786,14 @@ describe('MediaBrowserView', () => {
     listAnalysesMock.mockResolvedValue([
       {
         id: 42,
-        testId: 'T001',
+        testIds: ['T001'],
         requestedByIdentity: 'jan.peeters@vives.be',
         status: 'completed',
         createdAt: '2026-01-02T10:00:00Z',
       },
       {
         id: 41,
-        testId: 'T001',
+        testIds: ['T001'],
         requestedByIdentity: null,
         status: 'failed',
         createdAt: '2026-01-01T10:00:00Z',
@@ -811,7 +811,7 @@ describe('MediaBrowserView', () => {
     listTestIdsMock.mockResolvedValue(['T001'])
     listCutsMock.mockRejectedValue(new TestNotFoundError('not found'))
     listAnalysesMock.mockResolvedValue([
-      { id: 42, testId: 'T001', status: 'completed', createdAt: '2026-01-02T10:00:00Z' },
+      { id: 42, testIds: ['T001'], status: 'completed', createdAt: '2026-01-02T10:00:00Z' },
     ])
     const wrapper = await mountView()
     await searchForSampleCut(wrapper)
@@ -829,7 +829,7 @@ describe('MediaBrowserView', () => {
     listTestIdsMock.mockResolvedValue(['T001'])
     listCutsMock.mockRejectedValue(new Error('boom'))
     listAnalysesMock.mockResolvedValue([
-      { id: 42, testId: 'T001', status: 'completed', createdAt: '2026-01-02T10:00:00Z' },
+      { id: 42, testIds: ['T001'], status: 'completed', createdAt: '2026-01-02T10:00:00Z' },
     ])
     const wrapper = await mountView()
     await searchForSampleCut(wrapper)
@@ -880,7 +880,7 @@ describe('MediaBrowserView', () => {
     // T001's request resolves after T002 is already showing — must not
     // resurrect T001's stale analysis into T002's panel.
     resolveFirst([
-      { id: 1, testId: 'T001', status: 'completed', createdAt: '2026-01-01T00:00:00Z' },
+      { id: 1, testIds: ['T001'], status: 'completed', createdAt: '2026-01-01T00:00:00Z' },
     ])
     await flushPromises()
 

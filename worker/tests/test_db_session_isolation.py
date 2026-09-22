@@ -14,7 +14,7 @@ through a completely independent connection.
 """
 
 from app.core.config import settings
-from app.models.analysis_job import AnalysisJob
+from app.models.analysis_job import AnalysisJob, AnalysisJobTest
 from app.services.analyses import create_analysis_job
 from sqlalchemy import create_engine, select
 
@@ -30,7 +30,7 @@ def test_create_analysis_job_inside_a_test_does_not_leak_past_teardown(db_connec
     create_analysis_job(
         session,
         requested_by_identity=None,
-        test_id=_LEAK_CHECK_TEST_ID,
+        test_ids=[_LEAK_CHECK_TEST_ID],
         cut_keys=[f"cuts/{_LEAK_CHECK_TEST_ID}/{_LEAK_CHECK_TEST_ID}_C2_ME_F1.mp4"],
     )
 
@@ -43,7 +43,9 @@ def test_create_analysis_job_inside_a_test_does_not_leak_past_teardown(db_connec
     try:
         with engine.connect() as verification_connection:
             leaked = verification_connection.execute(
-                select(AnalysisJob.id).where(AnalysisJob.test_id == _LEAK_CHECK_TEST_ID)
+                select(AnalysisJob.id)
+                .join(AnalysisJobTest)
+                .where(AnalysisJobTest.test_id == _LEAK_CHECK_TEST_ID)
             ).first()
     finally:
         engine.dispose()

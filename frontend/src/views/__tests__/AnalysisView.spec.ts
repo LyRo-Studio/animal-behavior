@@ -42,7 +42,7 @@ async function mountView(id: string | number = 42) {
 function job(overrides: Record<string, unknown> = {}) {
   return {
     id: 42,
-    testId: 'T001',
+    testIds: ['T001'],
     requestedByIdentity: 'jan.peeters@vives.be',
     status: 'queued',
     dogtraceVersion: null,

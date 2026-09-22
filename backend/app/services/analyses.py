@@ -13,10 +13,12 @@ from sqlalchemy.orm import Session, selectinload
 from app.models.analysis_job import (
     AnalysisJob,
     AnalysisJobStatus,
+    AnalysisJobTest,
     AnalysisJobVideo,
     AnalysisJobVideoStatus,
 )
-from app.services.media_browser import CutNotFoundError, parse_cut_key
+from app.services.media_browser import CutNotFoundError, list_cuts_for_test, parse_cut_key
+from app.services.s3_client import S3Client
 
 # DogTrace only ever processes camera C2, and only a filename matching this
 # exact shape, case-insensitively (CONTEXT.md's "DogTrace integration
@@ -33,12 +35,51 @@ _DOGTRACE_C2_FILENAME_RE = re.compile(r"^T\d{3}_C2_(ME|ZE)_F\d+\.mp4$", re.IGNOR
 # config.json, trace images) stays un-surfaced.
 REPORT_FILENAME = "casiop_report.xlsx"
 
+# Ticket #89 / issue #88's Feature B limits: 10 Tests per job, 300 total
+# videos per job (backstop) — a fully-populated Test structurally tops out
+# at 16 C2 videos, so 10 Tests caps out around 160 in the normal case; 300
+# is headroom insurance, not an expected ceiling (CONTEXT.md's Feature B
+# decision). Both are backstops over CreateAnalysisRequest's own schema-level
+# `test_ids` bound — re-checked here for a direct caller of
+# `create_analysis_job` that bypasses the schema, same reasoning as
+# EmptyCutSelectionError below.
+MAX_TESTS_PER_JOB = 10
+MAX_VIDEOS_PER_JOB = 300
+
 
 class EmptyCutSelectionError(Exception):
-    """Raised when a request selects zero Cuts — there's nothing to analyze.
-    (Pydantic's `min_length=1` on the request already rejects this at the
-    schema layer; this only guards direct callers of `create_analysis_job`.)
+    """Raised when a request resolves to zero Cuts to analyze — either an
+    explicit empty selection, or wholesale derivation finding no
+    C2-eligible Cut across every listed Test. (Pydantic's `min_length=1` on
+    the request's `test_ids`/`cuts` already rejects the obvious cases at the
+    schema layer; this also covers a direct caller of `create_analysis_job`,
+    and wholesale derivation genuinely finding nothing.)
     """
+
+
+class TooManyTestsError(Exception):
+    """Raised when a request lists more than `MAX_TESTS_PER_JOB` Tests."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        super().__init__(count)
+
+
+class TooManyVideosError(Exception):
+    """Raised when the resolved video count (wholesale-derived or, for the
+    single-Test case, explicitly selected) exceeds `MAX_VIDEOS_PER_JOB`."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        super().__init__(count)
+
+
+class CutsWithMultipleTestsError(Exception):
+    """Raised when `cuts` is given alongside more than one `test_id` —
+    hand-picking individual Cuts stays available only when exactly one Test
+    is selected (CONTEXT.md's Feature B "Selection is wholesale for
+    multi-Test, per-video for single-Test" decision); wholesale (`cuts`
+    omitted) is the only mode once more than one Test is listed."""
 
 
 class InvalidCutSelectionError(Exception):
@@ -81,27 +122,77 @@ def _validate_cut_key(test_id: str, key: str) -> None:
         raise InvalidCutSelectionError(key)
 
 
-def create_analysis_job(
-    db: Session, *, requested_by_identity: str | None, test_id: str, cut_keys: list[str]
-) -> AnalysisJob:
-    """Create a `queued` AnalysisJob requesting analysis of `cut_keys`
-    within `test_id`, attributed to `requested_by_identity` (the identity
-    Mechatronics forwarded, or None — attribution only, never authorization).
-
-    Validates every key before creating anything (see `_validate_cut_key`)
-    — the whole request is rejected and no job is created if any key fails,
-    never a partial job (issue #44's S3 input flow, step 1).
+def _wholesale_cut_keys(s3: S3Client, test_id: str) -> list[str]:
+    """Every C2-eligible Cut key for `test_id` — wholesale selection
+    (CONTEXT.md's Feature B decision), reusing `media_browser.py`'s existing
+    Cut-listing service and the same `_DOGTRACE_C2_FILENAME_RE` an explicit
+    selection is validated against, rather than a second, parallel
+    Cut-discovery path. Propagates `TestNotFoundError` (from
+    `list_cuts_for_test`) for an unknown Test id.
     """
-    if not cut_keys:
+    cuts = list_cuts_for_test(s3, test_id)
+    return [cut.key for cut in cuts if _DOGTRACE_C2_FILENAME_RE.match(cut.filename)]
+
+
+def create_analysis_job(
+    db: Session,
+    *,
+    requested_by_identity: str | None,
+    test_ids: list[str],
+    cut_keys: list[str] | None = None,
+    s3: S3Client | None = None,
+) -> AnalysisJob:
+    """Create a `queued` AnalysisJob spanning `test_ids` (1-10 Tests),
+    attributed to `requested_by_identity` (the identity Mechatronics
+    forwarded, or None — attribution only, never authorization).
+
+    `cut_keys` given (hand-picked selection) is only valid when `test_ids`
+    has exactly one entry — raises CutsWithMultipleTestsError otherwise.
+    `cut_keys` omitted (None) means wholesale: every C2-eligible Cut across
+    every listed Test is derived server-side via `s3` (required in that
+    case — every real caller, the API endpoint included, always has one).
+
+    Validates/resolves every key before creating anything — the whole
+    request is rejected and no job is created if any key is invalid, the
+    resolved video count exceeds `MAX_VIDEOS_PER_JOB`, or `test_ids` exceeds
+    `MAX_TESTS_PER_JOB`, never a partial job (issue #44's S3 input flow,
+    step 1, extended to the new limits by ticket #89).
+    """
+    if len(test_ids) > MAX_TESTS_PER_JOB:
+        raise TooManyTestsError(len(test_ids))
+
+    # A caller listing the same Test twice is nonsensical (there's only one
+    # of it to select) rather than a real multi-Test request — deduped here,
+    # preserving submission order, before the "cuts needs exactly one Test"
+    # check below, so a duplicated test_id alongside cuts isn't wrongly
+    # rejected as multi-Test. Also keeps this from ever tripping the
+    # (analysis_id, test_id) uniqueness constraint below.
+    unique_test_ids = list(dict.fromkeys(test_ids))
+
+    if cut_keys is not None and len(unique_test_ids) > 1:
+        raise CutsWithMultipleTestsError
+
+    if cut_keys is not None:
+        resolved_cut_keys = list(cut_keys)
+        for key in resolved_cut_keys:
+            _validate_cut_key(unique_test_ids[0], key)
+    else:
+        if s3 is None:
+            raise ValueError("s3 is required for wholesale (cuts=None) derivation")
+        resolved_cut_keys = []
+        for test_id in unique_test_ids:
+            resolved_cut_keys.extend(_wholesale_cut_keys(s3, test_id))
+
+    if not resolved_cut_keys:
         raise EmptyCutSelectionError
+    if len(resolved_cut_keys) > MAX_VIDEOS_PER_JOB:
+        raise TooManyVideosError(len(resolved_cut_keys))
 
-    for key in cut_keys:
-        _validate_cut_key(test_id, key)
-
-    job = AnalysisJob(test_id=test_id, requested_by_identity=requested_by_identity)
+    job = AnalysisJob(requested_by_identity=requested_by_identity)
+    job.tests = [AnalysisJobTest(test_id=test_id) for test_id in unique_test_ids]
     job.videos = [
         AnalysisJobVideo(cut_key=key, position=position, status=AnalysisJobVideoStatus.PENDING)
-        for position, key in enumerate(cut_keys)
+        for position, key in enumerate(resolved_cut_keys)
     ]
     db.add(job)
     db.commit()
@@ -308,14 +399,17 @@ def list_analysis_jobs(
     """The newest AnalysisJobs (up to `limit`), whoever requested them,
     optionally narrowed to one Test — backs both the global history page
     and the Media Browser's inline "previous analyses for this Test" panel
-    (ticket #53).
+    (ticket #53), which a multi-Test job (ticket #89) now appears in for
+    *every* Test it touches, not just one.
 
-    Each job's videos are loaded up front (`selectinload`): every job in the
-    response serializes them, so lazy loading would be one extra query per
-    row.
+    Each job's videos and Test association are loaded up front
+    (`selectinload`): every job in the response serializes them, so lazy
+    loading would be one extra query per row, per relationship.
     """
-    stmt = select(AnalysisJob).options(selectinload(AnalysisJob.videos))
+    stmt = select(AnalysisJob).options(
+        selectinload(AnalysisJob.videos), selectinload(AnalysisJob.tests)
+    )
     if test_id is not None:
-        stmt = stmt.where(AnalysisJob.test_id == test_id)
+        stmt = stmt.join(AnalysisJobTest).where(AnalysisJobTest.test_id == test_id)
     stmt = stmt.order_by(AnalysisJob.created_at.desc(), AnalysisJob.id.desc()).limit(limit)
     return list(db.scalars(stmt))

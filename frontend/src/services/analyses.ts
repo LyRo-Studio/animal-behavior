@@ -16,7 +16,9 @@ export interface AnalysisJobVideo {
 
 export interface AnalysisJob {
   id: number
-  testId: string
+  // Every Test this job touches, in submission order (ticket #89 — replaces
+  // the old single `testId`). Today's flow only ever submits one.
+  testIds: string[]
   // Who ran it, as forwarded by Mechatronics (ticket #72) — null when no
   // identity was present at the time (e.g. local development).
   requestedByIdentity: string | null
@@ -38,7 +40,7 @@ interface AnalysisJobVideoResponse {
 
 interface AnalysisJobResponse {
   id: number
-  test_id: string
+  test_ids: string[]
   requested_by_identity: string | null
   status: AnalysisJobStatus
   dogtrace_version: string | null
@@ -52,7 +54,7 @@ interface AnalysisJobResponse {
 function toAnalysisJob(row: AnalysisJobResponse): AnalysisJob {
   return {
     id: row.id,
-    testId: row.test_id,
+    testIds: row.test_ids,
     requestedByIdentity: row.requested_by_identity,
     status: row.status,
     dogtraceVersion: row.dogtrace_version,
@@ -73,12 +75,14 @@ function toAnalysisJob(row: AnalysisJobResponse): AnalysisJob {
 // user-safe `detail` string when any selected Cut isn't valid C2 analysis
 // input — surfaced here as-is rather than a generic message, via the
 // shared errorFromResponse ("backend already gives a specific, safe
-// reason").
+// reason"). Still a single-Test, hand-picked-Cuts call (ticket #89's
+// `test_ids`/`cuts` wire shape wrapped around today's one-Test flow) — the
+// multi-Test "Analyze selected Tests" wholesale action has no UI yet.
 export async function createAnalysis(testId: string, cutKeys: string[]): Promise<AnalysisJob> {
   const response = await fetch(`${API_BASE_URL}/analyses`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ test_id: testId, cuts: cutKeys }),
+    body: JSON.stringify({ test_ids: [testId], cuts: cutKeys }),
   })
 
   if (!response.ok) {

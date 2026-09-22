@@ -49,7 +49,7 @@ onMounted(loadAnalyses)
             data-testid="analysis-history-link"
             class="font-medium text-primary hover:underline"
           >
-            Test {{ job.testId }}
+            Test {{ job.testIds.join(', ') }}
           </RouterLink>
           <span class="text-muted">
             <span data-testid="analysis-history-status">

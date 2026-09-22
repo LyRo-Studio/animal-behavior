@@ -28,7 +28,7 @@ function createTestRouter() {
 function job(overrides: Record<string, unknown> = {}) {
   return {
     id: 42,
-    testId: 'T001',
+    testIds: ['T001'],
     requestedByIdentity: 'jan.peeters@vives.be',
     status: 'completed',
     dogtraceVersion: '1.1.1',
@@ -58,8 +58,8 @@ describe('AnalysesHistoryView', () => {
 
   it('loads and lists every analysis with status and date', async () => {
     listAnalysesMock.mockResolvedValue([
-      job({ id: 42, testId: 'T001', status: 'completed' }),
-      job({ id: 41, testId: 'T002', status: 'failed' }),
+      job({ id: 42, testIds: ['T001'], status: 'completed' }),
+      job({ id: 41, testIds: ['T002'], status: 'failed' }),
     ])
 
     const wrapper = await mountView()
