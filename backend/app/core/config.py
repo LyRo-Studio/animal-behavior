@@ -111,6 +111,42 @@ class Settings(BaseSettings):
     analysis_worker_poll_interval_seconds: float = 5.0
     analysis_worker_work_dir: str = "/data/analysis-worker"
 
+    # Ticket #94 (Cutting job foundation, part of issue #93 / Feature C):
+    # where uploaded source videos are streamed to before cutting — a
+    # scoped local temp directory, never S3 (CONTEXT.md: "Source videos
+    # never reach S3 — not even transiently"). Same "/data" placement as
+    # analysis_worker_work_dir above, for the same reason (the base image's
+    # non-root user already owns it).
+    cutting_upload_temp_dir: str = "/data/cutting-uploads"
+    # Total bytes retained across every not-yet-consumed upload before a
+    # new upload is rejected outright (CONTEXT.md's Feature C "Upload
+    # mechanics" decision) — bounds disk usage from abandoned failed jobs.
+    # CONTEXT.md's "Further Notes" flagged that the real number needs
+    # verifying against dogtrace-app's actual free space, unconfirmed
+    # during design; this default is a conservative placeholder pending
+    # that check, not a measured value — revisit once real free-space
+    # numbers are available.
+    cutting_upload_storage_cap_bytes: int = 50 * 1024 * 1024 * 1024  # 50 GiB
+    # A single upload's own declared size is also capped, independent of
+    # the aggregate cap above (ENGINEERING-STANDARDS.md §5: "limit request
+    # body and upload sizes"). Generous for a real multi-GB source video.
+    cutting_upload_max_file_size_bytes: int = 20 * 1024 * 1024 * 1024  # 20 GiB
+
+    # Ticket #94: creating a CuttingJob reuses the existing per-identity
+    # rate_limit.py machinery, same reasoning as Feature B's POST /analyses
+    # limit (CONTEXT.md's Feature C decision) — an upload-triggering
+    # endpoint is at least as expensive a thing to trigger repeatedly.
+    create_cutting_job_rate_limit_max_attempts_per_identity: int = 10
+    create_cutting_job_rate_limit_window_seconds: int = 300
+    # Starting a chunked upload is cheap on its own (a small metadata
+    # write), but unbounded repetition would still clutter local disk with
+    # empty upload directories independent of the byte-level cap above —
+    # ENGINEERING-STANDARDS.md §5's general "expensive operations... cannot
+    # be triggered repeatedly" guidance, applied with a more generous
+    # budget than job creation itself.
+    cutting_upload_init_rate_limit_max_attempts_per_identity: int = 30
+    cutting_upload_init_rate_limit_window_seconds: int = 300
+
     @property
     def cors_origin_list(self) -> list[str]:
         """CORS_ORIGINS as a comma-separated env var, split into a list."""
