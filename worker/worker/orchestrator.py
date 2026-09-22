@@ -14,8 +14,15 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 
-from app.models.analysis_job import AnalysisJob, AnalysisJobVideo, AnalysisJobVideoStatus
+from app.models.analysis_job import (
+    AnalysisJob,
+    AnalysisJobStatus,
+    AnalysisJobVideo,
+    AnalysisJobVideoStatus,
+)
+from app.models.audit_log import AuditAction
 from app.services.analyses import claim_next_queued_job, finalize_analysis_job
+from app.services.audit_log import record_audit_event
 from app.services.s3_client import S3Client, S3ObjectNotFoundError
 from sqlalchemy.orm import Session
 
@@ -30,6 +37,11 @@ logger = logging.getLogger(__name__)
 _DOWNLOAD_FAILURE_REASON = "The source video could not be retrieved from storage."
 _PIPELINE_FAILURE_REASON = "The analysis did not produce a result for this video."
 _BATCH_FAILURE_REASON = "The analysis could not be completed for this video."
+
+# Job-level summary for the audit log's own failure_reason (ticket #84) —
+# same "short, bounded, never a stack trace" rule as the per-video reasons
+# above, just describing the job as a whole rather than one video.
+_AUDIT_FAILED_REASON = "No videos in this analysis completed successfully."
 
 # A video not yet at a terminal status — still eligible to be moved by a
 # progress event or a fallback sweep. Shared between `_make_progress_callback`
@@ -120,7 +132,73 @@ def _fail_after_unhandled_error(db: Session, job: AnalysisJob) -> None:
         video.failure_reason = _BATCH_FAILURE_REASON
         db.add(video)
     db.commit()
-    finalize_analysis_job(db, job, report_s3_prefix=None)
+    _finalize_and_audit_job(db, job, report_s3_prefix=None)
+
+
+def _finalize_and_audit_job(
+    db: Session, job: AnalysisJob, *, report_s3_prefix: str | None
+) -> AnalysisJob:
+    """Finalize `job` (`finalize_analysis_job`) and write the matching
+    ANALYSIS_COMPLETED / ANALYSIS_COMPLETED_WITH_ERRORS / ANALYSIS_FAILED
+    audit row for the outcome it reached (ticket #84, issue #79) — the one
+    seam both `_run_claimed_job`'s normal path and
+    `_fail_after_unhandled_error`'s recovery path call through, so neither
+    can reach a terminal job status without also writing its audit row.
+
+    No live HTTP request exists here — this runs in the worker process, not
+    a request handler — so identity comes straight from the job's own
+    `requested_by_identity`, never freshly verified via
+    `get_verified_identity` (that seam is request-only). `identity_verified`
+    is therefore always False, matching `AuditLog.identity_verified`'s own
+    docstring for a worker-driven event.
+
+    The audit write's own `db.commit()` is wrapped in its own try/except,
+    deliberately never left to propagate: `finalize_analysis_job` above has
+    already durably committed `job`'s real terminal outcome by the time this
+    runs, so a failure here must never reach `process_next_job`'s generic
+    `except Exception` handler — that handler's recovery
+    (`_fail_after_unhandled_error`) unconditionally fails every video and
+    re-finalizes the job, which would silently overwrite an
+    already-succeeded, already-persisted result with `failed` (caught in
+    review). `record_audit_event` itself already isolates the write inside
+    its own SAVEPOINT (see its docstring) — this only extends that same
+    best-effort guarantee (CONTEXT.md's audit log design: "Writes are
+    best-effort, always") to the commit that makes the row durable.
+    """
+    job = finalize_analysis_job(db, job, report_s3_prefix=report_s3_prefix)
+
+    if job.status == AnalysisJobStatus.COMPLETED:
+        action = AuditAction.ANALYSIS_COMPLETED
+        failure_reason = None
+    elif job.status == AnalysisJobStatus.COMPLETED_WITH_ERRORS:
+        failed_count = sum(
+            1 for video in job.videos if video.status == AnalysisJobVideoStatus.FAILED
+        )
+        action = AuditAction.ANALYSIS_COMPLETED_WITH_ERRORS
+        failure_reason = f"{failed_count} of {len(job.videos)} videos failed."
+    else:
+        action = AuditAction.ANALYSIS_FAILED
+        failure_reason = _AUDIT_FAILED_REASON
+
+    try:
+        record_audit_event(
+            db,
+            identity=job.requested_by_identity,
+            identity_verified=False,
+            action=action,
+            target_type="analysis_job",
+            target=str(job.id),
+            failure_reason=failure_reason,
+        )
+        db.commit()
+    except Exception:
+        logger.exception(
+            "analysis_id=%s failed to commit %s audit event after finalizing the job",
+            job.id,
+            action,
+        )
+
+    return job
 
 
 def _run_claimed_job(
@@ -203,7 +281,7 @@ def _run_claimed_job(
     db.refresh(job)
 
     report_s3_prefix = _upload_artifacts(s3_client, output_dir, job)
-    finalize_analysis_job(db, job, report_s3_prefix=report_s3_prefix)
+    _finalize_and_audit_job(db, job, report_s3_prefix=report_s3_prefix)
 
 
 def _download_video(
