@@ -24,7 +24,7 @@ _Avoid_: "test" for anything else, in particular a Dataset's `train`/`valid`/`te
 One processed video file under `cuts/<Test>/` in S3, belonging to exactly one Test. The unit a user views, plays, inspects, and downloads after selecting a Test.
 
 **Source Video**:
-An original, unsplit video under `source/` in S3, before being split into Cuts. Not exposed by the application in the current round — see Decisions.
+An original, unsplit video under `source/` in S3, before being split into Cuts. Not exposed by the application in the current round — see Decisions. Refers only to the legacy videos already in `source/` since before Feature C — a video a person uploads through Feature C's Ingestion flow never itself becomes a Source Video in this sense; see "Video cutting + S3 ingestion (Feature C)" below.
 
 **Dataset**:
 A versioned collection of files at its own top-level prefix in S3 (e.g.
@@ -51,6 +51,12 @@ _Avoid_: "activity log" for this specific table — an earlier draft (issue #79)
 
 **Wholesale (Test selection), Feature B:**
 Selecting a Test for analysis without hand-picking its individual Cuts — every C2-eligible Cut the Test currently has is included automatically. Distinct from ordinary (per-video) selection, where the caller names exact Cut keys. Wholesale is the only mode once more than one Test is selected; per-video hand-picking stays available only when exactly one Test is selected. See "Multi-test analysis (Feature B)" below.
+
+**Ingestion, Feature C:**
+Uploading a Test's C1 and/or C2 source video (plus the matching row of its timestamp Excel) into the app so it can be Cut. Distinct from Cutting itself (below) — Ingestion is the input side, Cutting is the processing step it feeds. An ingested source video is never itself a Source Video (see that term's updated definition) — it never reaches `source/` in S3.
+
+**Cutting, Feature C:**
+Slicing an ingested source video into its Cuts, via `assist` (the external tool this app wraps), driven by one Test's phase timestamps. The unit of work is a **CuttingJob** — one Test, mirroring `AnalysisJob`'s role for analysis. See "Video cutting + S3 ingestion (Feature C)" below.
 
 ## Decisions & Approved Deviations
 
@@ -1467,4 +1473,130 @@ single-Test flow byte-for-byte unchanged.
   future ticket: it applies equally to today's single-Test analyses, so
   bundling it here would mix two unrelated concerns into one set of
   tickets.
+
+**Video cutting + S3 ingestion (Feature C) — design finalized, not yet built:**
+lets a researcher upload a Test's source video(s) and have them sliced into
+Cuts directly in the app, via `assist` (`github.com/vives-devbit/assist`,
+pinned at `master`), rather than the ad-hoc, manual process used today.
+
+- **`assist` is reused as a pinned external dependency, not reimplemented**
+  — same "source reuse" principle as `dogtrace-core`. Its own CLI/Excel-
+  batch orchestration layer (`PhaseSlicer`, `Test`, `read_excel`) is
+  *not* reused, though: it's built to discover and loop over every Test in
+  a whole directory/workbook in one CLI run, and this app already does its
+  own, stricter per-Test Excel-row validation before a CuttingJob is ever
+  created (see "Ingestion validation" below) — reusing `PhaseSlicer` would
+  mean parsing and validating the same row twice, through two different
+  rule sets. What's reused directly is the actual technical substance:
+  `Slicer` (ffmpeg slicing), `LagCorrelation` (audio cross-correlation),
+  `FrameGrabber` (first-frame timestamp probing), and the `Camera`/`Phase`/
+  `OutputFilename` primitives. An unmerged `v2` branch of `assist` (a
+  SQLite-backed repository/queue rewrite) exists but is explicitly not
+  being picked up — pin `master`.
+- **`ZE_F8` (the 16th phase) can never be produced as a Cut.** Every phase
+  is sliced `[this phase's start, next phase's start)` from the Excel's 16
+  *start*-only timestamps, so the last phase has no timestamp to bound its
+  end — confirmed structurally absent across `assist` `master`, `v2`, and
+  its `feat/phase-filter-selection` branch alike (the latter guards it
+  explicitly: "Skipped (no end timestamp)"). A Test cut by this feature
+  therefore has at most 15 Cuts per camera (`ME_F1`–`ME_F8`,
+  `ZE_F1`–`ZE_F7`), not 16 — this is new information about what *this
+  feature* produces, not a correction of Feature B's already-confirmed
+  real-bucket fact that Test T001 (cut by some earlier, non-`assist`
+  process) has exactly 16 C2 Cuts today.
+- **Job model: a new `CuttingJob`, separate from `AnalysisJob`** — not a
+  unified polymorphic `Job`. The two have different shapes (a cutting job
+  takes 1–2 source videos in and fans out into up to 15 Cuts per camera;
+  an analysis job fans in N Cuts to one combined report) and different
+  lifecycles (cutting has an upload phase analysis never had). One
+  `CuttingJob` is always scoped to exactly one Test.
+- **Runs on a new, separate CPU-only service — not the GPU-gated
+  `worker`.** `assist`'s workload (ffmpeg + `scipy`/`numpy` audio
+  correlation) has no CUDA/GPU involvement at all; piggybacking it onto
+  `worker`'s GPU-reservation-gated Compose profile would block any
+  GPU-less contributor from ever running it locally, for no shared
+  benefit. Like `worker`, exactly one instance and one `CuttingJob` runs
+  at a time platform-wide (no concurrency change from today's single-
+  worker-instance posture) — a multi-Test batch submission (see "Batch
+  submission" below) is processed strictly one Test at a time, never in
+  parallel, to keep local disk and CPU load bounded and predictable.
+- **Upload is the v1 input path — no Belnet FileSender integration.**
+  Presigned S3 uploads are confirmed broken against the real bucket (403
+  on a presigned PUT, same gateway issue as presigned GETs), so uploads
+  proxy through the backend: chunked/resumable, streamed straight to a
+  scoped local temp directory (never memory-buffered), never a single
+  giant request. C1 and C2 can upload independently — a job needs whichever
+  camera(s) the Excel/validation below require, not necessarily both at once.
+- **Source videos never reach S3 — not even transiently.** Cutting runs
+  directly against the just-uploaded local file (no upload-then-download-
+  from-S3 round trip); only the produced Cuts are uploaded, to
+  `cuts/<Test>/`, mirroring `AnalysisJob`'s existing Postgres-for-
+  records/S3-for-media split. `source/` in S3 keeps its legacy content,
+  untouched by this feature. On success the local upload is discarded
+  immediately; on failure it's kept until the job is explicitly retried or
+  cancelled (not on a timer), bounded by a disk-usage threshold on total
+  retained temp storage that rejects new uploads once crossed (not a
+  job-count cap) — the actual free-space number on `dogtrace-app` wasn't
+  confirmed this session (the box wasn't reachable from the dev VM at the
+  time), so this threshold needs a real value chosen/verified during
+  implementation, not assumed.
+- **Ingestion validation, before a CuttingJob is ever created:**
+  - Filenames matched loosely, the same rule `assist` itself uses (starts
+    with the Test id, contains `_C1_`/`_C2_`) — not a stricter new
+    convention.
+  - A single uploaded camera is only accepted if it matches the Excel's
+    `C1/C2` reference-camera column for that Test; a mismatched single
+    camera is rejected outright. (Reason: `assist` only computes a real
+    audio-sync offset when *both* cameras are present; with only the
+    non-reference camera present it would still apply the branch that
+    *expects* a computed offset, silently defaulting to zero instead —
+    producing a mis-timed cut with no error.)
+  - Only the first tab of an uploaded Excel workbook is read; other tabs
+    are ignored entirely.
+  - Every phase timestamp cell is validated as a real time value up
+    front, rejecting with a specific per-row error — not letting a
+    malformed cell (a real example found in an older sample workbook: a
+    literal `"-"` in every phase column) crash `assist`'s own parsing.
+    The "ok to use" QC column some older sheets carry is not read; it's
+    not part of `assist`'s own contract and its values aren't consistent
+    enough to infer intent from.
+  - A bare-numeric Test ID (e.g. `"513"`, seen in an older sample sheet)
+    is normalized to the `T`-prefixed form used everywhere else in this
+    app, rather than rejected.
+  - After upload completes, the file is probed with `ffprobe` (reusing
+    `MediaProber`, the same seam `CutMediaInfo` already uses) to confirm
+    it's actually a decodable video before a job is ever queued — not
+    validated mid-transfer, since a partial file can't be probed
+    meaningfully.
+- **S3 collisions, two different points, two different policies:**
+  - An uploaded source video whose derived S3-style filename already
+    matches an existing object is rejected outright (upload time).
+  - Re-cutting a Test that already has Cuts in `cuts/<Test>/` is allowed,
+    but gated behind an explicit "Cuts already exist — proceed?"
+    confirmation rather than a silent overwrite or an outright reject —
+    unlike the upload-time case, there's a real, expected reason to want
+    this (fixing a wrong timestamp after seeing a bad first result).
+- **Batch submission: up to 5 Tests at once, as independent `CuttingJob`
+  rows — never one job spanning several Tests.** Unlike `AnalysisJob`'s
+  multi-Test batching (Feature B), there's no shared expensive resource
+  to amortize across Tests here (no model load, nothing GPU-bound) that
+  would justify bundling; independent rows also keep partial-batch
+  failure trivial (one Test failing is just "that job failed," no
+  partial-batch status to design around).
+- **Progress: fine-grained per phase, inferred by watching the output
+  directory** for each phase's file as it appears (`assist` itself has no
+  progress callback of any kind, on any branch) — not a fork of `assist`
+  to add one.
+- **Audit log: gets its own events now**, mirroring the `ANALYSIS_*`
+  pattern (e.g. `CUTTING_STARTED`/`CUTTING_COMPLETED`/`CUTTING_FAILED`) —
+  `CONTEXT.md`'s Feature A section already flagged this feature as
+  needing its own events later; the existing schema (`target_type`/
+  `target`, no FK, best-effort writes) generalizes with no changes needed.
+- **Rate limiting:** creating a CuttingJob reuses the existing per-identity
+  `rate_limit.py` machinery, same reasoning as Feature B's `POST
+  /analyses` limit — an upload-triggering endpoint is at least as
+  expensive a thing to trigger repeatedly.
+- **Postgres/S3 split confirmed, no deviation:** `CuttingJob` rows/status/
+  metadata in Postgres, only Cuts in S3 — exactly `AnalysisJob`'s existing
+  split, not challenged further.
 
