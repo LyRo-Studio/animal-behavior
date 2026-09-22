@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolved from this file's own location, not the process's working
@@ -158,6 +159,33 @@ class Settings(BaseSettings):
     # (CONTEXT.md's Feature C "Upload mechanics" decision).
     cutting_worker_poll_interval_seconds: float = 5.0
     cutting_worker_work_dir: str = "/data/cutting-worker"
+
+    # Ticket #87 (Audit log retention pruning, issue #79): a lightweight
+    # in-process background task in the backend's own FastAPI lifespan
+    # (app/main.py) prunes audit_log rows older than a rolling retention
+    # window, once per interval — deliberately no cron container, systemd
+    # timer, or task queue, matching rate_limit.py's own single-backend-
+    # instance assumption (CONTEXT.md's "Retention" decision: 3 months,
+    # rolling 90 days).
+    # `gt=0` on both (caught in review): a zero/negative retention_days
+    # would make prune_old_audit_events's cutoff resolve to now-or-future,
+    # silently deleting the *entire* audit_log table on the very next
+    # prune — a compliance-relevant table, with no other guard anywhere
+    # against that. A zero/negative interval would busy-loop the prune
+    # task against the database instead of waiting between runs.
+    audit_log_retention_days: int = Field(default=90, gt=0)
+    audit_log_prune_interval_seconds: int = Field(default=24 * 60 * 60, gt=0)
+    # The prune task has no per-request `Depends` seam to override the way
+    # get_db/get_s3_client/... do (it's lifespan-level, opening its own
+    # Session directly) — this flag is that seam instead, so
+    # backend/tests/conftest.py can disable it for every test. Left enabled
+    # it would fire a real DELETE against whichever database `DATABASE_URL`
+    # points at every time a test's `TestClient` triggers ASGI lifespan
+    # startup, bypassing db_session's per-test SAVEPOINT rollback entirely
+    # (caught in review). A test-only seam, not an operator-facing
+    # deployment toggle — deliberately not in .env.example, unlike the two
+    # settings above.
+    audit_log_prune_enabled: bool = True
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -6,7 +6,9 @@ rather than inserting `AuditLog` rows directly.
 """
 
 import logging
+from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from app.models.audit_log import AuditAction, AuditLog
@@ -50,3 +52,20 @@ def record_audit_event(
             )
     except Exception:
         logger.exception("Failed to record audit event %s for %s:%s", action, target_type, target)
+
+
+def prune_old_audit_events(db: Session, *, retention_days: int) -> int:
+    """Delete every `audit_log` row whose `occurred_at` is older than a
+    rolling `retention_days` window (ticket #87, issue #79's "Retention: 3
+    months, rolling 90 days from occurred_at" decision) — deletion under a
+    stated policy, not the kind of edit/rewrite the table's own immutability
+    guarantee rules out (CONTEXT.md's Audit log Language entry).
+
+    Commits on success and returns the number of rows deleted, for the
+    caller to log. A plain bulk DELETE with no matching rows is a no-op —
+    never raises against an empty (or already-pruned) table.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+    result = db.execute(delete(AuditLog).where(AuditLog.occurred_at < cutoff))
+    db.commit()
+    return result.rowcount

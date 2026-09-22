@@ -35,8 +35,13 @@ class AuditLog(Base):
     __tablename__ = "audit_log"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Indexed (ticket #87): the daily retention prune's own
+    # `DELETE ... WHERE occurred_at < cutoff` (app/services/audit_log.py's
+    # prune_old_audit_events) would otherwise be a full table scan on every
+    # run, competing with this table's own frequent inserts for the
+    # duration (caught in review).
     occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
     )
     # Same truncation convention and length as
     # `AnalysisJob.requested_by_identity` — no FK, attribution only. Null
