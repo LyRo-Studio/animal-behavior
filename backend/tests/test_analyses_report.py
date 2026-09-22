@@ -1,4 +1,7 @@
+from sqlalchemy import select
+
 from app.models.analysis_job import AnalysisJob, AnalysisJobStatus, AnalysisJobVideoStatus
+from app.models.audit_log import AuditAction, AuditLog
 from tests.helpers import identity_headers
 
 # Ticket #49's acceptance criteria: exercised through the HTTP API against
@@ -50,6 +53,45 @@ def test_download_report_for_completed_job_returns_the_xlsx_bytes(client, db_ses
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     assert 'filename="casiop_report.xlsx"' in response.headers["content-disposition"]
+
+
+def test_download_report_writes_a_report_downloaded_audit_row(client, db_session, s3_client):
+    """Ticket #85 / issue #79: a successful download writes REPORT_DOWNLOADED,
+    attributed via `get_verified_identity` — mirrors ticket #82/#83's own
+    ANALYSIS_STARTED/ANALYSIS_CANCELLED coverage. `_create_job` already
+    writes its own ANALYSIS_STARTED row, so this filters by action rather
+    than assuming this is the only row."""
+    analysis_id = _create_job(client)
+    prefix = f"reports/T001/{analysis_id}/"
+    s3_client.objects[f"{prefix}casiop_report.xlsx"] = b"fake-xlsx-bytes"
+    _finish_job(
+        db_session, analysis_id, status=AnalysisJobStatus.COMPLETED, report_s3_prefix=prefix
+    )
+
+    response = client.get(f"/api/analyses/{analysis_id}/report")
+
+    assert response.status_code == 200
+    row = db_session.scalar(
+        select(AuditLog).where(AuditLog.action == AuditAction.REPORT_DOWNLOADED)
+    )
+    assert row is not None
+    assert row.target_type == "analysis_job"
+    assert row.target == str(analysis_id)
+    assert row.identity_verified is False
+
+
+def test_download_report_for_a_rejected_request_does_not_write_an_audit_row(
+    client, db_session, s3_client
+):
+    analysis_id = _create_job(client)
+
+    response = client.get(f"/api/analyses/{analysis_id}/report")
+
+    assert response.status_code == 409
+    assert (
+        db_session.scalar(select(AuditLog).where(AuditLog.action == AuditAction.REPORT_DOWNLOADED))
+        is None
+    )
 
 
 def test_download_report_for_completed_with_errors_job_returns_the_xlsx_bytes(

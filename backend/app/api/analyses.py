@@ -157,6 +157,7 @@ _REPORT_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetm
 @router.get("/{analysis_id}/report")
 def download_analysis_report(
     analysis_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     s3: S3Client = Depends(get_s3_client),
 ) -> StreamingResponse:
@@ -186,6 +187,19 @@ def download_analysis_report(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Report not found."
         ) from None
+
+    # Ticket #85 / issue #79: logged here, the actual byte-serving point —
+    # unlike Cut streaming's media-token pattern, this endpoint has no
+    # "reliably attributed but not proof of playback" gap (CONTEXT.md's
+    # audit log design), so REPORT_DOWNLOADED is written directly once the
+    # object is confirmed to exist, right before the bytes are streamed.
+    _record_verified_audit_event(
+        db,
+        request,
+        action=AuditAction.REPORT_DOWNLOADED,
+        target_type="analysis_job",
+        target=str(analysis_id),
+    )
 
     body = _iter_range(s3, key, 0, info.size - 1) if info.size > 0 else iter((b"",))
     return StreamingResponse(
