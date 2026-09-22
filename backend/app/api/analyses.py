@@ -41,6 +41,31 @@ from app.services.s3_client import iter_object_range as _iter_range
 router = APIRouter(prefix="/analyses", tags=["analyses"])
 
 
+def _record_verified_audit_event(
+    db: Session, request: Request, *, action: AuditAction, target_type: str, target: str
+) -> None:
+    """Shared by every audit-logging call site in this file (ticket #82's
+    ANALYSIS_STARTED, ticket #83's ANALYSIS_CANCELLED, ...) — logged with the
+    audit log's own, more strongly verified identity (`get_verified_identity`),
+    independent of `get_identity` (which only ever attributes the job itself
+    — docs/adr/0004-...). `record_audit_event` never raises (it isolates its
+    own failure internally) but never commits either — this always commits
+    the caller's transaction afterward, so a future call site copy-pasted
+    without also copying that commit can't silently drop the audit row
+    (caught in review).
+    """
+    verified_identity, identity_verified = get_verified_identity(request)
+    record_audit_event(
+        db,
+        identity=verified_identity,
+        identity_verified=identity_verified,
+        action=action,
+        target_type=target_type,
+        target=target,
+    )
+    db.commit()
+
+
 @router.post("", response_model=AnalysisJobOut, status_code=status.HTTP_201_CREATED)
 def create_analysis(
     request: Request,
@@ -101,20 +126,13 @@ def create_analysis(
             detail="One or more selected Tests were not found.",
         ) from None
 
-    # Ticket #82 / issue #79: logged with the audit log's own, more strongly
-    # verified identity (get_verified_identity), independent of `identity`
-    # above (which only ever attributes the job itself — get_identity, never
-    # verified — docs/adr/0004-...).
-    verified_identity, identity_verified = get_verified_identity(request)
-    record_audit_event(
+    _record_verified_audit_event(
         db,
-        identity=verified_identity,
-        identity_verified=identity_verified,
+        request,
         action=AuditAction.ANALYSIS_STARTED,
         target_type="analysis_job",
         target=str(job.id),
     )
-    db.commit()
     return job
 
 
@@ -183,10 +201,11 @@ def download_analysis_report(
 @router.post("/{analysis_id}/cancel", response_model=AnalysisJobOut)
 def cancel_analysis(
     analysis_id: int,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> AnalysisJob:
     try:
-        return cancel_analysis_job(db, analysis_id=analysis_id)
+        job = cancel_analysis_job(db, analysis_id=analysis_id)
     except AnalysisJobNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found."
@@ -196,6 +215,15 @@ def cancel_analysis(
             status_code=status.HTTP_409_CONFLICT,
             detail="Only a queued analysis can be cancelled.",
         ) from None
+
+    _record_verified_audit_event(
+        db,
+        request,
+        action=AuditAction.ANALYSIS_CANCELLED,
+        target_type="analysis_job",
+        target=str(job.id),
+    )
+    return job
 
 
 @router.get("", response_model=list[AnalysisJobOut])
