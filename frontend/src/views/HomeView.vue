@@ -35,6 +35,12 @@ onMounted(async () => {
         >
           Analyses
         </RouterLink>
+        <RouterLink
+          :to="{ name: 'consolidation' }"
+          class="text-sm font-medium text-primary hover:underline"
+        >
+          Data Consolidation
+        </RouterLink>
         <span v-if="identity" class="text-sm text-muted" data-testid="identity">
           Signed in as {{ identity }}
         </span>

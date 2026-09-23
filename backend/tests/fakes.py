@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app.models.consolidation import ConsolidationCondition
+from app.services.consolidation import ConsolidationInputError
 from app.services.media_prober import MediaProbeError, ProbedMediaInfo
 from app.services.s3_client import S3ObjectInfo, S3ObjectNotFoundError
 
@@ -105,3 +107,33 @@ class FakeMediaProber:
         if self.error is not None:
             raise self.error
         return self.result
+
+
+@dataclass
+class FakeConsolidationRunner:
+    """Stands in for ObserverConsolidationRunner at the API test seam
+    (ticket #115, part of issue #113) — the same "fake the expensive
+    domain-adjacent call, test orchestration around it" split as
+    FakeMediaProber above. Never touches the real, slower, fixture-
+    dependent consolidation/ pipeline.
+
+    `calls` records every (input bytes, condition) run, in order — the
+    input's *bytes*, read eagerly here, not its path: the orchestration
+    layer's own `finally` removes the temp workspace once the request
+    completes, so a path recorded here would already be gone by the time a
+    test inspects `calls` after the fact. Tests use this to assert the
+    orchestration layer invoked the runner with the request's actual
+    uploaded bytes/condition.
+    """
+
+    result_bytes: bytes = b"fake consolidated workbook"
+    error: ConsolidationInputError | None = None
+    calls: list[tuple[bytes, ConsolidationCondition]] = field(default_factory=list)
+
+    def run(
+        self, *, input_path: Path, output_path: Path, condition: ConsolidationCondition
+    ) -> None:
+        self.calls.append((Path(input_path).read_bytes(), condition))
+        if self.error is not None:
+            raise self.error
+        Path(output_path).write_bytes(self.result_bytes)

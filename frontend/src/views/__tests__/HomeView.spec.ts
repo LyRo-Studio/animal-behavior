@@ -19,6 +19,11 @@ function createTestRouter() {
         name: 'analyses-history',
         component: { template: '<div>analyses</div>' },
       },
+      {
+        path: '/consolidation',
+        name: 'consolidation',
+        component: { template: '<div>consolidation</div>' },
+      },
     ],
   })
 }
@@ -61,11 +66,15 @@ describe('HomeView', () => {
     expect(wrapper.text()).toContain('Media Browser')
   })
 
-  it('links to Media Browser and Analyses, with no Admin link and no logout', async () => {
+  it('links to Media Browser, Analyses, and Data Consolidation, with no Admin link and no logout', async () => {
     const wrapper = await mountHome()
 
     const links = wrapper.findAllComponents({ name: 'RouterLink' })
-    expect(links.map((link) => link.text())).toEqual(['Media Browser', 'Analyses'])
+    expect(links.map((link) => link.text())).toEqual([
+      'Media Browser',
+      'Analyses',
+      'Data Consolidation',
+    ])
     expect(wrapper.text()).not.toContain('Admin')
     expect(wrapper.find('button').exists()).toBe(false)
   })

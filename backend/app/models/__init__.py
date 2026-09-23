@@ -5,6 +5,7 @@ from app.models.analysis_job import (
     AnalysisJobVideoStatus,
 )
 from app.models.audit_log import AuditAction, AuditLog
+from app.models.consolidation import Consolidation, ConsolidationCondition, ConsolidationStatus
 from app.models.cut_media_info import CutMediaInfo
 from app.models.cutting_job import (
     CuttingJob,
@@ -20,6 +21,9 @@ __all__ = [
     "AnalysisJobVideoStatus",
     "AuditAction",
     "AuditLog",
+    "Consolidation",
+    "ConsolidationCondition",
+    "ConsolidationStatus",
     "CutMediaInfo",
     "CuttingJob",
     "CuttingJobOutput",

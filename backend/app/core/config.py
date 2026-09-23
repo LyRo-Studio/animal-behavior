@@ -187,6 +187,27 @@ class Settings(BaseSettings):
     # settings above.
     audit_log_prune_enabled: bool = True
 
+    # Ticket #115 (issue #113's Excel consolidation feature): where an
+    # uploaded Excel file is written for the duration of one synchronous
+    # request — a scoped local temp directory, never S3 (only the
+    # consolidated *result* goes to S3; see app/services/consolidation.py).
+    # Same "/data" placement as cutting_upload_temp_dir/analysis_worker_
+    # work_dir above, for the same non-root-user-ownership reason.
+    consolidation_upload_temp_dir: str = "/data/consolidation-uploads"
+    # A single upload's declared size cap (ENGINEERING-STANDARDS.md §5:
+    # "limit request body and upload sizes") — generous relative to real
+    # Observer exports (~1-2 MiB seen in practice per issue #113's spec
+    # work) without inviting an oversized upload to sit in memory for the
+    # duration of one synchronous request (unlike cutting_upload_max_file_
+    # size_bytes's multi-GB videos, this is never chunked).
+    consolidation_max_file_size_bytes: int = 25 * 1024 * 1024  # 25 MiB
+    # Ticket #115: creating a Consolidation reuses the existing per-identity
+    # rate_limit.py machinery, same reasoning as POST /analyses and POST
+    # /cutting-jobs — an upload-triggering, synchronous-processing endpoint
+    # is at least as expensive a thing to trigger repeatedly.
+    create_consolidation_rate_limit_max_attempts_per_identity: int = 10
+    create_consolidation_rate_limit_window_seconds: int = 300
+
     @property
     def cors_origin_list(self) -> list[str]:
         """CORS_ORIGINS as a comma-separated env var, split into a list."""

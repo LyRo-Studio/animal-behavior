@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.analyses import router as analyses_router
+from app.api.consolidations import router as consolidations_router
 from app.api.cutting_jobs import router as cutting_jobs_router
 from app.api.health import router as health_router
 from app.api.media_browser import public_router as media_stream_router
@@ -135,3 +136,4 @@ app.include_router(media_browser_router, prefix=API_PREFIX)
 app.include_router(media_stream_router, prefix=API_PREFIX)
 app.include_router(analyses_router, prefix=API_PREFIX)
 app.include_router(cutting_jobs_router, prefix=API_PREFIX)
+app.include_router(consolidations_router, prefix=API_PREFIX)

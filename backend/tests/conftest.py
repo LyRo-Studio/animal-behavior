@@ -10,14 +10,16 @@ from sqlalchemy.orm import Session, SessionTransaction, sessionmaker
 
 from alembic import command
 from alembic.config import Config
+from app.api.consolidations import get_consolidation_upload_root
 from app.core.config import settings
 from app.db.session import get_db
 from app.main import app
+from app.services.consolidation import get_consolidation_runner
 from app.services.cutting_uploads import get_cutting_upload_root
 from app.services.media_prober import get_media_prober
 from app.services.rate_limit import RateLimiter, get_rate_limiter
 from app.services.s3_client import get_s3_client
-from tests.fakes import FakeMediaProber, FakeS3Client
+from tests.fakes import FakeConsolidationRunner, FakeMediaProber, FakeS3Client
 from tests.helpers import IDENTITY_HEADER
 
 _ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
@@ -173,29 +175,53 @@ def cutting_upload_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
+def consolidation_upload_root(tmp_path: Path) -> Path:
+    """Ticket #115: the scoped local temp directory a consolidation's
+    upload is written to for the duration of one request, injected in
+    place of `settings.consolidation_upload_temp_dir` — same reasoning as
+    `cutting_upload_root` above."""
+    return tmp_path / "consolidation-uploads"
+
+
+@pytest.fixture()
+def consolidation_runner() -> FakeConsolidationRunner:
+    """The fake consolidation runner injected into the app for this test
+    (ticket #115) — see tests/fakes.py. No test at the API seam runs the
+    real, slower, fixture-dependent consolidation/ pipeline; that's
+    exercised directly by tests/test_consolidation_service.py instead."""
+    return FakeConsolidationRunner()
+
+
+@pytest.fixture()
 def client(
     db_session: Session,
     rate_limiter: RateLimiter,
     s3_client: FakeS3Client,
     media_prober: FakeMediaProber,
     cutting_upload_root: Path,
+    consolidation_upload_root: Path,
+    consolidation_runner: FakeConsolidationRunner,
 ) -> Generator[TestClient, None, None]:
     """A test client for the FastAPI app, hitting real routes end-to-end.
 
     The app's own `get_db`/`get_rate_limiter`/`get_s3_client`/
-    `get_media_prober`/`get_cutting_upload_root` dependencies are
-    overridden to use the per-test transactional session, fresh rate
-    limiter, fake S3 client, fake media prober, and scoped tmp_path above,
-    so requests made through this client see (and roll back) the same data
-    a test sets up directly, never touch the real bucket or run the real
-    `ffprobe` binary, never write outside pytest's own tmp_path, and start
-    with a clean rate-limit slate every test.
+    `get_media_prober`/`get_cutting_upload_root`/
+    `get_consolidation_upload_root`/`get_consolidation_runner`
+    dependencies are overridden to use the per-test transactional session,
+    fresh rate limiter, fake S3 client, fake media prober, scoped
+    tmp_paths, and fake consolidation runner above, so requests made
+    through this client see (and roll back) the same data a test sets up
+    directly, never touch the real bucket or run the real `ffprobe` binary
+    or the real consolidation/ pipeline, never write outside pytest's own
+    tmp_path, and start with a clean rate-limit slate every test.
     """
     app.dependency_overrides[get_db] = lambda: db_session
     app.dependency_overrides[get_rate_limiter] = lambda: rate_limiter
     app.dependency_overrides[get_s3_client] = lambda: s3_client
     app.dependency_overrides[get_media_prober] = lambda: media_prober
     app.dependency_overrides[get_cutting_upload_root] = lambda: cutting_upload_root
+    app.dependency_overrides[get_consolidation_upload_root] = lambda: consolidation_upload_root
+    app.dependency_overrides[get_consolidation_runner] = lambda: consolidation_runner
     try:
         with TestClient(app) as test_client:
             yield test_client
