@@ -71,6 +71,9 @@ services:
       # something a later request or restart needs to find again.
       CONSOLIDATION_UPLOAD_TEMP_DIR: ${CONSOLIDATION_UPLOAD_TEMP_DIR:-/data/consolidation-uploads}
       CONSOLIDATION_MAX_FILE_SIZE_BYTES: ${CONSOLIDATION_MAX_FILE_SIZE_BYTES:-26214400}
+      # Stale-consolidation reconciliation (ticket #121).
+      CONSOLIDATION_STALE_AFTER_MINUTES: ${CONSOLIDATION_STALE_AFTER_MINUTES:-30}
+      CONSOLIDATION_RECONCILE_INTERVAL_SECONDS: ${CONSOLIDATION_RECONCILE_INTERVAL_SECONDS:-600}
     volumes:
       - cutting_uploads_data:/data/cutting-uploads
     # No host port (ticket #71): only `nginx` is reachable from outside the

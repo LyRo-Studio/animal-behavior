@@ -42,7 +42,9 @@ class ConsolidationStatus(str, enum.Enum):
     architecture": no worker/queue), but the row is created as
     `processing` before the runner starts so CONSOLIDATION_STARTED has an
     id to attribute to, and so an attempt whose process dies mid-run
-    still leaves a trace (it stays `processing`; nothing reconciles it)."""
+    still leaves a trace. Such a row is later moved to `failed` by
+    app.services.consolidation.reconcile_stale_consolidations (ticket
+    #121)."""
 
     PROCESSING = "processing"
     COMPLETED = "completed"
@@ -101,8 +103,11 @@ class Consolidation(Base):
     failure_reason: Mapped[str | None] = mapped_column(
         String(FAILURE_REASON_MAX_LENGTH), nullable=True
     )
-    # Null for a failed consolidation — nothing was ever persisted to
-    # object storage.
+    # Where the result is (or would be) stored. Recorded at creation since
+    # ticket #121, not at completion, so a result uploaded by a run that
+    # never finished can still be found and removed. Only a `completed` row
+    # is guaranteed to have an object there. Null only on rows created
+    # before #121 that never completed.
     result_storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     input_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     result_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)

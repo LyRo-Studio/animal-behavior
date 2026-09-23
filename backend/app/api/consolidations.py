@@ -34,6 +34,7 @@ from app.schemas.consolidations import ConsolidationOut, RenameConsolidationRequ
 from app.services.audit_log import record_audit_event
 from app.services.consolidation import (
     AUDIT_TARGET_TYPE,
+    ConsolidationAlreadyReconciledError,
     ConsolidationNotFoundError,
     ConsolidationRunner,
     ConsolidationStillProcessingError,
@@ -170,14 +171,19 @@ def create_consolidation_endpoint(
         db, request, action=AuditAction.CONSOLIDATION_STARTED, consolidation_id=consolidation.id
     )
 
-    consolidation = run_consolidation(
-        db,
-        consolidation,
-        file_bytes=file_bytes,
-        s3=s3,
-        runner=runner,
-        work_root=work_root,
-    )
+    try:
+        consolidation = run_consolidation(
+            db,
+            consolidation,
+            file_bytes=file_bytes,
+            s3=s3,
+            runner=runner,
+            work_root=work_root,
+        )
+    except ConsolidationAlreadyReconciledError:
+        # This run outlived the stale threshold (ticket #121): the reconciler
+        # already failed the row and audited CONSOLIDATION_FAILED for it.
+        return get_consolidation(db, consolidation_id=consolidation.id)
 
     _record_verified_audit_event(
         db,
@@ -281,7 +287,12 @@ def download_consolidation(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Consolidation not found."
         ) from None
-    if consolidation.result_storage_key is None:
+    # By status, not by a null key: since ticket #121 a key is recorded at
+    # creation, before any result exists.
+    if (
+        consolidation.status != ConsolidationStatus.COMPLETED
+        or consolidation.result_storage_key is None
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="No result is available for this consolidation.",

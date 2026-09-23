@@ -17,12 +17,15 @@ MediaProber Protocol / FakeMediaProber split:
   a `processing` row first, then temp workspace, calling the injected
   runner, uploading the result, and moving the row to its terminal status
   — independent of which runner (real or fake) it's given.
+
+`reconcile_stale_consolidations` (ticket #121) fails rows a run never
+finished, from the backend's own lifespan task (app/main.py).
 """
 
 import logging
 import shutil
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Protocol
@@ -31,7 +34,7 @@ from zipfile import BadZipFile
 from consolidation.observer_import import bereken_observer, lees_observer, schrijf_resultaat
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.models.audit_log import AuditAction
@@ -74,6 +77,13 @@ class ConsolidationInputError(Exception):
 
 class ConsolidationNotFoundError(Exception):
     """Raised for a nonexistent Consolidation id."""
+
+
+class ConsolidationAlreadyReconciledError(Exception):
+    """Raised by run_consolidation when its row was already moved to `failed`
+    by reconcile_stale_consolidations (ticket #121) before the run finished
+    — a run that outlived the stale threshold. That outcome, and its
+    CONSOLIDATION_FAILED audit row, stand."""
 
 
 class ConsolidationStillProcessingError(Exception):
@@ -186,6 +196,10 @@ def validate_workbook_opens(file_bytes: bytes) -> None:
     workbook.close()
 
 
+def _new_result_key() -> str:
+    return f"consolidations/{uuid.uuid4().hex}/result.xlsx"
+
+
 def start_consolidation(
     db: Session,
     *,
@@ -196,13 +210,16 @@ def start_consolidation(
 ) -> Consolidation:
     """Create and commit a `processing` Consolidation — before the runner
     starts, so the caller can audit CONSOLIDATION_STARTED against its id
-    (ticket #115)."""
+    (ticket #115). Its result key is chosen here too (ticket #121), so a
+    result uploaded by a run that never finishes can still be cleaned up by
+    reconcile_stale_consolidations."""
     consolidation = Consolidation(
         original_filename=original_filename,
         condition=condition,
         status=ConsolidationStatus.PROCESSING,
         requested_by_identity=requested_by_identity,
         input_size_bytes=input_size_bytes,
+        result_storage_key=_new_result_key(),
     )
     db.add(consolidation)
     db.commit()
@@ -234,7 +251,11 @@ def run_consolidation(
     (storage problem, a bug) is logged in full here and recorded only as
     GENERIC_FAILURE_REASON. If even that final commit fails (the database
     itself is down), the exception propagates and the row stays
-    `processing`.
+    `processing` until reconcile_stale_consolidations fails it.
+
+    Raises ConsolidationAlreadyReconciledError if the reconciler failed the
+    row as stale while this run was still going; the row then keeps that
+    outcome, and a result this run uploaded is removed again.
 
     The temp workspace is always removed afterward (`finally`), regardless
     of outcome — cleanup tests verify this directly.
@@ -244,21 +265,51 @@ def run_consolidation(
     workspace.mkdir(parents=True, exist_ok=True)
     input_path = workspace / "input.xlsx"
     output_path = workspace / "result.xlsx"
+    # Chosen by start_consolidation (ticket #121), the only way a row is
+    # created. A row from before #121 never reaches this: runs don't survive
+    # a deploy.
+    key = consolidation.result_storage_key
+    assert key is not None
 
     def _finish(
         status: ConsolidationStatus,
         *,
         failure_reason: str | None = None,
-        result_storage_key: str | None = None,
         result_size_bytes: int | None = None,
     ) -> Consolidation:
-        consolidation.status = status
-        consolidation.completed_at = datetime.now(UTC)
-        consolidation.failure_reason = failure_reason
-        consolidation.result_storage_key = result_storage_key
-        consolidation.result_size_bytes = result_size_bytes
+        # Only while still `processing` (ticket #121): if the reconciler
+        # already failed this row as stale, it keeps that outcome and its
+        # CONSOLIDATION_FAILED audit row, instead of being moved a second
+        # time.
+        transitioned = (
+            db.execute(
+                update(Consolidation)
+                .where(
+                    Consolidation.id == consolidation.id,
+                    Consolidation.status == ConsolidationStatus.PROCESSING,
+                )
+                .values(
+                    status=status,
+                    completed_at=datetime.now(UTC),
+                    failure_reason=failure_reason,
+                    result_storage_key=key,
+                    result_size_bytes=result_size_bytes,
+                )
+            ).rowcount
+            == 1
+        )
         db.commit()
         db.refresh(consolidation)
+        if not transitioned:
+            logger.warning(
+                "Consolidation %s was already reconciled as %s before its run finished",
+                consolidation.id,
+                consolidation.status.value,
+            )
+            if status == ConsolidationStatus.COMPLETED:
+                # Uploaded after the reconciler's own cleanup ran.
+                _delete_result_best_effort(s3, key, consolidation_id=consolidation.id)
+            raise ConsolidationAlreadyReconciledError(consolidation.id)
         return consolidation
 
     try:
@@ -268,7 +319,6 @@ def run_consolidation(
                 input_path=input_path, output_path=output_path, condition=consolidation.condition
             )
             result_size_bytes = output_path.stat().st_size
-            key = f"consolidations/{job_id}/result.xlsx"
             s3.upload_file(output_path, key)
         except ConsolidationInputError as exc:
             failure_reason = str(exc)[:FAILURE_REASON_MAX_LENGTH]
@@ -278,11 +328,7 @@ def run_consolidation(
             logger.exception("Consolidation %s failed unexpectedly", consolidation.id)
             return _finish(ConsolidationStatus.FAILED, failure_reason=GENERIC_FAILURE_REASON)
 
-        return _finish(
-            ConsolidationStatus.COMPLETED,
-            result_storage_key=key,
-            result_size_bytes=result_size_bytes,
-        )
+        return _finish(ConsolidationStatus.COMPLETED, result_size_bytes=result_size_bytes)
     finally:
         try:
             shutil.rmtree(workspace)
@@ -377,6 +423,96 @@ def delete_consolidation(
     # delete that got here first is a no-op rather than a stale-row error.
     db.execute(delete(Consolidation).where(Consolidation.id == consolidation_id))
     db.commit()
+
+
+def stale_failure_reason(stale_after: timedelta) -> str:
+    """The failure_reason of a row reconcile_stale_consolidations failed —
+    says the run was interrupted, not that the input was wrong."""
+    minutes = int(stale_after.total_seconds() // 60)
+    return f"Consolidation was interrupted: still processing after {minutes} minutes."
+
+
+def reconcile_stale_consolidations(
+    db: Session,
+    *,
+    s3: S3Client | None,
+    stale_after: timedelta,
+) -> list[int]:
+    """Fail every Consolidation still `processing` more than `stale_after`
+    after it was created, and return their ids (ticket #121).
+
+    Such a row belongs to a run that will never finish: the backend died or
+    restarted mid-run, or the database failed at the run's final commit.
+    A normal run takes seconds, and uploads are capped
+    (settings.consolidation_max_file_size_bytes), so a fixed threshold is
+    enough; see CONTEXT.md's "Consolidation reconciliation" decision.
+
+    One transaction moves every stale row to `failed` and writes its
+    CONSOLIDATION_FAILED audit row (identity None: a system action, not a
+    request). The audit write is required, not best-effort: if it fails,
+    the error propagates and nothing is committed, so the caller must close
+    or roll back `db`. The UPDATE only matches rows still `processing`, so
+    a row is never reconciled or audited twice, even by two overlapping
+    calls.
+
+    Only after that commit, each reconciled row's result object is removed
+    best-effort: the run may have uploaded it before dying. A failure there
+    is logged and changes nothing about the reconciled rows. `s3` is None
+    when no storage client could be built; the rows are still reconciled,
+    and the skipped cleanup is logged.
+    """
+    cutoff = datetime.now(UTC) - stale_after
+    failure_reason = stale_failure_reason(stale_after)
+    reconciled = db.execute(
+        update(Consolidation)
+        .where(
+            Consolidation.status == ConsolidationStatus.PROCESSING,
+            Consolidation.created_at < cutoff,
+        )
+        .values(
+            status=ConsolidationStatus.FAILED,
+            failure_reason=failure_reason,
+            completed_at=datetime.now(UTC),
+        )
+        .returning(Consolidation.id, Consolidation.result_storage_key)
+    ).all()
+    for consolidation_id, _ in reconciled:
+        record_required_audit_event(
+            db,
+            identity=None,
+            identity_verified=False,
+            action=AuditAction.CONSOLIDATION_FAILED,
+            target_type=AUDIT_TARGET_TYPE,
+            target=str(consolidation_id),
+            failure_reason=failure_reason,
+        )
+    db.commit()
+
+    for consolidation_id, result_storage_key in reconciled:
+        logger.warning(
+            "Reconciled consolidation %s: still processing after %s",
+            consolidation_id,
+            stale_after,
+        )
+        if result_storage_key is None:
+            continue
+        if s3 is None:
+            logger.error(
+                "No storage client: result %s of consolidation %s was not removed",
+                result_storage_key,
+                consolidation_id,
+            )
+            continue
+        _delete_result_best_effort(s3, result_storage_key, consolidation_id=consolidation_id)
+    return [consolidation_id for consolidation_id, _ in reconciled]
+
+
+def _delete_result_best_effort(s3: S3Client, key: str, *, consolidation_id: int) -> None:
+    """Remove a possibly-orphaned result object; a failure is only logged."""
+    try:
+        s3.delete_object(key)
+    except Exception:
+        logger.exception("Failed to remove result %s of consolidation %s", key, consolidation_id)
 
 
 # Every consolidation is visible to everyone (fully shared, like

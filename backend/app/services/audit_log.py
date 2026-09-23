@@ -67,7 +67,9 @@ def record_required_audit_event(
 
     The strict form of `record_audit_event`, for an action that must not go
     ahead unrecorded: a consolidation's hard delete (ticket #118, "a
-    failure partway through doesn't lose the record") is the only caller.
+    failure partway through doesn't lose the record") and the stale-
+    consolidation reconciler (ticket #121, whose status change and audit row
+    commit together or not at all).
     Flushes, so a failure surfaces here rather than at the caller's commit.
     Like `record_audit_event`, it never commits.
     """
