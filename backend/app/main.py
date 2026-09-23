@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from datetime import timedelta
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +18,8 @@ from app.core.config import settings
 from app.core.logging import configure_access_log_redaction
 from app.db.session import SessionLocal
 from app.services.audit_log import prune_old_audit_events
+from app.services.consolidation import reconcile_stale_consolidations
+from app.services.s3_client import get_s3_client
 
 # ADR 0002: the media-streaming endpoint's token query parameter must never
 # sit in plaintext access logs — see app/core/logging.py.
@@ -74,30 +77,74 @@ async def _prune_audit_log_periodically() -> None:
         await asyncio.sleep(settings.audit_log_prune_interval_seconds)
 
 
+def _reconcile_stale_consolidations_once() -> list[int]:
+    """Ticket #121. Opens and closes its own `Session` in this one call, for
+    the same thread-boundary reason as `_prune_audit_log_once` above.
+    Closing it also rolls back a reconciliation that failed partway, which
+    `reconcile_stale_consolidations` relies on.
+
+    A storage client that can't be built (get_s3_client fails closed on a
+    missing configuration) only skips the orphan cleanup: failing stuck
+    rows must not depend on storage."""
+    try:
+        s3 = get_s3_client()
+    except Exception:
+        logger.exception("No storage client; reconciling without orphan cleanup")
+        s3 = None
+    db = SessionLocal()
+    try:
+        return reconcile_stale_consolidations(
+            db,
+            s3=s3,
+            stale_after=timedelta(minutes=settings.consolidation_stale_after_minutes),
+        )
+    finally:
+        db.close()
+
+
+async def _reconcile_stale_consolidations_periodically() -> None:
+    """Ticket #121: fails Consolidations stuck in `processing`, once
+    immediately on startup (a restart mid-run is the most common way a row
+    gets stuck) and then every
+    `settings.consolidation_reconcile_interval_seconds`. Same shape, and
+    same reasons, as `_prune_audit_log_periodically` above: sync work in
+    `asyncio.to_thread`, and a failure is logged, never left to kill the
+    loop."""
+    while True:
+        try:
+            reconciled = await asyncio.to_thread(_reconcile_stale_consolidations_once)
+            if reconciled:
+                logger.info("Reconciled %d stale consolidation(s)", len(reconciled))
+        except Exception:
+            logger.exception("Failed to reconcile stale consolidations")
+        await asyncio.sleep(settings.consolidation_reconcile_interval_seconds)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # `settings.audit_log_prune_enabled` (default True) is the test-disable
-    # seam for this task — see its own docstring in app/core/config.py.
-    prune_task = (
-        asyncio.create_task(_prune_audit_log_periodically())
-        if settings.audit_log_prune_enabled
-        else None
-    )
+    # `settings.audit_log_prune_enabled` / `consolidation_reconcile_enabled`
+    # (default True) are the test-disable seams for these tasks — see their
+    # own comments in app/core/config.py.
+    tasks = []
+    if settings.audit_log_prune_enabled:
+        tasks.append(asyncio.create_task(_prune_audit_log_periodically()))
+    if settings.consolidation_reconcile_enabled:
+        tasks.append(asyncio.create_task(_reconcile_stale_consolidations_periodically()))
     try:
         yield
     finally:
-        if prune_task is not None:
-            prune_task.cancel()
-            # `cancel()` can't interrupt a prune already mid-DELETE inside
+        for task in tasks:
+            task.cancel()
+            # `cancel()` can't interrupt work already mid-query inside
             # `asyncio.to_thread` — cancellation only takes effect once
             # that thread's function returns, so an unbounded `await`
             # here would otherwise block the whole ASGI shutdown for
-            # however long that DELETE takes (caught in review). Bounded
+            # however long that query takes (caught in review). Bounded
             # so shutdown can't hang past a normal container stop grace
             # period; the thread itself still runs to completion on its
             # own regardless of this timeout, it just isn't waited on.
             with suppress(asyncio.CancelledError, TimeoutError):
-                await asyncio.wait_for(prune_task, timeout=5)
+                await asyncio.wait_for(task, timeout=5)
 
 
 # Everything is mounted under `/api` (ticket #71) so the reverse proxy in

@@ -128,6 +128,16 @@ def _audit_log_pruning_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _consolidation_reconcile_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same reason as `_audit_log_pruning_disabled` above, for ticket #121's
+    stale-consolidation reconcile task: it opens its own Session and would
+    otherwise commit real UPDATEs outside db_session's rollback. The
+    reconciliation itself is tested directly in
+    test_consolidation_reconcile.py."""
+    monkeypatch.setattr(settings, "consolidation_reconcile_enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def _identity_header_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point `settings.identity_header_name` at `tests.helpers.IDENTITY_HEADER`
     for every test (ticket #72) — production reads it from `.env`, and a

@@ -1885,9 +1885,8 @@ full server-side and stored only as the generic "Consolidation failed.".
 Atomicity still holds: the row only becomes `completed` after the result
 upload to object storage succeeds. Accepted gap: if the process dies
 mid-run, or the database itself fails at the final commit, the row stays
-`processing` forever — nothing reconciles it (acceptable for a
-synchronous, seconds-long request; revisit if history (#117) needs to
-hide/label such rows).
+`processing` until the stale-consolidation reconciler (ticket #121, see
+"Consolidation reconciliation" below) fails it.
 
 **Consolidation core flow — unopenable workbooks are rejected, not
 recorded:** The endpoint opens the upload with openpyxl (`read_only`)
@@ -1992,9 +1991,9 @@ the history list and its download is a 404 ("Consolidation not found.").
   call deletes at most one row and one object.
 - **`processing` rows can't be deleted (409).** Such a row may still be
   running in another request, whose final update would then fail and leave
-  its just-uploaded result orphaned in storage. The side effect is that a
-  row stuck in `processing` for good can't be deleted either; that is
-  #121's to solve (reconcile stuck rows), not something to work around here.
+  its just-uploaded result orphaned in storage. A row stuck in
+  `processing` for good becomes deletable once the #121 reconciler has
+  failed it.
 - **The audit row names only the id,** like every other consolidation
   audit row. After the delete, nothing in the database maps that id back
   to a filename or display name. Who deleted which id, and when, is on
@@ -2007,3 +2006,55 @@ the history list and its download is a 404 ("Consolidation not found.").
   inline second click ("Delete permanently?" → Delete / Cancel), since
   there's no undo. It isn't shown for `processing` rows. A failure keeps
   the row and shows the error on it.
+
+**Consolidation reconciliation (ticket #121, part of issue #113):** a
+Consolidation still `processing` more than `CONSOLIDATION_STALE_AFTER_MINUTES`
+(default **30**) after it was created is moved to `failed` by
+`reconcile_stale_consolidations`. That runs in an in-process lifespan task
+(`app/main.py`), the same pattern as the audit-log prune (#87): once at
+startup, then every `CONSOLIDATION_RECONCILE_INTERVAL_SECONDS` (default
+600). No queue or Celery; that becomes relevant only if consolidations
+ever need to run asynchronously for a long time.
+- **Why a fixed threshold is enough:** a real run takes seconds, so 30
+  minutes is far above it. What makes a fixed time *safe* is not a hard
+  runtime bound. The 25 MiB upload cap limits input size, not CPU time.
+  nginx's 300s `proxy_read_timeout` only drops the client, and the sync
+  run keeps going. The protection is the conditional finish (last bullet):
+  a run that outlives the threshold can't overwrite the reconciler's
+  outcome, and it removes its own late upload. The only cost of a too-low
+  threshold is a slow-but-healthy run reported as `failed`. If runs ever
+  get genuinely long, a heartbeat or explicit maximum runtime is the
+  better tool. A stuck row is failed within threshold + interval (at most
+  ~40 minutes by default).
+- **Atomic and idempotent:** one conditional `UPDATE ... WHERE status =
+  'processing' AND created_at < cutoff RETURNING ...` moves the stale rows
+  to `failed`. `CONSOLIDATION_FAILED` for each is written in the same
+  transaction, with identity null (a system action), and that write is
+  required, not best-effort, so status change and audit row commit together
+  or not at all. Because the UPDATE only matches `processing` rows, the
+  same consolidation can never be reconciled or audited twice, even by
+  overlapping runs. The failure reason is "Consolidation was interrupted:
+  still processing after N minutes.", which says it was an interrupted
+  run, not bad input.
+- **Orphan cleanup, best-effort:** after that commit, each reconciled row's
+  `consolidations/<uuid>/result.xlsx` is deleted (the run may have uploaded
+  it before dying, e.g. when the database failed at its final commit). A
+  storage failure there is logged and changes nothing in the database.
+  If no storage client can be built at all, the rows are still reconciled
+  and the skipped cleanup is logged: failing stuck rows never depends on
+  storage.
+- **The result key is recorded at creation** (`start_consolidation`), not
+  at completion, so that cleanup can find it. The consequence: a non-null
+  `result_storage_key` no longer means a result exists. Only a `completed`
+  row is guaranteed to have one, so the download endpoint now checks
+  `status`. Rows created before #121 have no key; they're still
+  reconciled, just without cleanup.
+- **A run that outlives the threshold keeps the reconciler's outcome.**
+  `run_consolidation` only moves its row out of `processing` if it is
+  still `processing` (a conditional UPDATE). If the reconciler already
+  failed it, the run deletes the result it uploaded, raises
+  `ConsolidationAlreadyReconciledError`, and the endpoint returns the
+  `failed` row without a second terminal audit event. This keeps #115's
+  "moved to its terminal status exactly once" true. Without it, a late run
+  could mark a row `completed` whose result the reconciler had already
+  deleted.

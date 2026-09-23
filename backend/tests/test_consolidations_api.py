@@ -8,6 +8,7 @@ mapping.
 """
 
 import logging
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 
 import openpyxl
@@ -20,6 +21,7 @@ from app.models.consolidation import Consolidation, ConsolidationCondition, Cons
 from app.services.consolidation import (
     ConsolidationInputError,
     list_consolidations,
+    reconcile_stale_consolidations,
     start_consolidation,
 )
 from tests.helpers import identity_headers
@@ -92,7 +94,7 @@ def test_create_consolidation_removes_the_temp_workspace_after_success(
 
 
 def test_create_consolidation_with_domain_validation_failure_is_still_a_201(
-    client, db_session, consolidation_runner
+    client, db_session, s3_client, consolidation_runner
 ):
     """Issue #113: a failed *consolidation attempt* is a successfully
     handled request (still 201), not an HTTP error — it still needs to
@@ -107,8 +109,9 @@ def test_create_consolidation_with_domain_validation_failure_is_still_a_201(
     assert body["failure_reason"] == "fases: ontbrekende kolommen ['duur_s']"
     assert body["result_size_bytes"] is None
 
+    # The key is recorded at creation (ticket #121), but nothing was stored.
     row = db_session.get(Consolidation, body["id"])
-    assert row.result_storage_key is None
+    assert row.result_storage_key not in s3_client.objects
 
 
 def test_create_consolidation_removes_the_temp_workspace_after_a_domain_failure(
@@ -181,7 +184,8 @@ def test_create_consolidation_is_never_completed_if_storing_the_result_fails(
 ):
     """Atomicity (issue #113): a row only becomes `completed` once the
     result upload is confirmed — a storage failure leaves it `failed`, with
-    no storage key, and the temp workspace is still cleaned up."""
+    nothing stored at its key, and the temp workspace is still cleaned
+    up."""
 
     def _raise(*args, **kwargs):
         raise RuntimeError("simulated storage outage")
@@ -194,7 +198,7 @@ def test_create_consolidation_is_never_completed_if_storing_the_result_fails(
     row = db_session.get(Consolidation, response.json()["id"])
     assert row.status == ConsolidationStatus.FAILED
     assert row.failure_reason == "Consolidation failed."
-    assert row.result_storage_key is None
+    assert row.result_storage_key not in s3_client.objects
     assert list(consolidation_upload_root.iterdir()) == []
     actions = list(
         db_session.scalars(
@@ -333,6 +337,22 @@ def test_download_consolidation_for_a_failed_consolidation_is_rejected(
     consolidation_runner.error = ConsolidationInputError("bad input")
     create_response = _upload(client)
     consolidation_id = create_response.json()["id"]
+
+    response = client.get(f"/api/consolidations/{consolidation_id}/download")
+
+    assert response.status_code == 409
+
+
+def test_download_consolidation_still_processing_is_rejected(client, db_session):
+    """A `processing` row already has its result key (ticket #121) but no
+    result behind it yet — a 409 like a failed one, not a storage 404."""
+    consolidation_id = start_consolidation(
+        db_session,
+        requested_by_identity=None,
+        original_filename="running.xlsx",
+        condition=ConsolidationCondition.ME,
+        input_size_bytes=1,
+    ).id
 
     response = client.get(f"/api/consolidations/{consolidation_id}/download")
 
@@ -790,3 +810,36 @@ def test_delete_consolidation_created_by_another_identity_still_succeeds(client)
     )
 
     assert response.status_code == 204, response.text
+
+
+def test_a_run_finishing_after_it_was_reconciled_as_stale_keeps_the_failed_outcome(
+    client, db_session, s3_client, consolidation_runner
+):
+    """Ticket #121: a run that outlives the stale threshold must not undo
+    the reconciler's `failed` (and its CONSOLIDATION_FAILED audit row), nor
+    leave behind the result it uploaded afterwards."""
+
+    def _reconcile_mid_run() -> None:
+        [row] = db_session.scalars(select(Consolidation))
+        row.created_at = datetime.now(UTC) - timedelta(hours=1)
+        db_session.commit()
+        reconcile_stale_consolidations(db_session, s3=s3_client, stale_after=timedelta(minutes=30))
+
+    consolidation_runner.on_run = _reconcile_mid_run
+
+    response = _upload(client)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["failure_reason"] == (
+        "Consolidation was interrupted: still processing after 30 minutes."
+    )
+    row = db_session.get(Consolidation, body["id"])
+    assert row.result_storage_key not in s3_client.objects
+    actions = list(
+        db_session.scalars(
+            select(AuditLog.action).where(AuditLog.target == str(row.id)).order_by(AuditLog.id)
+        )
+    )
+    assert actions == [AuditAction.CONSOLIDATION_STARTED, AuditAction.CONSOLIDATION_FAILED]

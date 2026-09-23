@@ -208,6 +208,22 @@ class Settings(BaseSettings):
     create_consolidation_rate_limit_max_attempts_per_identity: int = 10
     create_consolidation_rate_limit_window_seconds: int = 300
 
+    # Ticket #121: a Consolidation still `processing` this long after it was
+    # created belongs to a run that will never finish (the backend died or
+    # restarted mid-run, or the database failed at the final commit), and is
+    # moved to `failed` by the reconcile task in app/main.py — same
+    # in-process lifespan-task pattern as the audit-log prune above. 30
+    # minutes is far above a real run, which takes seconds. A run that does
+    # outlive it can't corrupt anything: it keeps the reconciler's `failed`
+    # (see run_consolidation). See CONTEXT.md's "Consolidation
+    # reconciliation" decision. `gt=0` on both: a zero threshold would fail
+    # every run still in progress, and a zero interval would busy-loop.
+    consolidation_stale_after_minutes: int = Field(default=30, gt=0)
+    consolidation_reconcile_interval_seconds: int = Field(default=10 * 60, gt=0)
+    # Test-only seam, same as audit_log_prune_enabled above — deliberately
+    # not in .env.example.
+    consolidation_reconcile_enabled: bool = True
+
     @property
     def cors_origin_list(self) -> list[str]:
         """CORS_ORIGINS as a comma-separated env var, split into a list."""
