@@ -22,12 +22,7 @@ class AuditAction(str, enum.Enum):
     CUT_PLAY_REQUESTED = "cut_play_requested"
     CUT_DOWNLOAD_REQUESTED = "cut_download_requested"
     # Ticket #115, part of issue #113's Excel consolidation feature.
-    # Deliberately no CONSOLIDATION_STARTED: unlike AnalysisJob/CuttingJob,
-    # a Consolidation row is only ever written once its outcome is already
-    # known (app.services.consolidation.create_consolidation never marks a
-    # row completed before persistence is confirmed) — there's no id to
-    # attribute a "started" event to beforehand without pre-creating a row
-    # this feature's synchronous, single-write design deliberately avoids.
+    CONSOLIDATION_STARTED = "consolidation_started"
     CONSOLIDATION_COMPLETED = "consolidation_completed"
     CONSOLIDATION_FAILED = "consolidation_failed"
     CONSOLIDATION_DOWNLOADED = "consolidation_downloaded"

@@ -13,25 +13,32 @@ MediaProber Protocol / FakeMediaProber split:
   replaced with a request-scoped temp path. Tests inject
   `FakeConsolidationRunner` (tests/fakes.py) instead of running this real,
   slower, fixture-dependent pipeline.
-- `create_consolidation`: HTTP-free orchestration — temp workspace,
-  calling the injected runner, uploading the result, and persisting a
-  `Consolidation` row — independent of which runner (real or fake) it's
-  given.
+- `start_consolidation` / `run_consolidation`: HTTP-free orchestration —
+  a `processing` row first, then temp workspace, calling the injected
+  runner, uploading the result, and moving the row to its terminal status
+  — independent of which runner (real or fake) it's given.
 """
 
 import logging
 import shutil
 import uuid
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Protocol
 from zipfile import BadZipFile
 
 from consolidation.observer_import import bereken_observer, lees_observer, schrijf_resultaat
+from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy.orm import Session
 
-from app.models.consolidation import Consolidation, ConsolidationCondition, ConsolidationStatus
+from app.models.consolidation import (
+    FAILURE_REASON_MAX_LENGTH,
+    Consolidation,
+    ConsolidationCondition,
+    ConsolidationStatus,
+)
 from app.services.s3_client import S3Client
 
 logger = logging.getLogger(__name__)
@@ -133,37 +140,87 @@ def get_consolidation_runner() -> ConsolidationRunner:
     return _consolidation_runner
 
 
-def create_consolidation(
+# Shown to the user for any failure that isn't a ConsolidationInputError —
+# the real exception is only ever logged server-side (issue #113).
+GENERIC_FAILURE_REASON = "Consolidation failed."
+
+
+class InvalidWorkbookError(Exception):
+    """The upload doesn't open as an Excel workbook at all — rejected by the
+    endpoint as a web/file validation error before any Consolidation is
+    created (ticket #115), never reaching the runner."""
+
+
+def validate_workbook_opens(file_bytes: bytes) -> None:
+    """Raise InvalidWorkbookError unless `file_bytes` opens as a workbook.
+
+    Deliberately catches *any* exception: this is a gate on untrusted
+    bytes with none of our own logic inside, and openpyxl signals a
+    malformed file in many ways (BadZipFile, InvalidFileException, a bare
+    OSError or KeyError for missing OOXML parts, XML parse errors, ...).
+    `read_only=True` keeps this to the workbook's structure, without
+    loading every sheet's cells.
+    """
+    try:
+        workbook = load_workbook(BytesIO(file_bytes), read_only=True)
+    except MemoryError:
+        # A resource problem (e.g. a decompression bomb), not a verdict on
+        # the file's validity — never masked as a 400.
+        raise
+    except Exception as exc:
+        raise InvalidWorkbookError("The uploaded file is not a valid Excel workbook.") from exc
+    workbook.close()
+
+
+def start_consolidation(
     db: Session,
     *,
     requested_by_identity: str | None,
     original_filename: str,
     condition: ConsolidationCondition,
+    input_size_bytes: int,
+) -> Consolidation:
+    """Create and commit a `processing` Consolidation — before the runner
+    starts, so the caller can audit CONSOLIDATION_STARTED against its id
+    (ticket #115)."""
+    consolidation = Consolidation(
+        original_filename=original_filename,
+        condition=condition,
+        status=ConsolidationStatus.PROCESSING,
+        requested_by_identity=requested_by_identity,
+        input_size_bytes=input_size_bytes,
+    )
+    db.add(consolidation)
+    db.commit()
+    db.refresh(consolidation)
+    return consolidation
+
+
+def run_consolidation(
+    db: Session,
+    consolidation: Consolidation,
+    *,
     file_bytes: bytes,
     s3: S3Client,
     runner: ConsolidationRunner,
     work_root: Path,
 ) -> Consolidation:
-    """Run one consolidation synchronously and persist its outcome
+    """Run `consolidation` synchronously and move it to its terminal status
     (issue #113: "simplest reliable architecture" — no worker/queue).
 
     Writes `file_bytes` to a job-scoped temp directory (UUID-named, mirroring
     worker/cutting-worker's own job-dir convention), invokes `runner`, and —
-    only if that succeeds — uploads the result to `s3` before writing a
-    `completed` Consolidation row with its storage key. If `runner` raises
-    ConsolidationInputError, a `failed` row is written instead, with that
-    error's message as `failure_reason` (issue #113: shown to the user
-    near-verbatim). Either way this always returns a Consolidation — it
-    never raises for an expected input problem, since that's a valid, real
-    outcome to persist and report, not a failure of this function itself.
+    only if that succeeds — uploads the result to `s3` before marking the
+    row `completed` with its storage key. So a row is never `completed`
+    without a persisted result behind it.
 
-    A genuinely unexpected exception (a storage/DB problem, or a bug) is
-    deliberately *not* caught here: no row exists yet to update to `failed`
-    at that point (this function commits exactly once, right before
-    returning), so there is nothing to reconcile — it propagates to the
-    caller like any other unhandled exception in this codebase, logged in
-    full server-side by the caller and reported as a generic 500 to the
-    frontend.
+    Any failure marks the row `failed` and still returns it: a
+    ConsolidationInputError's message is used near-verbatim as
+    `failure_reason` (issue #113: actionable for the user); anything else
+    (storage problem, a bug) is logged in full here and recorded only as
+    GENERIC_FAILURE_REASON. If even that final commit fails (the database
+    itself is down), the exception propagates and the row stays
+    `processing`.
 
     The temp workspace is always removed afterward (`finally`), regardless
     of outcome — cleanup tests verify this directly.
@@ -174,43 +231,41 @@ def create_consolidation(
     input_path = workspace / "input.xlsx"
     output_path = workspace / "result.xlsx"
 
-    def _persist(**outcome_fields: object) -> Consolidation:
-        # Shared by both outcomes below (caught in review: previously
-        # duplicated field-by-field, risking the two falling out of sync)
-        # — original_filename/condition/requested_by_identity/
-        # input_size_bytes/completed_at are common to every Consolidation
-        # this function ever writes; outcome_fields supplies the rest
-        # (status, and whichever of failure_reason/result_storage_key/
-        # result_size_bytes apply).
-        consolidation = Consolidation(
-            original_filename=original_filename,
-            condition=condition,
-            requested_by_identity=requested_by_identity,
-            input_size_bytes=len(file_bytes),
-            completed_at=datetime.now(UTC),
-            **outcome_fields,
-        )
-        db.add(consolidation)
+    def _finish(
+        status: ConsolidationStatus,
+        *,
+        failure_reason: str | None = None,
+        result_storage_key: str | None = None,
+        result_size_bytes: int | None = None,
+    ) -> Consolidation:
+        consolidation.status = status
+        consolidation.completed_at = datetime.now(UTC)
+        consolidation.failure_reason = failure_reason
+        consolidation.result_storage_key = result_storage_key
+        consolidation.result_size_bytes = result_size_bytes
         db.commit()
         db.refresh(consolidation)
         return consolidation
 
     try:
-        input_path.write_bytes(file_bytes)
-
         try:
-            runner.run(input_path=input_path, output_path=output_path, condition=condition)
+            input_path.write_bytes(file_bytes)
+            runner.run(
+                input_path=input_path, output_path=output_path, condition=consolidation.condition
+            )
+            result_size_bytes = output_path.stat().st_size
+            key = f"consolidations/{job_id}/result.xlsx"
+            s3.upload_file(output_path, key)
         except ConsolidationInputError as exc:
-            failure_reason = str(exc)[:500]
-            logger.info("Consolidation failed for %r: %s", original_filename, failure_reason)
-            return _persist(status=ConsolidationStatus.FAILED, failure_reason=failure_reason)
+            failure_reason = str(exc)[:FAILURE_REASON_MAX_LENGTH]
+            logger.info("Consolidation %s failed: %s", consolidation.id, failure_reason)
+            return _finish(ConsolidationStatus.FAILED, failure_reason=failure_reason)
+        except Exception:
+            logger.exception("Consolidation %s failed unexpectedly", consolidation.id)
+            return _finish(ConsolidationStatus.FAILED, failure_reason=GENERIC_FAILURE_REASON)
 
-        result_size_bytes = output_path.stat().st_size
-        key = f"consolidations/{job_id}/result.xlsx"
-        s3.upload_file(output_path, key)
-
-        return _persist(
-            status=ConsolidationStatus.COMPLETED,
+        return _finish(
+            ConsolidationStatus.COMPLETED,
             result_storage_key=key,
             result_size_bytes=result_size_bytes,
         )

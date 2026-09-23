@@ -6,7 +6,7 @@ import { API_BASE_URL, errorFromResponse } from '@/services/apiBase'
 // vocabulary (CONTEXT.md's Language section), not consolidation/'s
 // internal Dutch "deel" names.
 export type ConsolidationCondition = 'ME' | 'ZE' | 'ME_ZE'
-export type ConsolidationStatus = 'completed' | 'failed'
+export type ConsolidationStatus = 'processing' | 'completed' | 'failed'
 
 export interface Consolidation {
   id: number

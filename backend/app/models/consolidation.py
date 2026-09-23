@@ -8,12 +8,13 @@ from app.db.base import Base
 from app.models.analysis_job import REQUESTED_BY_IDENTITY_MAX_LENGTH
 
 # Shared with app.api.consolidations, which rejects a too-long filename
-# before ever calling create_consolidation (caught in review: an unchecked
-# 256+ character filename previously reached the point of a completed S3
-# upload before failing on this column's own length constraint, breaking
-# the "never persist a row before the outcome is known" atomicity guarantee
-# by leaving an orphaned S3 object with no row to reference it).
+# before ever creating a Consolidation (caught in review: an unchecked
+# 256+ character filename previously got as far as a completed S3 upload
+# before failing on this column's own length constraint, leaving an
+# orphaned S3 object with no row to reference it).
 ORIGINAL_FILENAME_MAX_LENGTH = 255
+# Shared with app.services.consolidation, which truncates to it.
+FAILURE_REASON_MAX_LENGTH = 500
 
 
 class ConsolidationCondition(str, enum.Enum):
@@ -33,13 +34,14 @@ class ConsolidationCondition(str, enum.Enum):
 
 
 class ConsolidationStatus(str, enum.Enum):
-    """Only two terminal states — ticket #115 runs consolidation
+    """`processing` -> `completed` | `failed`. Consolidation still runs
     synchronously inside the request (issue #113's "simplest reliable
-    architecture" decision: no worker/queue), so a Consolidation row is
-    only ever written once the outcome is already known. There's no
-    persisted `processing` state for anything outside the request to ever
-    observe."""
+    architecture": no worker/queue), but the row is created as
+    `processing` before the runner starts so CONSOLIDATION_STARTED has an
+    id to attribute to, and so an attempt whose process dies mid-run
+    still leaves a trace (it stays `processing`; nothing reconciles it)."""
 
+    PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -51,10 +53,9 @@ class Consolidation(Base):
     mirroring AnalysisJob/CuttingJob (ADR-0004) — requested_by_identity is
     attribution only, never an access check.
 
-    Written exactly once, after the outcome is known
-    (app.services.consolidation.create_consolidation never marks a row
-    `completed` before its result is confirmed uploaded) — never updated
-    from one status to the other afterward.
+    Created as `processing` and moved to its terminal status exactly once
+    (app.services.consolidation.run_consolidation never marks a row
+    `completed` before its result is confirmed uploaded).
     """
 
     __tablename__ = "consolidations"
@@ -93,9 +94,10 @@ class Consolidation(Base):
     # bounding rule as AnalysisJobVideo.failure_reason. For a domain
     # validation failure from consolidation/'s own code, this is that
     # message near-verbatim (issue #113's error-handling decision); for
-    # anything else, create_consolidation never reaches the point of
-    # writing this row at all — see its docstring.
-    failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # anything else, a generic message (the real exception is only logged).
+    failure_reason: Mapped[str | None] = mapped_column(
+        String(FAILURE_REASON_MAX_LENGTH), nullable=True
+    )
     # Null for a failed consolidation — nothing was ever persisted to
     # object storage.
     result_storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
@@ -104,7 +106,7 @@ class Consolidation(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    # Set for both outcomes (mirrors AnalysisJob.finished_at, set for every
-    # terminal status including failed) — "when this attempt finished",
-    # not "when it succeeded".
+    # Set for both terminal outcomes, null while `processing` (mirrors
+    # AnalysisJob.finished_at) — "when this attempt finished", not "when it
+    # succeeded".
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -1871,17 +1871,32 @@ real research data into an image, alongside `.gitignore`'s existing one.
 `"../backend"`. Verified by actually building the image and importing
 `consolidation` from inside it, not just by reasoning about the config.
 
-**Consolidation core flow — synchronous, single-write persistence:** A
-`Consolidation` row is written exactly once, only after its outcome
-(`completed` or `failed`) is already known — never a pre-created
-`queued`/`processing` row later updated. This is what makes the
-"never mark completed before the result is persisted" atomicity
-requirement trivial to hold: there's nothing to roll back or reconcile,
-since nothing is written until the real outcome is in hand. The
-consequence (caught in review, fixed before merge): a genuinely
-unexpected exception (storage/DB failure, or a bug) must propagate
-uncaught rather than being wrapped into a synthesized `failed` row —
-there is no row yet at that point to attach one to.
+**Consolidation core flow — synchronous, but the row is created first:**
+Consolidation still runs synchronously inside the request (no
+worker/queue), but a `Consolidation` row is created as `processing` (and
+`CONSOLIDATION_STARTED` audited against its id) *before* the runner
+starts, then moved to `completed`/`failed` exactly once. An earlier
+single-write design (row written only once the outcome was known) was
+dropped because it made `CONSOLIDATION_STARTED` impossible — there was no
+id to attribute it to — and meant an unexpected failure left no trace. Now
+any failure marks the row `failed`: a `ConsolidationInputError` keeps its
+message near-verbatim, anything else (storage outage, a bug) is logged in
+full server-side and stored only as the generic "Consolidation failed.".
+Atomicity still holds: the row only becomes `completed` after the result
+upload to object storage succeeds. Accepted gap: if the process dies
+mid-run, or the database itself fails at the final commit, the row stays
+`processing` forever — nothing reconciles it (acceptable for a
+synchronous, seconds-long request; revisit if history (#117) needs to
+hide/label such rows).
+
+**Consolidation core flow — unopenable workbooks are rejected, not
+recorded:** The endpoint opens the upload with openpyxl (`read_only`)
+before creating any row; a file that isn't an openable workbook gets a
+400 and never appears in history, same as a wrong extension or an empty
+file (ticket #115's "validate workbook openability before invoking the
+adapter"). A workbook that opens but has the wrong shape (missing sheets,
+bad columns) still reaches the adapter and is recorded as a `failed`
+Consolidation with the domain message.
 
 **Consolidation core flow — nginx body-size limit:** `client_max_body_size`
 (shared across every route — see "Request bodies are small JSON

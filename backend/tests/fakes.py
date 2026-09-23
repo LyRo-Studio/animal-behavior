@@ -1,11 +1,10 @@
 import hashlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 from app.models.consolidation import ConsolidationCondition
-from app.services.consolidation import ConsolidationInputError
 from app.services.media_prober import MediaProbeError, ProbedMediaInfo
 from app.services.s3_client import S3ObjectInfo, S3ObjectNotFoundError
 
@@ -127,13 +126,20 @@ class FakeConsolidationRunner:
     """
 
     result_bytes: bytes = b"fake consolidated workbook"
-    error: ConsolidationInputError | None = None
+    # Any exception, not just ConsolidationInputError — lets a test drive
+    # the "unexpected failure" path too.
+    error: Exception | None = None
+    # Invoked mid-run, before `error`/output — lets a test observe
+    # persisted state while the consolidation is in flight.
+    on_run: Callable[[], None] | None = None
     calls: list[tuple[bytes, ConsolidationCondition]] = field(default_factory=list)
 
     def run(
         self, *, input_path: Path, output_path: Path, condition: ConsolidationCondition
     ) -> None:
         self.calls.append((Path(input_path).read_bytes(), condition))
+        if self.on_run is not None:
+            self.on_run()
         if self.error is not None:
             raise self.error
         Path(output_path).write_bytes(self.result_bytes)
