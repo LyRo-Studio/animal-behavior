@@ -16,6 +16,47 @@ import pytest
 from app.models.consolidation import ConsolidationCondition
 from app.services.consolidation import ConsolidationInputError, ObserverConsolidationRunner
 
+# Real Observer-export column layout, generated values only — see
+# fixtures/consolidation/build_synthetic_observer_export.py.
+_SYNTHETIC_EXPORT = (
+    Path(__file__).parent / "fixtures" / "consolidation" / "synthetic_observer_export.xlsx"
+)
+
+
+@pytest.mark.parametrize("condition", list(ConsolidationCondition))
+def test_synthetic_observer_export_consolidates_for_every_condition(
+    tmp_path: Path, condition: ConsolidationCondition
+) -> None:
+    output_path = tmp_path / "result.xlsx"
+
+    ObserverConsolidationRunner().run(
+        input_path=_SYNTHETIC_EXPORT, output_path=output_path, condition=condition
+    )
+
+    result_workbook = openpyxl.load_workbook(output_path, read_only=True)
+    assert "consolidatie" in result_workbook.sheetnames
+    per_test = result_workbook["per_test"]
+    test_ids = [row[0] for row in per_test.iter_rows(min_row=2, values_only=True)]
+    assert test_ids == ["T901", "T902"]
+
+
+def test_raw_and_edited_results_disagreeing_raises_the_domain_message(tmp_path: Path) -> None:
+    """A domain ValueError on the real sheet shape: lees_observer checks every
+    selected measurement in `Results (2)` against raw `Results`."""
+    workbook = openpyxl.load_workbook(_SYNTHETIC_EXPORT)
+    source = workbook["Results (2)"]
+    duration_column = next(c.column for c in source[1] if c.value == "Duration")
+    source.cell(2, duration_column).value = 999.0
+    input_path = tmp_path / "input.xlsx"
+    workbook.save(input_path)
+
+    with pytest.raises(ConsolidationInputError, match="Ruwe data wijkt af van kopie"):
+        ObserverConsolidationRunner().run(
+            input_path=input_path,
+            output_path=tmp_path / "result.xlsx",
+            condition=ConsolidationCondition.ME,
+        )
+
 
 def test_not_a_workbook_raises_consolidation_input_error(tmp_path: Path) -> None:
     input_path = tmp_path / "input.xlsx"
@@ -103,17 +144,11 @@ def test_a_bug_inside_bereken_observer_is_not_miscategorized_as_input_error(
 def test_real_observer_export_succeeds(tmp_path: Path) -> None:
     """Opt-in: exercises the real pipeline against a real Observer export.
 
-    No fixture file can substitute for this — the two .xlsx files checked
-    into backend/tests/fixtures/consolidation/ are blank input *templates*
-    for consolidatie.py's *other*, generic entry point (see that
-    directory's README); they don't have the `Results (2)` / `Results` /
-    `Results (REL)` sheet shape this pipeline needs, and a synthetic
-    from-scratch fixture would have to hand-replicate real Observer XT
-    export formatting (merged cells, yellow out-of-sight fills, exact
-    column headers) closely enough to be more liability than signal. A
-    real export was used to verify this pipeline during ticket #114's
-    review but was deliberately not committed (real research data, not a
-    fixture) — see .gitignore.
+    The synthetic fixture above has the real column layout but generated
+    values; this additionally checks real measurements (e.g. Observer's own
+    rounding) still pass. A real export was used to verify this pipeline
+    during ticket #114's review but was deliberately not committed (real
+    research data, not a fixture) — see .gitignore.
 
     Skipped (never failed) unless CONSOLIDATION_REAL_FIXTURE_PATH names a
     real local Observer export on disk — same "clear skip reason" pattern
