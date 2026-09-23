@@ -83,6 +83,13 @@ class S3Client(Protocol):
         caller."""
         ...
 
+    def delete_object(self, key: str) -> None:
+        """Delete the object at `key` — a consolidation's hard delete
+        (ticket #118), the only current caller. A missing key is not an
+        error, same as S3's own DeleteObject, so a retried delete never
+        fails on an object an earlier attempt already removed."""
+        ...
+
 
 class BotoS3Client:
     """Real S3Client, backed by boto3. Works with S3-compatible storage
@@ -210,6 +217,9 @@ class BotoS3Client:
                 use_threads=True,
             ),
         )
+
+    def delete_object(self, key: str) -> None:
+        self._client.delete_object(Bucket=self._bucket_name, Key=key)
 
 
 # A response's body is read from S3 this many bytes at a time via

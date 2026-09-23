@@ -77,6 +77,9 @@ class FakeS3Client:
     def upload_file(self, local_path: Path, key: str) -> None:
         self.objects[key] = Path(local_path).read_bytes()
 
+    def delete_object(self, key: str) -> None:
+        self.objects.pop(key, None)
+
 
 @dataclass
 class FakeMediaProber:

@@ -1,5 +1,6 @@
 """Excel consolidation upload/consolidate/download (ticket #115, part of
-issue #113), its history list (ticket #116) and rename (ticket #117) —
+issue #113), its history list (ticket #116), rename (ticket #117) and
+delete (ticket #118) —
 mirrors app/api/analyses.py's "no auth, identity for attribution only"
 shape (ticket #72). Processing is synchronous: the create endpoint's
 response already carries the final outcome, so there is no separate
@@ -10,7 +11,7 @@ architecture", no worker/queue).
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -32,9 +33,12 @@ from app.models.consolidation import (
 from app.schemas.consolidations import ConsolidationOut, RenameConsolidationRequest
 from app.services.audit_log import record_audit_event
 from app.services.consolidation import (
+    AUDIT_TARGET_TYPE,
     ConsolidationNotFoundError,
     ConsolidationRunner,
+    ConsolidationStillProcessingError,
     InvalidWorkbookError,
+    delete_consolidation,
     get_consolidation,
     get_consolidation_runner,
     list_consolidations,
@@ -85,7 +89,7 @@ def _record_verified_audit_event(
         identity=verified_identity,
         identity_verified=identity_verified,
         action=action,
-        target_type="consolidation",
+        target_type=AUDIT_TARGET_TYPE,
         target=str(consolidation_id),
         failure_reason=failure_reason,
     )
@@ -222,6 +226,41 @@ def rename_consolidation_endpoint(
         db, request, action=AuditAction.CONSOLIDATION_RENAMED, consolidation_id=consolidation_id
     )
     return consolidation
+
+
+@router.delete("/{consolidation_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_consolidation_endpoint(
+    consolidation_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    s3: S3Client = Depends(get_s3_client),
+) -> Response:
+    """Hard-delete `consolidation_id` and its stored result (ticket #118).
+    No ownership check — fully shared, like rename and download (ADR-0004).
+    Unlike the other endpoints here, the audit row is written by the
+    service itself, committed before anything is deleted — see
+    app.services.consolidation.delete_consolidation. No CSRF token and no
+    rate limit, like rename — see CONTEXT.md's "Consolidation delete"
+    decision."""
+    verified_identity, identity_verified = get_verified_identity(request)
+    try:
+        delete_consolidation(
+            db,
+            consolidation_id=consolidation_id,
+            s3=s3,
+            identity=verified_identity,
+            identity_verified=identity_verified,
+        )
+    except ConsolidationNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Consolidation not found."
+        ) from None
+    except ConsolidationStillProcessingError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A consolidation still processing can't be deleted.",
+        ) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/{consolidation_id}/download")

@@ -28,6 +28,8 @@ class AuditAction(str, enum.Enum):
     CONSOLIDATION_DOWNLOADED = "consolidation_downloaded"
     # Ticket #117.
     CONSOLIDATION_RENAMED = "consolidation_renamed"
+    # Ticket #118.
+    CONSOLIDATION_DELETED = "consolidation_deleted"
 
 
 class AuditLog(Base):

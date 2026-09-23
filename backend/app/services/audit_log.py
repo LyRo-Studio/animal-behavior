@@ -40,18 +40,48 @@ def record_audit_event(
     """
     try:
         with db.begin_nested():
-            db.add(
-                AuditLog(
-                    identity=identity,
-                    identity_verified=identity_verified,
-                    action=action,
-                    target_type=target_type,
-                    target=target,
-                    failure_reason=failure_reason,
-                )
+            record_required_audit_event(
+                db,
+                identity=identity,
+                identity_verified=identity_verified,
+                action=action,
+                target_type=target_type,
+                target=target,
+                failure_reason=failure_reason,
             )
     except Exception:
         logger.exception("Failed to record audit event %s for %s:%s", action, target_type, target)
+
+
+def record_required_audit_event(
+    db: Session,
+    *,
+    identity: str | None,
+    identity_verified: bool,
+    action: AuditAction,
+    target_type: str,
+    target: str,
+    failure_reason: str | None = None,
+) -> None:
+    """Write one `audit_log` row, and raise if it can't be written.
+
+    The strict form of `record_audit_event`, for an action that must not go
+    ahead unrecorded: a consolidation's hard delete (ticket #118, "a
+    failure partway through doesn't lose the record") is the only caller.
+    Flushes, so a failure surfaces here rather than at the caller's commit.
+    Like `record_audit_event`, it never commits.
+    """
+    db.add(
+        AuditLog(
+            identity=identity,
+            identity_verified=identity_verified,
+            action=action,
+            target_type=target_type,
+            target=target,
+            failure_reason=failure_reason,
+        )
+    )
+    db.flush()
 
 
 def prune_old_audit_events(db: Session, *, retention_days: int) -> int:

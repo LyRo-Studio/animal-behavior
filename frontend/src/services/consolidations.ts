@@ -127,6 +127,17 @@ export async function renameConsolidation(
   return toConsolidation(await response.json())
 }
 
+// Ticket #118: a hard delete of the consolidation and its stored result —
+// no undo. A consolidation still `processing` is refused (409), since it
+// may still be running.
+export async function deleteConsolidation(id: number): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/consolidations/${id}`, { method: 'DELETE' })
+
+  if (!response.ok) {
+    throw await errorFromResponse(response, 'Failed to delete consolidation.')
+  }
+}
+
 // A plain download (ticket #115, mirroring downloadAnalysisReport) — fetch
 // + Blob, no native <a>/<video> request involved.
 export async function downloadConsolidation(id: number): Promise<Blob> {

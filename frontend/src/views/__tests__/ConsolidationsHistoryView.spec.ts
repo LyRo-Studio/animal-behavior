@@ -7,12 +7,14 @@ import ConsolidationsHistoryView from '../ConsolidationsHistoryView.vue'
 const listConsolidationsMock = vi.hoisted(() => vi.fn())
 const downloadConsolidationMock = vi.hoisted(() => vi.fn())
 const renameConsolidationMock = vi.hoisted(() => vi.fn())
+const deleteConsolidationMock = vi.hoisted(() => vi.fn())
 
 vi.mock('@/services/consolidations', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/consolidations')>()),
   listConsolidations: listConsolidationsMock,
   downloadConsolidation: downloadConsolidationMock,
   renameConsolidation: renameConsolidationMock,
+  deleteConsolidation: deleteConsolidationMock,
 }))
 
 function createTestRouter() {
@@ -66,6 +68,7 @@ describe('ConsolidationsHistoryView', () => {
     listConsolidationsMock.mockReset()
     downloadConsolidationMock.mockReset()
     renameConsolidationMock.mockReset()
+    deleteConsolidationMock.mockReset()
   })
 
   it('loads and lists every consolidation with its filename, condition, status and date', async () => {
@@ -351,6 +354,99 @@ describe('ConsolidationsHistoryView', () => {
       expect(
         row.find('[data-testid="consolidation-history-rename-input"]').attributes('maxlength'),
       ).toBe('255')
+    })
+  })
+
+  describe('delete', () => {
+    function rowsOf(wrapper: Awaited<ReturnType<typeof mountView>>) {
+      return wrapper.findAll('[data-testid="consolidation-history-row"]')
+    }
+
+    it('asks for confirmation before deleting anything', async () => {
+      listConsolidationsMock.mockResolvedValue([consolidation({ id: 7 })])
+
+      const wrapper = await mountView()
+      await rowsOf(wrapper)[0].find('[data-testid="consolidation-history-delete"]').trigger('click')
+
+      expect(deleteConsolidationMock).not.toHaveBeenCalled()
+      expect(
+        rowsOf(wrapper)[0].find('[data-testid="consolidation-history-delete-confirm"]').exists(),
+      ).toBe(true)
+    })
+
+    it('deletes on confirmation and removes the row from the list', async () => {
+      listConsolidationsMock.mockResolvedValue([
+        consolidation({ id: 8, originalFilename: 'kept.xlsx' }),
+        consolidation({ id: 7, originalFilename: 'deleted.xlsx' }),
+      ])
+      deleteConsolidationMock.mockResolvedValue(undefined)
+
+      const wrapper = await mountView()
+      const row = rowsOf(wrapper)[1]
+      await row.find('[data-testid="consolidation-history-delete"]').trigger('click')
+      await row.find('[data-testid="consolidation-history-delete-confirm"]').trigger('click')
+      await flushPromises()
+
+      expect(deleteConsolidationMock).toHaveBeenCalledWith(7)
+      expect(rowsOf(wrapper)).toHaveLength(1)
+      expect(wrapper.text()).toContain('kept.xlsx')
+      expect(wrapper.text()).not.toContain('deleted.xlsx')
+    })
+
+    it('shows the empty state once the last consolidation is deleted', async () => {
+      listConsolidationsMock.mockResolvedValue([consolidation({ id: 7 })])
+      deleteConsolidationMock.mockResolvedValue(undefined)
+
+      const wrapper = await mountView()
+      const row = rowsOf(wrapper)[0]
+      await row.find('[data-testid="consolidation-history-delete"]').trigger('click')
+      await row.find('[data-testid="consolidation-history-delete-confirm"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.text()).toContain('No consolidations yet.')
+    })
+
+    it('can back out of a delete without deleting', async () => {
+      listConsolidationsMock.mockResolvedValue([consolidation({ id: 7 })])
+
+      const wrapper = await mountView()
+      const row = rowsOf(wrapper)[0]
+      await row.find('[data-testid="consolidation-history-delete"]').trigger('click')
+      await row.find('[data-testid="consolidation-history-delete-cancel"]').trigger('click')
+
+      expect(deleteConsolidationMock).not.toHaveBeenCalled()
+      expect(row.find('[data-testid="consolidation-history-delete-confirm"]').exists()).toBe(false)
+      expect(rowsOf(wrapper)).toHaveLength(1)
+    })
+
+    it('keeps the row and shows the error on it when deleting fails', async () => {
+      listConsolidationsMock.mockResolvedValue([consolidation({ id: 8 }), consolidation({ id: 7 })])
+      deleteConsolidationMock.mockRejectedValue(new Error('Failed to delete consolidation.'))
+
+      const wrapper = await mountView()
+      const row = rowsOf(wrapper)[1]
+      await row.find('[data-testid="consolidation-history-delete"]').trigger('click')
+      await row.find('[data-testid="consolidation-history-delete-confirm"]').trigger('click')
+      await flushPromises()
+
+      expect(rowsOf(wrapper)).toHaveLength(2)
+      expect(rowsOf(wrapper)[1].text()).toContain('Failed to delete consolidation.')
+      expect(rowsOf(wrapper)[0].text()).not.toContain('Failed to delete consolidation.')
+    })
+
+    it('offers delete for completed and failed consolidations, but not one still processing', async () => {
+      listConsolidationsMock.mockResolvedValue([
+        consolidation({ id: 9, status: 'completed' }),
+        consolidation({ id: 8, status: 'failed', failureReason: 'bad input' }),
+        consolidation({ id: 7, status: 'processing' }),
+      ])
+
+      const wrapper = await mountView()
+      const deletable = rowsOf(wrapper).map((row) =>
+        row.find('[data-testid="consolidation-history-delete"]').exists(),
+      )
+
+      expect(deletable).toEqual([true, true, false])
     })
   })
 })
