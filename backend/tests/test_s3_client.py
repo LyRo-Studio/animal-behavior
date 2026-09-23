@@ -358,3 +358,33 @@ def test_get_s3_client_returns_the_same_instance_across_calls(monkeypatch):
         second = get_s3_client()
 
     assert first is second
+
+
+def test_delete_object_removes_the_object():
+    fake = FakeS3Client(objects={"consolidations/abc/result.xlsx": b"x", "other": b"y"})
+
+    fake.delete_object("consolidations/abc/result.xlsx")
+
+    assert fake.objects == {"other": b"y"}
+
+
+def test_delete_object_for_a_missing_key_is_a_no_op():
+    """Same as real S3's DeleteObject, which answers 204 for a missing key —
+    so retrying a half-finished delete never fails on an already-gone
+    object."""
+    fake = FakeS3Client(objects={"other": b"y"})
+
+    fake.delete_object("consolidations/abc/result.xlsx")
+
+    assert fake.objects == {"other": b"y"}
+
+
+def test_boto_delete_object_deletes_the_key_from_the_bucket():
+    with patch("app.services.s3_client.boto3.client") as boto_client_factory:
+        mock_client = boto_client_factory.return_value
+
+        _boto_client().delete_object("consolidations/abc/result.xlsx")
+
+        mock_client.delete_object.assert_called_once_with(
+            Bucket="test-bucket", Key="consolidations/abc/result.xlsx"
+        )

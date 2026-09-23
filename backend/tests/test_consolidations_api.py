@@ -11,11 +11,17 @@ import logging
 from io import BytesIO
 
 import openpyxl
+import pytest
 from sqlalchemy import select
 
+import app.services.consolidation as consolidation_service
 from app.models.audit_log import AuditAction, AuditLog
-from app.models.consolidation import Consolidation, ConsolidationStatus
-from app.services.consolidation import ConsolidationInputError
+from app.models.consolidation import Consolidation, ConsolidationCondition, ConsolidationStatus
+from app.services.consolidation import (
+    ConsolidationInputError,
+    list_consolidations,
+    start_consolidation,
+)
 from tests.helpers import identity_headers
 
 
@@ -422,9 +428,6 @@ def test_list_consolidations_is_bounded_to_the_newest_rows(db_session):
     """Every consolidation is visible to everyone, so an unscoped listing
     would grow without bound — capped like list_analysis_jobs
     (ENGINEERING-STANDARDS.md §5: avoid unbounded database queries)."""
-    from app.models.consolidation import ConsolidationCondition
-    from app.services.consolidation import list_consolidations, start_consolidation
-
     ids = [
         start_consolidation(
             db_session,
@@ -602,3 +605,188 @@ def test_rename_consolidation_created_by_another_identity_still_succeeds(client)
     )
 
     assert response.status_code == 200, response.text
+
+
+def _deleted_audit_rows(db_session):
+    return db_session.scalars(
+        select(AuditLog).where(AuditLog.action == AuditAction.CONSOLIDATION_DELETED)
+    ).all()
+
+
+def test_delete_consolidation_removes_the_stored_result_and_the_row(client, db_session, s3_client):
+    consolidation_id = _upload(client).json()["id"]
+    key = db_session.get(Consolidation, consolidation_id).result_storage_key
+    assert key in s3_client.objects
+
+    response = client.delete(f"/api/consolidations/{consolidation_id}")
+
+    assert response.status_code == 204, response.text
+    assert response.content == b""
+    assert key not in s3_client.objects
+    db_session.expire_all()
+    assert db_session.get(Consolidation, consolidation_id) is None
+
+
+def test_delete_consolidation_then_download_is_not_found(client):
+    consolidation_id = _upload(client).json()["id"]
+
+    client.delete(f"/api/consolidations/{consolidation_id}")
+    response = client.get(f"/api/consolidations/{consolidation_id}/download")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Consolidation not found."}
+
+
+def test_delete_consolidation_removes_it_from_the_history_list(client):
+    kept_id = _upload(client, filename="kept.xlsx").json()["id"]
+    deleted_id = _upload(client, filename="deleted.xlsx").json()["id"]
+
+    client.delete(f"/api/consolidations/{deleted_id}")
+
+    assert [row["id"] for row in client.get("/api/consolidations").json()] == [kept_id]
+
+
+def test_delete_consolidation_writes_a_deleted_audit_row(client, db_session):
+    consolidation_id = _upload(client).json()["id"]
+
+    # The audit log's own identity source (ADR-0005), unverified here.
+    response = client.delete(
+        f"/api/consolidations/{consolidation_id}",
+        headers={"X-authentik-email": "deleter@vives.be"},
+    )
+
+    assert response.status_code == 204, response.text
+    [row] = _deleted_audit_rows(db_session)
+    assert row.target_type == "consolidation"
+    assert row.target == str(consolidation_id)
+    assert row.identity == "deleter@vives.be"
+    assert row.identity_verified is False
+
+
+def test_delete_consolidation_is_on_record_even_if_storage_fails_and_can_be_retried(
+    client, db_session, s3_client, monkeypatch
+):
+    """CONSOLIDATION_DELETED is committed before anything is deleted
+    (ticket #118: "not after — so a failure partway through doesn't lose
+    the record"). A storage failure therefore leaves the attempt on record
+    with the consolidation still intact, and a retry finishes the job."""
+    consolidation_id = _upload(client).json()["id"]
+    key = db_session.get(Consolidation, consolidation_id).result_storage_key
+    real_delete_object = s3_client.delete_object
+
+    def _raise(key):
+        raise RuntimeError("simulated storage outage")
+
+    monkeypatch.setattr(s3_client, "delete_object", _raise)
+
+    with pytest.raises(RuntimeError, match="simulated storage outage"):
+        client.delete(f"/api/consolidations/{consolidation_id}")
+
+    db_session.expire_all()
+    assert db_session.get(Consolidation, consolidation_id) is not None
+    assert key in s3_client.objects
+    assert len(_deleted_audit_rows(db_session)) == 1
+
+    monkeypatch.setattr(s3_client, "delete_object", real_delete_object)
+    retry = client.delete(f"/api/consolidations/{consolidation_id}")
+
+    assert retry.status_code == 204, retry.text
+    db_session.expire_all()
+    assert db_session.get(Consolidation, consolidation_id) is None
+    assert key not in s3_client.objects
+    assert len(_deleted_audit_rows(db_session)) == 2
+
+
+def test_delete_consolidation_is_aborted_if_the_audit_row_cannot_be_written(
+    client, db_session, s3_client, monkeypatch
+):
+    """Unlike every other audited action (issue #79: best-effort, never
+    blocks the action), a delete must not go ahead unrecorded (ticket #118:
+    "a failure partway through doesn't lose the record")."""
+    consolidation_id = _upload(client).json()["id"]
+    key = db_session.get(Consolidation, consolidation_id).result_storage_key
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("simulated audit write failure")
+
+    monkeypatch.setattr(consolidation_service, "record_required_audit_event", _raise)
+
+    with pytest.raises(RuntimeError, match="simulated audit write failure"):
+        client.delete(f"/api/consolidations/{consolidation_id}")
+
+    db_session.expire_all()
+    assert db_session.get(Consolidation, consolidation_id) is not None
+    assert key in s3_client.objects
+
+
+def test_delete_consolidation_succeeds_when_the_stored_result_is_already_gone(
+    client, db_session, s3_client
+):
+    """A retry after a half-finished delete (object removed, database commit
+    lost) must still be able to finish the job."""
+    consolidation_id = _upload(client).json()["id"]
+    del s3_client.objects[db_session.get(Consolidation, consolidation_id).result_storage_key]
+
+    response = client.delete(f"/api/consolidations/{consolidation_id}")
+
+    assert response.status_code == 204, response.text
+    db_session.expire_all()
+    assert db_session.get(Consolidation, consolidation_id) is None
+
+
+def test_delete_a_failed_consolidation_removes_the_row(client, db_session, consolidation_runner):
+    """A failed consolidation never stored a result — only the row goes."""
+    consolidation_runner.error = ConsolidationInputError("bad input")
+    consolidation_id = _upload(client).json()["id"]
+
+    response = client.delete(f"/api/consolidations/{consolidation_id}")
+
+    assert response.status_code == 204, response.text
+    db_session.expire_all()
+    assert db_session.get(Consolidation, consolidation_id) is None
+    assert len(_deleted_audit_rows(db_session)) == 1
+
+
+def test_delete_a_processing_consolidation_is_rejected(client, db_session):
+    """A `processing` row may still be running in another request, whose
+    final update would then fail and orphan its uploaded result — so it
+    can't be deleted (rows stuck in `processing` are #121's problem)."""
+    consolidation_id = start_consolidation(
+        db_session,
+        requested_by_identity=None,
+        original_filename="running.xlsx",
+        condition=ConsolidationCondition.ME,
+        input_size_bytes=1,
+    ).id
+
+    response = client.delete(f"/api/consolidations/{consolidation_id}")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "A consolidation still processing can't be deleted."}
+    db_session.expire_all()
+    assert db_session.get(Consolidation, consolidation_id) is not None
+    assert _deleted_audit_rows(db_session) == []
+
+
+def test_delete_consolidation_for_an_unknown_id_is_not_found(client, db_session):
+    response = client.delete("/api/consolidations/999999")
+
+    assert response.status_code == 404
+    assert _deleted_audit_rows(db_session) == []
+
+
+def test_delete_consolidation_created_by_another_identity_still_succeeds(client):
+    """Fully shared (issue #113, ADR-0004) — no ownership check on delete."""
+    create_response = client.post(
+        "/api/consolidations",
+        data={"condition": "ME_ZE"},
+        files={"file": ("export.xlsx", BytesIO(_WORKBOOK_BYTES), "application/octet-stream")},
+        headers=identity_headers("owner@vives.be"),
+    )
+
+    response = client.delete(
+        f"/api/consolidations/{create_response.json()['id']}",
+        headers=identity_headers("someone-else@vives.be"),
+    )
+
+    assert response.status_code == 204, response.text

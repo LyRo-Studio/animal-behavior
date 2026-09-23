@@ -1955,7 +1955,55 @@ session cookie in front of the app *is* a browser-managed credential.
 Whether a cross-site request carries it depends on that cookie's SameSite
 setting, which lives in Mechatronics' authentik config, not this repo.
 Every state-changing endpoint (`POST /analyses`, `/analyses/{id}/cancel`,
-`POST /consolidations`, this `PATCH`) inherits the same answer. The frontend
+`POST /consolidations`, this `PATCH`, and since #118
+`DELETE /consolidations/{id}`) inherits the same answer. The frontend
 renames inline in `ConsolidationsHistoryView`, one row at a time: Enter
 saves, Escape cancels, and a failure stays on its row with the input still
 open.
+
+**Consolidation delete (ticket #118, part of issue #113):**
+`DELETE /api/consolidations/{id}` → 204 is a hard delete of the stored
+result and the row. There's no soft-delete flag and no undelete, and no
+ownership check (fully shared, ADR-0004). After it, the row is gone from
+the history list and its download is a 404 ("Consolidation not found.").
+- **Audit first, not in one transaction with the delete.**
+  `CONSOLIDATION_DELETED` (migration `0014`) is committed *before* the
+  object and row are deleted (ticket #118: "before or as part of the
+  deletion, not after — so a failure partway through doesn't lose the
+  record"). Committing it together with the row delete, after the object
+  delete, was considered and rejected: a failed commit would then lose the
+  record of an object that really is gone. The accepted cost: a storage or
+  database failure after the audit commit leaves an audit row saying
+  "deleted" for a consolidation that still exists, and the retry (which
+  works, because deleting a missing object is a no-op) records a second
+  one.
+- **The audit write is required here, not best-effort.** Every other
+  audited action uses `record_audit_event`, which swallows a failed write
+  so the action itself never fails (issue #79 story 9). For a delete that
+  would let the record be lost, so `delete_consolidation` uses
+  `record_required_audit_event`: if the audit row can't be written, the
+  error propagates and nothing is deleted. (`record_audit_event` now calls
+  the strict form inside its savepoint, so there's one insert path.) This,
+  and the ordering above, is why this is the one consolidation endpoint
+  whose audit row is written by the service, not the API layer.
+- **No CSRF token and no rate limit**, the same decisions as rename (#117):
+  the app issues no credential of its own, the open authentik-cookie
+  question applies to this endpoint too (added to #117's list), and each
+  call deletes at most one row and one object.
+- **`processing` rows can't be deleted (409).** Such a row may still be
+  running in another request, whose final update would then fail and leave
+  its just-uploaded result orphaned in storage. The side effect is that a
+  row stuck in `processing` for good can't be deleted either; that is
+  #121's to solve (reconcile stuck rows), not something to work around here.
+- **The audit row names only the id,** like every other consolidation
+  audit row. After the delete, nothing in the database maps that id back
+  to a filename or display name. Who deleted which id, and when, is on
+  record, and earlier audit rows for the same id show who created,
+  downloaded or renamed it. `audit_log` has no field for details (same
+  limitation noted for rename).
+- `S3Client` gained `delete_object` (idempotent, like S3's DeleteObject).
+  The bucket credentials must allow `s3:DeleteObject` on `consolidations/`.
+- The frontend's delete action in `ConsolidationsHistoryView` needs an
+  inline second click ("Delete permanently?" → Delete / Cancel), since
+  there's no undo. It isn't shown for `processing` rows. A failure keeps
+  the row and shows the error on it.

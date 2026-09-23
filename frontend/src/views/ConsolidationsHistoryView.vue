@@ -4,6 +4,7 @@ import { onMounted, ref } from 'vue'
 import {
   CONSOLIDATION_CONDITION_LABELS,
   CONSOLIDATION_DISPLAY_NAME_MAX_LENGTH,
+  deleteConsolidation,
   downloadConsolidation,
   listConsolidations,
   renameConsolidation,
@@ -87,6 +88,31 @@ async function saveRename(consolidation: Consolidation) {
     renameError.value = err instanceof Error ? err.message : 'Failed to rename consolidation.'
   } finally {
     isSavingRename.value = false
+  }
+}
+
+// Delete (ticket #118) — a hard delete with no undo, so it takes a second,
+// inline confirmation click. Not offered while a consolidation is still
+// `processing` (the backend refuses it: it may still be running).
+const confirmingDeleteId = ref<number | null>(null)
+const deletingId = ref<number | null>(null)
+// Keyed by consolidation id, like downloadErrors.
+const deleteErrors = ref<Record<number, string>>({})
+
+async function confirmDelete(consolidation: Consolidation) {
+  if (deletingId.value !== null) return
+
+  deletingId.value = consolidation.id
+  delete deleteErrors.value[consolidation.id]
+  try {
+    await deleteConsolidation(consolidation.id)
+    consolidations.value = consolidations.value.filter((row) => row.id !== consolidation.id)
+  } catch (err) {
+    deleteErrors.value[consolidation.id] =
+      err instanceof Error ? err.message : 'Failed to delete consolidation.'
+  } finally {
+    deletingId.value = null
+    confirmingDeleteId.value = null
   }
 }
 </script>
@@ -194,16 +220,50 @@ async function saveRename(consolidation: Consolidation) {
                 </span>
               </p>
             </div>
-            <button
-              v-if="consolidation.status === 'completed'"
-              type="button"
-              data-testid="consolidation-history-download"
-              :disabled="downloadingId !== null"
-              class="shrink-0 rounded-md bg-primary px-3 py-1.5 font-medium text-white hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-              @click="download(consolidation)"
-            >
-              {{ downloadingId === consolidation.id ? 'Downloading…' : 'Download' }}
-            </button>
+            <div class="flex shrink-0 items-center gap-3">
+              <button
+                v-if="consolidation.status === 'completed'"
+                type="button"
+                data-testid="consolidation-history-download"
+                :disabled="downloadingId !== null"
+                class="rounded-md bg-primary px-3 py-1.5 font-medium text-white hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                @click="download(consolidation)"
+              >
+                {{ downloadingId === consolidation.id ? 'Downloading…' : 'Download' }}
+              </button>
+              <template v-if="consolidation.status !== 'processing'">
+                <template v-if="confirmingDeleteId === consolidation.id">
+                  <span class="text-muted">Delete permanently?</span>
+                  <button
+                    type="button"
+                    data-testid="consolidation-history-delete-confirm"
+                    :disabled="deletingId !== null"
+                    class="font-medium text-danger hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                    @click="confirmDelete(consolidation)"
+                  >
+                    {{ deletingId === consolidation.id ? 'Deleting…' : 'Delete' }}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="consolidation-history-delete-cancel"
+                    :disabled="deletingId !== null"
+                    class="text-muted hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                    @click="confirmingDeleteId = null"
+                  >
+                    Cancel
+                  </button>
+                </template>
+                <button
+                  v-else
+                  type="button"
+                  data-testid="consolidation-history-delete"
+                  class="text-danger hover:underline"
+                  @click="confirmingDeleteId = consolidation.id"
+                >
+                  Delete
+                </button>
+              </template>
+            </div>
           </div>
           <p
             v-if="consolidation.status === 'failed'"
@@ -221,6 +281,9 @@ async function saveRename(consolidation: Consolidation) {
           </p>
           <p v-if="downloadErrors[consolidation.id]" class="mt-1 text-danger" role="alert">
             {{ downloadErrors[consolidation.id] }}
+          </p>
+          <p v-if="deleteErrors[consolidation.id]" class="mt-1 text-danger" role="alert">
+            {{ deleteErrors[consolidation.id] }}
           </p>
         </li>
       </ul>

@@ -31,18 +31,25 @@ from zipfile import BadZipFile
 from consolidation.observer_import import bereken_observer, lees_observer, schrijf_resultaat
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.models.audit_log import AuditAction
 from app.models.consolidation import (
     FAILURE_REASON_MAX_LENGTH,
     Consolidation,
     ConsolidationCondition,
     ConsolidationStatus,
 )
+from app.services.audit_log import record_required_audit_event
 from app.services.s3_client import S3Client
 
 logger = logging.getLogger(__name__)
+
+# The audit log's `target_type` for every consolidation event — shared with
+# app.api.consolidations, which audits every consolidation action except
+# delete (see delete_consolidation for why that one is audited here).
+AUDIT_TARGET_TYPE = "consolidation"
 
 # Confirmed 1:1 during issue #113's spec work by actually running the
 # pipeline: deel "1" writes "...deel1_met_eigenaar..." (ME), deel "2"
@@ -67,6 +74,12 @@ class ConsolidationInputError(Exception):
 
 class ConsolidationNotFoundError(Exception):
     """Raised for a nonexistent Consolidation id."""
+
+
+class ConsolidationStillProcessingError(Exception):
+    """Raised when deleting a `processing` Consolidation (ticket #118): it
+    may still be running in another request, whose final update would then
+    fail and leave its just-uploaded result orphaned in object storage."""
 
 
 class ConsolidationRunner(Protocol):
@@ -303,6 +316,67 @@ def rename_consolidation(
     db.commit()
     db.refresh(consolidation)
     return consolidation
+
+
+def delete_consolidation(
+    db: Session,
+    *,
+    consolidation_id: int,
+    s3: S3Client,
+    identity: str | None,
+    identity_verified: bool,
+) -> None:
+    """Hard-delete `consolidation_id` (ticket #118): its stored result and
+    its row, with no soft-delete flag and no undelete.
+
+    CONSOLIDATION_DELETED is recorded here, and committed *before* anything
+    is deleted (ticket #118: "before or as part of the deletion, not after
+    — so a failure partway through doesn't lose the record"). That's why
+    this one service function takes the audit identity, where the other
+    endpoints audit in the API layer. The order is:
+
+    1. commit the audit row;
+    2. delete the stored object;
+    3. delete the row and commit.
+
+    Unlike every other audited action, the audit write here is not
+    best-effort (issue #79's "never block the action" rule): if step 1
+    fails, the error propagates and nothing is deleted. After step 1, a
+    failure at any step leaves the deletion on record. If step 2 or 3
+    fails, the audit row says "deleted" while the consolidation is still
+    there (still listed; downloadable if step 2 failed, a clean 404 if step
+    3 did). The error reaches the caller, and retrying finishes the job:
+    deleting an already-missing object is a no-op, and each retry records
+    its own audit row. Committing the audit row together with the row
+    deletion instead would avoid that duplicate, but a failed commit after
+    step 2 would then lose the record of an object that is really gone.
+
+    Raises ConsolidationNotFoundError for a nonexistent id, and
+    ConsolidationStillProcessingError for a `processing` row. Neither
+    records anything.
+    """
+    consolidation = get_consolidation(db, consolidation_id=consolidation_id)
+    if consolidation.status == ConsolidationStatus.PROCESSING:
+        raise ConsolidationStillProcessingError(consolidation_id)
+    result_storage_key = consolidation.result_storage_key
+
+    record_required_audit_event(
+        db,
+        identity=identity,
+        identity_verified=identity_verified,
+        action=AuditAction.CONSOLIDATION_DELETED,
+        target_type=AUDIT_TARGET_TYPE,
+        target=str(consolidation_id),
+    )
+    db.commit()
+
+    if result_storage_key is not None:
+        s3.delete_object(result_storage_key)
+
+    # A bulk DELETE rather than `db.delete(consolidation)`, so a concurrent
+    # delete that got here first is a no-op rather than a stale-row error.
+    db.execute(delete(Consolidation).where(Consolidation.id == consolidation_id))
+    db.commit()
 
 
 # Every consolidation is visible to everyone (fully shared, like
