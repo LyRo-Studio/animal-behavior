@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 
+import ConsolidationStatusBadge from '@/components/ConsolidationStatusBadge.vue'
 import {
   CONSOLIDATION_CONDITION_LABELS,
   createConsolidation,
@@ -171,6 +172,22 @@ async function download() {
       >
         <h2 class="font-medium text-danger">Consolidation failed</h2>
         <p class="mt-2 text-sm text-danger">{{ result.failureReason }}</p>
+      </div>
+
+      <!-- Not returned by today's synchronous POST, but a valid status all the
+           same (ticket #122): shown as reported, with nothing to download. -->
+      <div
+        v-else-if="result && result.status === 'processing'"
+        class="mt-6 rounded-md border border-border bg-surface p-4"
+        data-testid="consolidation-processing"
+      >
+        <ConsolidationStatusBadge :status="result.status" />
+        <p class="mt-2 text-sm text-muted">
+          Source: <span class="text-foreground">{{ result.originalFilename }}</span>
+        </p>
+        <p class="mt-1 text-sm text-muted">
+          Created: <span class="text-foreground">{{ formatDate(result.createdAt) }}</span>
+        </p>
       </div>
     </section>
   </main>

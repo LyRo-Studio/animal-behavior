@@ -2058,3 +2058,22 @@ ever need to run asynchronously for a long time.
   "moved to its terminal status exactly once" true. Without it, a late run
   could mark a row `completed` whose result the reconciler had already
   deleted.
+
+**Consolidation status display (ticket #122, part of issue #113):** every
+frontend view handles all three `ConsolidationStatus` values explicitly.
+The history list shows each row's status as a `ConsolidationStatusBadge`
+(`frontend/src/components/`); the upload page keeps its existing
+"Consolidation completed"/"Consolidation failed" panels and uses the badge
+only for its `processing` panel. The badge maps `processing` →
+"Processing…" (warning token, small spinner), `completed` → "Completed"
+(success), `failed` → "Failed" (danger). Its label/token table is a
+`Record<ConsolidationStatus, …>`, so a new status added to the type without
+a presentation is a type error rather than a row that renders nothing.
+`processing` never has a download action, in the history list or on the
+upload page.
+- **The frontend never decides a `processing` row is stale.** No age check,
+  no "stuck" label, no polling or auto-refresh. Staleness is owned by the
+  #121 reconciler, which moves such rows to `failed` server-side; the
+  frontend then shows them as "Failed" like any other. Two independent
+  thresholds (backend minutes vs. a frontend guess) would drift apart, so the
+  database stays the single source of truth.

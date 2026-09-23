@@ -2,6 +2,8 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRouter, createWebHistory } from 'vue-router'
 
+import { formatDate } from '@/utils/date'
+
 import ConsolidationsHistoryView from '../ConsolidationsHistoryView.vue'
 
 const listConsolidationsMock = vi.hoisted(() => vi.fn())
@@ -86,8 +88,9 @@ describe('ConsolidationsHistoryView', () => {
     expect(rows[0].find('[data-testid="consolidation-history-condition"]').text()).toBe('ZE')
     expect(rows[1].text()).toContain('first.xlsx')
     expect(rows[1].find('[data-testid="consolidation-history-condition"]').text()).toBe('ME + ZE')
-    expect(rows[0].find('[data-testid="consolidation-history-status"]').text()).toContain(
-      'completed',
+    expect(rows[0].find('[data-testid="consolidation-history-status"]').text()).toBe('Completed')
+    expect(rows[0].find('[data-testid="consolidation-history-created-at"]').text()).toBe(
+      formatDate('2026-01-02T10:00:00Z'),
     )
   })
 
@@ -130,23 +133,21 @@ describe('ConsolidationsHistoryView', () => {
 
     const wrapper = await mountView()
 
-    expect(wrapper.find('[data-testid="consolidation-history-status"]').text()).toContain('failed')
+    expect(wrapper.find('[data-testid="consolidation-history-status"]').text()).toBe('Failed')
     expect(wrapper.find('[data-testid="consolidation-history-failure-reason"]').text()).toBe(
       "fases: ontbrekende kolommen ['duur_s']",
     )
     expect(wrapper.find('[data-testid="consolidation-history-download"]').exists()).toBe(false)
   })
 
-  it('offers no download action for a consolidation still processing', async () => {
+  it('shows a consolidation still processing as such, with no download action', async () => {
     listConsolidationsMock.mockResolvedValue([
       consolidation({ status: 'processing', resultSizeBytes: null, completedAt: null }),
     ])
 
     const wrapper = await mountView()
 
-    expect(wrapper.find('[data-testid="consolidation-history-status"]').text()).toContain(
-      'processing',
-    )
+    expect(wrapper.find('[data-testid="consolidation-history-status"]').text()).toBe('Processing…')
     expect(wrapper.find('[data-testid="consolidation-history-download"]').exists()).toBe(false)
   })
 
