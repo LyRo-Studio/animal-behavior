@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 
+import ConsolidationStatusBadge from '@/components/ConsolidationStatusBadge.vue'
 import {
   CONSOLIDATION_CONDITION_LABELS,
   CONSOLIDATION_DISPLAY_NAME_MAX_LENGTH,
@@ -204,14 +205,18 @@ async function confirmDelete(consolidation: Consolidation) {
               >
                 Source: {{ consolidation.originalFilename }}
               </p>
-              <p class="text-muted">
+              <p class="mt-1 flex flex-wrap items-center gap-x-1 text-muted">
+                <ConsolidationStatusBadge
+                  :status="consolidation.status"
+                  data-testid="consolidation-history-status"
+                />
                 <span data-testid="consolidation-history-condition">{{
                   CONSOLIDATION_CONDITION_LABELS[consolidation.condition]
                 }}</span>
                 ·
-                <span data-testid="consolidation-history-status">
-                  {{ consolidation.status }} · {{ formatDate(consolidation.createdAt) }}
-                </span>
+                <span data-testid="consolidation-history-created-at">{{
+                  formatDate(consolidation.createdAt)
+                }}</span>
                 <span
                   v-if="consolidation.requestedByIdentity"
                   data-testid="consolidation-history-requested-by"

@@ -143,6 +143,23 @@ describe('ConsolidationView', () => {
     expect(wrapper.find('[data-testid="download-consolidation"]').exists()).toBe(false)
   })
 
+  it('shows a consolidation still processing as such, with no download button', async () => {
+    createConsolidationMock.mockResolvedValue(
+      consolidation({ status: 'processing', resultSizeBytes: null, completedAt: null }),
+    )
+
+    const wrapper = await mountView()
+    await selectFile(wrapper)
+    await wrapper.find('[data-testid="consolidate"]').trigger('click')
+    await flushPromises()
+
+    const processing = wrapper.find('[data-testid="consolidation-processing"]')
+    expect(processing.exists()).toBe(true)
+    expect(processing.text()).toContain('Processing…')
+    expect(processing.text()).toContain('export.xlsx')
+    expect(wrapper.find('[data-testid="download-consolidation"]').exists()).toBe(false)
+  })
+
   it('shows the backend-provided reason when the request itself is rejected', async () => {
     createConsolidationMock.mockRejectedValue(new Error('File must be an .xlsx Excel file.'))
 
