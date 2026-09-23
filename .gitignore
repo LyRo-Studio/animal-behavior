@@ -31,3 +31,7 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Real research data used for local verification of consolidation/ (ticket
+# #114) — never committed, contains real study data, not a test fixture.
+consolidation/10_extra_honden_alle_data_met_modifiers.xlsx
