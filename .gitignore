@@ -32,6 +32,10 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Real research data used for local verification of consolidation/ (ticket
-# #114) — never committed, contains real study data, not a test fixture.
+# Real research data that may sit alongside consolidation/'s source for local
+# verification (ticket #114) — never committed, not test fixtures. Covers the
+# real export and its companions (consolidatie.py's OVERVIEW_NAME, and the
+# ethogram reference file observer_import.py reads).
 consolidation/10_extra_honden_alle_data_met_modifiers.xlsx
+consolidation/*overzicht*.xlsx
+consolidation/*ethogram*.xlsx
