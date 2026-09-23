@@ -1,3 +1,8 @@
+# Build context is the repo root (docker-compose.yml's `backend` service),
+# not backend/ — ticket #115, part of issue #113's Excel consolidation
+# feature: this image needs to reach the sibling consolidation/ folder too,
+# the same reason worker/Dockerfile and cutting-worker/Dockerfile already
+# build from repo root (see the root .dockerignore's note on this).
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -10,10 +15,18 @@ RUN apt-get update \
     && apt-get install --no-install-recommends -y ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
+COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY backend/app ./app
+COPY backend/alembic ./alembic
+COPY backend/alembic.ini ./alembic.ini
+# Only the two domain modules the adapter (app/services/consolidation.py)
+# actually imports — not consolidation/'s own requirements.txt, notebook,
+# or sample fixtures, mirroring worker/Dockerfile's "only the slice this
+# image actually needs" style of explicit-file COPY.
+COPY consolidation/consolidatie.py ./consolidation/consolidatie.py
+COPY consolidation/observer_import.py ./consolidation/observer_import.py
 
 EXPOSE 8000
 

@@ -21,6 +21,11 @@ class AuditAction(str, enum.Enum):
     REPORT_DOWNLOADED = "report_downloaded"
     CUT_PLAY_REQUESTED = "cut_play_requested"
     CUT_DOWNLOAD_REQUESTED = "cut_download_requested"
+    # Ticket #115, part of issue #113's Excel consolidation feature.
+    CONSOLIDATION_STARTED = "consolidation_started"
+    CONSOLIDATION_COMPLETED = "consolidation_completed"
+    CONSOLIDATION_FAILED = "consolidation_failed"
+    CONSOLIDATION_DOWNLOADED = "consolidation_downloaded"
 
 
 class AuditLog(Base):

@@ -14,12 +14,18 @@ select = ["E", "F", "I", "UP", "B"]
 ignore = ["B008"]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+# ".." (repo root) makes the sibling consolidation/ folder importable —
+# ticket #115, part of issue #113's Excel consolidation feature — same
+# mechanism worker/pyproject.toml already uses to reach "../backend".
+pythonpath = [".", ".."]
 testpaths = ["tests"]
 # Ticket #23: the real-bucket smoke test opts in via `-m real_bucket`
 # (which overrides this default), so a plain `pytest` run — and CI — never
-# touches the network or needs real S3 credentials.
-addopts = "-m \"not real_bucket\""
+# touches the network or needs real S3 credentials. Ticket #115 adds
+# `real_consolidation_fixture` the same way, for a real Observer export no
+# fixture file can substitute for (see its own test's docstring).
+addopts = "-m \"not real_bucket and not real_consolidation_fixture\""
 markers = [
     "real_bucket: exercises the real S3 bucket and its gateway over the network (opt-in — run with `pytest -m real_bucket`)",
+    "real_consolidation_fixture: exercises the real Observer-export pipeline against a real local fixture (opt-in — run with `pytest -m real_consolidation_fixture`)",
 ]

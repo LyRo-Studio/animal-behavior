@@ -257,13 +257,16 @@ def _resolve_range(range_header: str, total_size: int) -> tuple[int, int] | None
     return start, end
 
 
-def _content_disposition(disposition: str, filename: str) -> str:
+def content_disposition(disposition: str, filename: str) -> str:
     """A `Content-Disposition` header value with `filename` as a properly
     escaped quoted-string (RFC 6266 / RFC 7230 §3.2.6: a `"` or `\\` inside
     a quoted-string must be backslash-escaped) — a Cut filename is only
     guaranteed to contain no "/" (see `_CUT_KEY_RE`), not to be free of
     quote characters, and an unescaped one would otherwise break the
-    header's own syntax.
+    header's own syntax. Shared with app.api.consolidations (ticket #115),
+    whose original_filename is similarly untrusted (only checked for a
+    ".xlsx" suffix, never for quote/backslash characters) — not module-
+    private anymore now that a second caller needs it (caught in review).
     """
     escaped = filename.replace("\\", "\\\\").replace('"', '\\"')
     return f'{disposition}; filename="{escaped}"'
@@ -322,7 +325,7 @@ def stream_cut(
     content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     headers = {
         "Accept-Ranges": "bytes",
-        "Content-Disposition": _content_disposition(disposition, filename),
+        "Content-Disposition": content_disposition(disposition, filename),
         # ADR 0002: the token travels in the URL, so responses must never
         # leak it onward via a Referer header on a subsequent request.
         "Referrer-Policy": "no-referrer",

@@ -490,8 +490,10 @@ boundary).
   Dockerfile can `COPY` files out of `backend/app` (see "Source reuse"
   above). A new root-level `.dockerignore` keeps that context from
   pulling in `.git`, `.env`, `backend/.venv`, `frontend/node_modules`, etc.
-  (`backend`'s and `frontend`'s own Dockerfiles keep their existing scoped
-  contexts and `.dockerignore` files unchanged).
+  (`frontend`'s own Dockerfile keeps its existing scoped context and
+  `.dockerignore` unchanged; `backend`'s did too, until ticket #115 moved
+  it to the repo root as well — see that entry below. Caught stale in
+  review: this line used to claim backend's stayed unchanged forever).
 - **`docker-compose.yml` only** (not `docker-compose.prod.yml`) gets the
   new `worker` service this ticket — a prod image-override entry mirroring
   `backend`/`frontend`'s pattern is deferred to the Docker/CI/CD wiring
@@ -1848,4 +1850,64 @@ notebook (`consolidatie_honden.ipynb`) that originally accompanied this
 code was deliberately not committed — its saved cell outputs embedded
 real research data (test/dog IDs) from having been run against a real,
 non-fixture export.
+
+**Consolidation core flow (ticket #115, part of issue #113) — backend
+build context is the repo root, same reason as `worker`/`cutting-worker`:**
+`backend/Dockerfile` only ever had `backend/` as its build context, so
+`consolidation/` (a repo-root sibling, per #114) was unreachable inside
+the built image — a real deploy-time gap, not caught until the image was
+actually built and `consolidation` failed to import. Fixed the same way
+`worker`/`cutting-worker` already solve this: `docker-compose.yml`,
+`.github/workflows/deploy.yml`, and `backend/Dockerfile` itself all
+switched to repo-root context with explicit `COPY`s (only the two `.py`
+modules the adapter imports, never `consolidation/`'s `requirements.txt`,
+notebook, or sample fixtures); `backend/.dockerignore` (now redundant,
+since Docker only reads the `.dockerignore` at the build context root)
+was deleted; the root `.dockerignore` gained `consolidation/*.xlsx` /
+`consolidation/*.ipynb` entries as a second guard against ever baking
+real research data into an image, alongside `.gitignore`'s existing one.
+`backend/pyproject.toml`'s `pythonpath` gained `".."` so pytest/CI resolve
+`consolidation/` the same way `worker/pyproject.toml` already does for
+`"../backend"`. Verified by actually building the image and importing
+`consolidation` from inside it, not just by reasoning about the config.
+
+**Consolidation core flow — synchronous, but the row is created first:**
+Consolidation still runs synchronously inside the request (no
+worker/queue), but a `Consolidation` row is created as `processing` (and
+`CONSOLIDATION_STARTED` audited against its id) *before* the runner
+starts, then moved to `completed`/`failed` exactly once. An earlier
+single-write design (row written only once the outcome was known) was
+dropped because it made `CONSOLIDATION_STARTED` impossible — there was no
+id to attribute it to — and meant an unexpected failure left no trace. Now
+any failure marks the row `failed`: a `ConsolidationInputError` keeps its
+message near-verbatim, anything else (storage outage, a bug) is logged in
+full server-side and stored only as the generic "Consolidation failed.".
+Atomicity still holds: the row only becomes `completed` after the result
+upload to object storage succeeds. Accepted gap: if the process dies
+mid-run, or the database itself fails at the final commit, the row stays
+`processing` forever — nothing reconciles it (acceptable for a
+synchronous, seconds-long request; revisit if history (#117) needs to
+hide/label such rows).
+
+**Consolidation core flow — unopenable workbooks are rejected, not
+recorded:** The endpoint opens the upload with openpyxl (`read_only`)
+before creating any row; a file that isn't an openable workbook gets a
+400 and never appears in history, same as a wrong extension or an empty
+file (ticket #115's "validate workbook openability before invoking the
+adapter"). A workbook that opens but has the wrong shape (missing sheets,
+bad columns) still reaches the adapter and is recorded as a `failed`
+Consolidation with the domain message.
+
+**Consolidation core flow — nginx body-size limit:** `client_max_body_size`
+(shared across every route — see "Request bodies are small JSON
+documents" in `nginx/snippets/server-common.conf`) was still `1m`, which
+would have silently rejected any real upload to the new
+`POST /api/consolidations` before it ever reached the backend's own,
+more generous `consolidation_max_file_size_bytes` (25 MiB) — caught in
+review, not during initial implementation. Raised the shared default to
+`30m` (global, not a scoped `location` override — simpler, and every
+other route's body stays effectively small regardless of the ceiling)
+rather than adding a second, narrower size setting to reconcile.
+Video-upload sizing (a separate, much larger question — real files can
+run into multiple GiB) is tracked separately in issue #119, still open.
 

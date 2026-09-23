@@ -1,8 +1,8 @@
-# Applies to any build using the repo root as its context — currently only
-# worker/Dockerfile (docker-compose.yml's `worker` service), which needs
-# repo-root context to reuse backend/app source (see worker/Dockerfile).
-# backend/Dockerfile and frontend/Dockerfile use their own scoped contexts
-# and .dockerignore files instead.
+# Applies to any build using the repo root as its context: worker/Dockerfile
+# and cutting-worker/Dockerfile (need repo-root context to reuse backend/app
+# source) and, since ticket #115, backend/Dockerfile too (needs the sibling
+# consolidation/ folder). frontend/Dockerfile still uses its own scoped
+# context and .dockerignore instead.
 .git
 .env
 .env.*
@@ -18,3 +18,10 @@ worker/tests
 frontend/node_modules
 frontend/dist
 companystyle
+
+# Real, non-fixture research data that may sit locally alongside
+# consolidation/'s source (ticket #114/#115) — same exclusion as .gitignore;
+# backend/Dockerfile only ever COPYs the two named .py modules explicitly,
+# but this is a second guard against ever baking real data into an image.
+consolidation/*.xlsx
+consolidation/*.ipynb

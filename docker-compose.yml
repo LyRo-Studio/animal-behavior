@@ -20,7 +20,14 @@ services:
       retries: 10
 
   backend:
-    build: ./backend
+    # Repo-root context (ticket #115, part of issue #113's Excel
+    # consolidation feature): backend/Dockerfile now needs to reach the
+    # sibling consolidation/ folder too, the same reason worker/Dockerfile
+    # and cutting-worker/Dockerfile already build from repo root — see the
+    # root .dockerignore's note on this.
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     environment:
       # Derived from the same POSTGRES_* vars as the `db` service — a
@@ -57,6 +64,13 @@ services:
       CUTTING_UPLOAD_TEMP_DIR: ${CUTTING_UPLOAD_TEMP_DIR:-/data/cutting-uploads}
       CUTTING_UPLOAD_STORAGE_CAP_BYTES: ${CUTTING_UPLOAD_STORAGE_CAP_BYTES:-53687091200}
       CUTTING_UPLOAD_MAX_FILE_SIZE_BYTES: ${CUTTING_UPLOAD_MAX_FILE_SIZE_BYTES:-21474836480}
+      # Excel consolidation (ticket #115, part of issue #113) — no volume
+      # mount needed unlike cutting uploads above: a consolidation's temp
+      # workspace only ever lives for the duration of one synchronous
+      # request (always removed in a `finally` right after), never
+      # something a later request or restart needs to find again.
+      CONSOLIDATION_UPLOAD_TEMP_DIR: ${CONSOLIDATION_UPLOAD_TEMP_DIR:-/data/consolidation-uploads}
+      CONSOLIDATION_MAX_FILE_SIZE_BYTES: ${CONSOLIDATION_MAX_FILE_SIZE_BYTES:-26214400}
     volumes:
       - cutting_uploads_data:/data/cutting-uploads
     # No host port (ticket #71): only `nginx` is reachable from outside the
