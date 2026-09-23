@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 import AnalysesHistoryView from '@/views/AnalysesHistoryView.vue'
 import AnalysisView from '@/views/AnalysisView.vue'
+import ConsolidationsHistoryView from '@/views/ConsolidationsHistoryView.vue'
 import ConsolidationView from '@/views/ConsolidationView.vue'
 import HomeView from '@/views/HomeView.vue'
 import MediaBrowserView from '@/views/MediaBrowserView.vue'
@@ -25,6 +26,12 @@ const router = createRouter({
     { path: '/analyses/:id', name: 'analysis-detail', component: AnalysisView },
     // Ticket #115, part of issue #113's Excel consolidation feature.
     { path: '/consolidation', name: 'consolidation', component: ConsolidationView },
+    // Ticket #116: every past consolidation, fully shared like /analyses.
+    {
+      path: '/consolidations',
+      name: 'consolidations-history',
+      component: ConsolidationsHistoryView,
+    },
   ],
 })
 

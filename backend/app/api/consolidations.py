@@ -1,7 +1,8 @@
 """Excel consolidation upload/consolidate/download (ticket #115, part of
-issue #113) — mirrors app/api/analyses.py's "no auth, identity for
-attribution only" shape (ticket #72). Processing is synchronous: this
-endpoint's response already carries the final outcome, so there is no
+issue #113) and its history list (ticket #116) — mirrors
+app/api/analyses.py's "no auth, identity for attribution only" shape
+(ticket #72). Processing is synchronous: the create endpoint's response
+already carries the final outcome, so there is no
 separate GET-by-id/status-polling endpoint here (issue #113: "simplest
 reliable architecture", no worker/queue).
 """
@@ -36,6 +37,7 @@ from app.services.consolidation import (
     InvalidWorkbookError,
     get_consolidation,
     get_consolidation_runner,
+    list_consolidations,
     run_consolidation,
     start_consolidation,
     validate_workbook_opens,
@@ -184,6 +186,14 @@ def create_consolidation_endpoint(
         failure_reason=consolidation.failure_reason,
     )
     return consolidation
+
+
+@router.get("", response_model=list[ConsolidationOut])
+def list_consolidations_endpoint(db: Session = Depends(get_db)) -> list[Consolidation]:
+    """Every Consolidation, newest first, whoever requested it — no
+    per-identity filtering (ticket #116, mirroring app.api.analyses'
+    list_analyses). Includes `failed` rows with their failure_reason."""
+    return list_consolidations(db)
 
 
 @router.get("/{consolidation_id}/download")

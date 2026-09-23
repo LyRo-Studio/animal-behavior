@@ -8,6 +8,14 @@ import { API_BASE_URL, errorFromResponse } from '@/services/apiBase'
 export type ConsolidationCondition = 'ME' | 'ZE' | 'ME_ZE'
 export type ConsolidationStatus = 'processing' | 'completed' | 'failed'
 
+// How each Condition is shown to the user — the upload page's selector and
+// the history list both render from this.
+export const CONSOLIDATION_CONDITION_LABELS: Record<ConsolidationCondition, string> = {
+  ME: 'ME',
+  ZE: 'ZE',
+  ME_ZE: 'ME + ZE',
+}
+
 export interface Consolidation {
   id: number
   originalFilename: string
@@ -77,6 +85,21 @@ export async function createConsolidation(
   }
 
   return toConsolidation(await response.json())
+}
+
+// Ticket #116: every consolidation, newest first (the backend caps how
+// many), whoever ran it and whatever its status — `failed` rows included,
+// so a failed attempt still shows up with its reason. Fully shared, same as
+// listAnalyses.
+export async function listConsolidations(): Promise<Consolidation[]> {
+  const response = await fetch(`${API_BASE_URL}/consolidations`)
+
+  if (!response.ok) {
+    throw await errorFromResponse(response, 'Failed to load consolidations.')
+  }
+
+  const rows: ConsolidationResponse[] = await response.json()
+  return rows.map(toConsolidation)
 }
 
 // A plain download (ticket #115, mirroring downloadAnalysisReport) — fetch

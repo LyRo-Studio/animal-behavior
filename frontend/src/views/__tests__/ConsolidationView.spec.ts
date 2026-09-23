@@ -7,7 +7,8 @@ import ConsolidationView from '../ConsolidationView.vue'
 const createConsolidationMock = vi.hoisted(() => vi.fn())
 const downloadConsolidationMock = vi.hoisted(() => vi.fn())
 
-vi.mock('@/services/consolidations', () => ({
+vi.mock('@/services/consolidations', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/consolidations')>()),
   createConsolidation: createConsolidationMock,
   downloadConsolidation: downloadConsolidationMock,
 }))
@@ -17,6 +18,11 @@ function createTestRouter() {
     history: createWebHistory(),
     routes: [
       { path: '/consolidation', name: 'consolidation', component: ConsolidationView },
+      {
+        path: '/consolidations',
+        name: 'consolidations-history',
+        component: { template: '<div>history</div>' },
+      },
       { path: '/', name: 'home', component: { template: '<div>home</div>' } },
     ],
   })
@@ -172,5 +178,13 @@ describe('ConsolidationView', () => {
 
     clickSpy.mockRestore()
     vi.unstubAllGlobals()
+  })
+
+  it('links to the consolidation history', async () => {
+    const wrapper = await mountView()
+
+    const link = wrapper.find('[data-testid="consolidation-history-link"]')
+    expect(link.exists()).toBe(true)
+    expect(link.attributes('href')).toBe('/consolidations')
   })
 })

@@ -2,13 +2,14 @@
 import { ref } from 'vue'
 
 import {
+  CONSOLIDATION_CONDITION_LABELS,
   createConsolidation,
   downloadConsolidation,
   type Consolidation,
   type ConsolidationCondition,
 } from '@/services/consolidations'
 import { formatDate } from '@/utils/date'
-import { triggerBrowserDownload } from '@/utils/download'
+import { triggerBlobDownload } from '@/utils/download'
 
 // Plain file picker, no drag-and-drop (issue #113's UX decision — matches
 // the mockup's `[ Select file ]`).
@@ -54,9 +55,7 @@ async function download() {
   downloadError.value = null
   try {
     const blob = await downloadConsolidation(result.value.id)
-    const objectUrl = URL.createObjectURL(blob)
-    triggerBrowserDownload(objectUrl, result.value.originalFilename)
-    URL.revokeObjectURL(objectUrl)
+    triggerBlobDownload(blob, result.value.originalFilename)
   } catch (err) {
     downloadError.value = err instanceof Error ? err.message : 'Failed to download file.'
   } finally {
@@ -69,9 +68,18 @@ async function download() {
   <main class="min-h-screen bg-background font-sans text-foreground">
     <header class="flex items-center justify-between border-b border-border bg-surface px-6 py-4">
       <h1 class="font-serif text-xl text-primary">Data Consolidation</h1>
-      <RouterLink :to="{ name: 'home' }" class="text-sm font-medium text-primary hover:underline">
-        Back to Home
-      </RouterLink>
+      <div class="flex items-center gap-4">
+        <RouterLink
+          :to="{ name: 'consolidations-history' }"
+          data-testid="consolidation-history-link"
+          class="text-sm font-medium text-primary hover:underline"
+        >
+          History
+        </RouterLink>
+        <RouterLink :to="{ name: 'home' }" class="text-sm font-medium text-primary hover:underline">
+          Back to Home
+        </RouterLink>
+      </div>
     </header>
 
     <section class="mx-auto max-w-2xl px-6 py-10">
@@ -104,9 +112,13 @@ async function download() {
           :disabled="isSubmitting"
           class="mt-2 block w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-foreground"
         >
-          <option value="ME">ME</option>
-          <option value="ZE">ZE</option>
-          <option value="ME_ZE">ME + ZE</option>
+          <option
+            v-for="(label, value) in CONSOLIDATION_CONDITION_LABELS"
+            :key="value"
+            :value="value"
+          >
+            {{ label }}
+          </option>
         </select>
       </div>
 

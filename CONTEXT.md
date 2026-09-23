@@ -1911,3 +1911,22 @@ rather than adding a second, narrower size setting to reconcile.
 Video-upload sizing (a separate, much larger question — real files can
 run into multiple GiB) is tracked separately in issue #119, still open.
 
+
+**Consolidation history (ticket #116, part of issue #113):**
+`GET /api/consolidations` lists every Consolidation, newest first, with no
+per-identity filtering (same fully shared model as `/analyses`), capped at
+the newest 500 (`MAX_LISTED_CONSOLIDATIONS`, same ceiling and reasoning as
+`MAX_LISTED_ANALYSIS_JOBS`: no unbounded queries, add real pagination if
+it's ever hit). The frontend history is its own page,
+`ConsolidationsHistoryView` at `/consolidations` (route
+`consolidations-history`), linked from the upload page's header, instead
+of being folded into `ConsolidationView` — it mirrors
+`AnalysesHistoryView`, which is also a separate page. Each row shows
+`display_name` (falling back to `original_filename`), plus the original
+filename as "Source" when a display name is set, and its Condition,
+status, created date and requesting Identity. Only `completed` rows offer
+a download (the same `GET /consolidations/{id}/download` as #115).
+`failed` rows show their `failure_reason`. This also settles the
+"stuck `processing`" gap from #115's core-flow decision: those rows are
+listed as they are, with status `processing` and no download action.
+They are not hidden, and nothing reconciles them.
