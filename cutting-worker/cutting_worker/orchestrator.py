@@ -6,7 +6,7 @@ upload on success, and sets the job's terminal status. Mirrors
 
 Kept free of any assist/boto3-specific error handling beyond what's already
 exposed through the `S3Client`/`VideoCutter` seams, so this module — and its
-tests — never needs the real S3 bucket or the real `assist` package.
+tests — never needs the real S3 bucket or `assist`'s ffmpeg/scipy stack.
 """
 
 import logging
@@ -23,6 +23,8 @@ from app.services.cutting_jobs import claim_next_queued_cutting_job, finalize_cu
 from app.services.s3_client import S3Client
 from sqlalchemy.orm import Session
 
+from assist.output_filename import OutputFilename
+from assist.phase import Phase
 from cutting_worker.video_cutter import VideoCutter
 
 logger = logging.getLogger(__name__)
@@ -160,11 +162,13 @@ def _run_claimed_job(
 
 def _expected_output_filename(job: CuttingJob, output: CuttingJobOutput) -> str:
     """The filename `VideoCutter.cut` writes `output` under, if it produced
-    it — `assist.output_filename.OutputFilename`'s own convention
-    (`f"{test_id}_{camera}_{phase.name}.mp4"`, where `phase.name` is e.g.
-    `"ME_F1"` — exactly `f"{output.condition}_{output.phase}"`),
-    reconstructed here rather than parsed back out of a directory listing."""
-    return f"{job.test_id}_{output.camera}_{output.condition}_{output.phase}.mp4"
+    it — asked of `assist`'s own `OutputFilename` (pure Python, so fine to
+    import here since the #112 vendoring), where the phase's name is e.g.
+    `"ME_F1"` — exactly `f"{output.condition}_{output.phase}"`. Built here
+    rather than parsed back out of a directory listing."""
+    return OutputFilename.get(
+        job.test_id, output.camera, Phase[f"{output.condition}_{output.phase}"]
+    )
 
 
 def _discard_source_uploads(job: CuttingJob) -> None:

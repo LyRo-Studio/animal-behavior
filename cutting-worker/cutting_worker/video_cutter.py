@@ -1,11 +1,12 @@
 """The sole seam into `assist` (ticket #95, part of issue #93's Feature C)
 — `orchestrator.py` never imports `assist` itself, so its tests can inject
 `FakeVideoCutter` (see `cutting-worker/tests/doubles.py`) instead of
-requiring the real package and real ffmpeg/audio files. Mirrors
+requiring `assist`'s ffmpeg/scipy dependencies and real audio files. Mirrors
 `worker/dogtrace_runner.py`'s Protocol-plus-real-plus-fake shape.
 
-`assist` (pinned at `master`, `github.com/vives-devbit/assist` — CONTEXT.md's
-Feature C "`assist` reuse" decision) exposes `Slicer` (ffmpeg slicing),
+`assist` (vendored into `cutting-worker/assist/` from
+`github.com/vives-devbit/assist@55b0fb1` since ticket #112 — see its
+VENDORED.md) exposes `Slicer` (ffmpeg slicing),
 `LagCorrelation` (audio cross-correlation), `FrameGrabber` (first-frame
 timestamp probing), and `Camera`/`Phase`/`OutputFilename`. Its own
 `PhaseSlicer`/`Test`/`read_excel` orchestration layer is deliberately not
@@ -18,9 +19,10 @@ positional 16-element list.
 """
 
 import logging
-import sys
 from pathlib import Path
 from typing import Protocol
+
+from assist.phase import Phase
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +30,11 @@ logger = logging.getLogger(__name__)
 # ZE_F1..ZE_F8) — a phase's Cut spans [PHASE_ORDER[i]'s timestamp,
 # PHASE_ORDER[i+1]'s timestamp), so only the first 15 entries ever become a
 # produced output; the 16th (ZE_F8) only ever serves as ZE_F7's end boundary
-# (CONTEXT.md's "ZE_F8 cannot be produced" decision). Duplicated here rather
-# than imported from `assist.phase.Phase` so this constant — used by
-# `FakeVideoCutter` too (cutting-worker/tests/doubles.py) — never needs the
-# real `assist` package installed.
-PHASE_ORDER = [f"{condition}_F{n}" for condition in ("ME", "ZE") for n in range(1, 9)]
+# (CONTEXT.md's "ZE_F8 cannot be produced" decision). `assist.phase` is plain
+# Python with no ffmpeg/scipy dependency, so importing it here keeps this
+# module — and `FakeVideoCutter` (cutting-worker/tests/doubles.py) — usable
+# without requirements-assist.txt installed.
+PHASE_ORDER = [phase.name for phase in Phase]
 
 
 class VideoCutter(Protocol):
@@ -67,44 +69,13 @@ class VideoCutter(Protocol):
         ...
 
 
-def _import_assist() -> None:
-    """Import the `assist` package exactly once, working around a bug in
-    its own `assist/__init__.py`: unconditionally invoking `assist`'s Click
-    CLI at import time (`from .assist import assist; assist()`), wrapped in
-    a bare `except Exception` that still lets Click's own `SystemExit`
-    through. Importing *any* `assist.*` submodule first runs that
-    `__init__.py` — against this process's real argv, that would either
-    print an unrelated Click usage error or start looking for `./input`/
-    `./output` directories that don't exist here.
-
-    Clears argv and swallows the resulting SystemExit for this one, first
-    import — Python caches `assist` in `sys.modules` afterward, so every
-    later `import assist.<submodule>` in this same process is a cache hit
-    that re-triggers none of this. Found by reading `assist`'s source
-    directly (github.com/vives-devbit/assist@master) while building this
-    module; not something CONTEXT.md's Feature C design pass could have
-    caught without it.
-    """
-    if "assist" in sys.modules:
-        return
-    original_argv = sys.argv
-    sys.argv = ["assist"]
-    try:
-        import assist  # noqa: F401
-    except SystemExit:
-        pass
-    finally:
-        sys.argv = original_argv
-
-
 class RealVideoCutter:
-    """The real VideoCutter, backed by the `assist` package installed in
-    the cutting-worker image (see cutting-worker/Dockerfile). Imports
-    `assist` lazily, inside `cut()` rather than at module level, so this
-    module — and therefore `orchestrator.py` and its tests — stays
-    importable without `assist` (and its ffmpeg/scipy/numpy/matplotlib
-    dependencies) installed at all, same pattern as
-    `worker/dogtrace_runner.py`'s `RealDogTraceRunner`.
+    """The real VideoCutter, backed by the vendored `assist` modules. Imports
+    the ffmpeg/scipy-backed ones lazily, inside `cut()` rather than at module
+    level, so this module — and therefore `orchestrator.py` and its tests —
+    stays importable without their dependencies (requirements-assist.txt,
+    installed only in the cutting-worker image) present at all, same pattern
+    as `worker/dogtrace_runner.py`'s `RealDogTraceRunner`.
     """
 
     def cut(
@@ -116,11 +87,9 @@ class RealVideoCutter:
         source_paths: dict[str, Path],
         output_dir: Path,
     ) -> None:
-        _import_assist()
         from assist.framegrabber import FrameGrabber
         from assist.lag_correlation import LagCorrelation
         from assist.output_filename import OutputFilename
-        from assist.phase import Phase
         from assist.slicer import Slicer
 
         output_dir.mkdir(parents=True, exist_ok=True)

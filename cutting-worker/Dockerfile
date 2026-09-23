@@ -11,13 +11,10 @@ FROM python:3.12-slim
 
 # ffmpeg provides both the `ffmpeg` binary `assist.slicer.Slicer` shells out
 # to (via the `ffmpeg-python` bindings) and `ffprobe`, which `assist` also
-# uses internally for start-time/sample-rate probing. git is needed only to
-# satisfy the `pip install git+https://...` below — `python:3.12-slim` has
-# neither preinstalled (unlike a full `python` image), and pip's own VCS
-# support shells out to the real `git` binary rather than speaking the
-# protocol itself.
+# uses internally for start-time/sample-rate probing — `python:3.12-slim`
+# has neither preinstalled (unlike a full `python` image).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg git \
+    && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /cutting-worker
@@ -25,13 +22,12 @@ WORKDIR /cutting-worker
 COPY cutting-worker/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# `assist` (CONTEXT.md's Feature C "`assist` reuse" decision): pinned at
-# `master`, not a frozen commit — this app tracks whatever `assist`'s
-# maintainers ship on that branch, matching how the manual CLI workflow this
-# feature replaces was always run. Its own requirements.txt (click,
-# ffmpeg-python, pandas, openpyxl, scipy, numpy, matplotlib, pillow) is
-# installed transitively by pip from its setup.py.
-RUN pip install --no-cache-dir "git+https://github.com/vives-devbit/assist.git@master"
+# `assist` is vendored source (ticket #112, cutting-worker/assist/VENDORED.md)
+# rather than a `pip install git+https://...` of the private upstream repo,
+# so this build needs no GitHub credentials. Only its runtime dependencies
+# are installed here; the source itself is COPYed below.
+COPY cutting-worker/requirements-assist.txt ./
+RUN pip install --no-cache-dir -r requirements-assist.txt
 
 # Only the FastAPI-free slice of backend/app: core config, DB session/base,
 # ORM models, and the specific service modules the cutting-worker calls
@@ -49,6 +45,7 @@ COPY backend/app/services/cutting_uploads.py ./app/services/cutting_uploads.py
 COPY backend/app/services/timestamp_excel.py ./app/services/timestamp_excel.py
 COPY backend/app/services/cutting_jobs.py ./app/services/cutting_jobs.py
 
+COPY cutting-worker/assist ./assist
 COPY cutting-worker/cutting_worker ./cutting_worker
 
 CMD ["python", "-m", "cutting_worker"]
