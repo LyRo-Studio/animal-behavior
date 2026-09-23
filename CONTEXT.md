@@ -56,7 +56,7 @@ Selecting a Test for analysis without hand-picking its individual Cuts — every
 Uploading a Test's C1 and/or C2 source video (plus the matching row of its timestamp Excel) into the app so it can be Cut. Distinct from Cutting itself (below) — Ingestion is the input side, Cutting is the processing step it feeds. An ingested source video is never itself a Source Video (see that term's updated definition) — it never reaches `source/` in S3.
 
 **Cutting, Feature C:**
-Slicing an ingested source video into its Cuts, via `assist` (the external tool this app wraps), driven by one Test's phase timestamps. The unit of work is a **CuttingJob** — one Test, mirroring `AnalysisJob`'s role for analysis. See "Video cutting + S3 ingestion (Feature C)" below.
+Slicing an ingested source video into its Cuts, via `assist` (the tool this app wraps, vendored into `cutting-worker/assist/` since ticket #112), driven by one Test's phase timestamps. The unit of work is a **CuttingJob** — one Test, mirroring `AnalysisJob`'s role for analysis. See "Video cutting + S3 ingestion (Feature C)" below.
 
 ## Decisions & Approved Deviations
 
@@ -1530,9 +1530,11 @@ not done here.
 **Video cutting + S3 ingestion (Feature C) — design finalized, not yet built:**
 lets a researcher upload a Test's source video(s) and have them sliced into
 Cuts directly in the app, via `assist` (`github.com/vives-devbit/assist`,
-pinned at `master`), rather than the ad-hoc, manual process used today.
+originally pinned at `master`; vendored into `cutting-worker/assist/` since
+ticket #112), rather than the ad-hoc, manual process used today.
 
-- **`assist` is reused as a pinned external dependency, not reimplemented**
+- **`assist` is reused, not reimplemented (originally as a pinned external
+  dependency, vendored since #112)**
   — same "source reuse" principle as `dogtrace-core`. Its own CLI/Excel-
   batch orchestration layer (`PhaseSlicer`, `Test`, `read_excel`) is
   *not* reused, though: it's built to discover and loop over every Test in
@@ -1545,7 +1547,10 @@ pinned at `master`), rather than the ad-hoc, manual process used today.
   `FrameGrabber` (first-frame timestamp probing), and the `Camera`/`Phase`/
   `OutputFilename` primitives. An unmerged `v2` branch of `assist` (a
   SQLite-backed repository/queue rewrite) exists but is explicitly not
-  being picked up — pin `master`.
+  being picked up — pin `master`. *Superseded by ticket #112:* `assist` is
+  now vendored source, not an external dependency — see "`assist`
+  vendored (ticket #112)" below. The split between what's reused and
+  what isn't is unchanged.
 - **`ZE_F8` (the 16th phase) can never be produced as a Cut.** Every phase
   is sliced `[this phase's start, next phase's start)` from the Excel's 16
   *start*-only timestamps, so the last phase has no timestamp to bound its
@@ -1638,8 +1643,8 @@ pinned at `master`), rather than the ad-hoc, manual process used today.
   partial-batch status to design around).
 - **Progress: fine-grained per phase, inferred by watching the output
   directory** for each phase's file as it appears (`assist` itself has no
-  progress callback of any kind, on any branch) — not a fork of `assist`
-  to add one.
+  progress callback of any kind, on any branch) — not a change to `assist`
+  to add one (still true of the vendored copy since #112).
 - **Audit log: gets its own events now**, mirroring the `ANALYSIS_*`
   pattern (e.g. `CUTTING_STARTED`/`CUTTING_COMPLETED`/`CUTTING_FAILED`) —
   `CONTEXT.md`'s Feature A section already flagged this feature as
@@ -1762,7 +1767,8 @@ implementation-time judgment calls:
   process; every later `import assist.<submodule>` hits Python's module
   cache and re-triggers none of it. This is a real bug in `assist` itself,
   not something `pinned at master` can dodge — revisit (or upstream a fix)
-  if a future `assist` release changes this.
+  if a future `assist` release changes this. *Resolved by ticket #112:* the
+  vendored copy replaces that `__init__.py`, and `_import_assist()` is gone.
 - **`VideoCutter.cut()`'s per-phase orchestration is new code, not reused
   from `assist`.** `assist.phase_slicer.PhaseSlicer` (the module that
   actually loops phases/cameras and calls `Slicer`/`LagCorrelation`/
@@ -1817,8 +1823,9 @@ implementation-time judgment calls:
   the cutting-worker reads the same files back by that same absolute path,
   never a copy.
 - **CI/deploy parity with `worker`:** ci.yml gets its own `cutting-worker`
-  job (real Postgres on port 5435, its own venv — never installs the real
-  `assist` package, same "GPU/heavy deps only inside the real image" stance
+  job (real Postgres on port 5435, its own venv — never installs `assist`'s
+  ffmpeg/scipy stack, `requirements-assist.txt` since #112; same "GPU/heavy
+  deps only inside the real image" stance
   `worker/requirements.txt` already takes for `torch`/`dogtrace`); deploy.yml
   builds/pushes a `cutting-worker` image and adds `--profile cutting-worker`
   alongside `--profile worker` in the production `docker compose up`.
@@ -2077,3 +2084,48 @@ upload page.
   frontend then shows them as "Failed" like any other. Two independent
   thresholds (backend minutes vs. a frontend guess) would drift apart, so the
   database stays the single source of truth.
+
+**`assist` vendored (ticket #112) — approved deviation, supersedes Feature
+C's "pinned external dependency" decision:** the cutting-worker image used to
+`pip install git+https://github.com/vives-devbit/assist.git@master`, but
+`assist` is a private repository and the Docker build has no GitHub
+credentials, so the image couldn't be built at all. Its source is now copied
+into `cutting-worker/assist/` instead, and the build has no external or
+private dependency.
+- **Trade-off, accepted deliberately:** a self-contained build in exchange for
+  a permanent fork. Upstream fixes are no longer picked up automatically.
+  Giving the build its own credentials (a deploy key or token as a build
+  secret) was the alternative; it was rejected as more setup than this
+  needs.
+- **Permission:** this repo is public and upstream is private with no
+  license, so vendoring publishes that code. The `assist` maintainers agreed
+  to this (confirmed 2026-09-23). `assist/VENDORED.md` credits them.
+- **A snapshot, not a moving target:** pinned at `master` commit
+  `55b0fb1ee6a035e18a0bbbf279fcdb4a520d78e0`. Only what Feature C already
+  uses is copied: `slicer.py`, `lag_correlation.py`, `framegrabber.py`,
+  `camera.py`, `phase.py`, `output_filename.py`. They're byte-identical to
+  that commit (same git blob SHAs) and excluded from ruff so they stay
+  diffable. Excluding them from ruff is a deliberate exception to
+  ENGINEERING-STANDARDS.md §1 ("Ruff is used for linting and formatting"),
+  the same reasoning as #114's `consolidation/`: third-party code kept as-is,
+  not rewritten to this repo's style. The CLI/Excel batch layer, notebooks
+  and packaging are left out.
+  `assist/VENDORED.md` has the details and the update procedure.
+- **One change from upstream:** `__init__.py` is replaced. Upstream's ran the
+  Click CLI at import time, which is what `_import_assist()` worked around.
+  With it gone, `video_cutter.py` imports `assist` normally, and
+  `PHASE_ORDER` is derived from `assist.phase.Phase` instead of a
+  hand-maintained copy.
+- **Dependencies:** upstream's unpinned requirements are replaced by
+  `cutting-worker/requirements-assist.txt` (`ffmpeg-python`, `scipy`,
+  `numpy`, `matplotlib`, `pillow`, pinned to minor versions). It's installed
+  only in the Dockerfile, never in CI, following the same "heavy deps only in
+  the real image" convention as `worker`. `click`/`pandas` are dropped (only
+  the omitted CLI layer used them). `matplotlib`/`pillow` stay only because
+  `framegrabber.py` imports them at module level for a frame preview this app
+  never calls; trimming them means modifying that file.
+- **Now testable in CI:** the pure-Python primitives have no heavy
+  dependencies, so `tests/test_vendored_assist.py` checks that importing
+  `assist` runs no CLI, and pins `OutputFilename`'s naming. For the same
+  reason, `orchestrator.py` now asks `OutputFilename` for each expected Cut's
+  filename instead of keeping its own copy of the format.

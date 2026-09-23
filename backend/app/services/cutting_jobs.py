@@ -235,9 +235,9 @@ def claim_next_queued_cutting_job(db: Session) -> CuttingJob | None:
     Sets `status=running` and `started_at` as part of the same claim, same
     "never observably queued with no owner" reasoning as the analysis
     worker's own claim — there's no per-job version field to record here
-    (unlike `dogtrace_version`): a CuttingJob always runs against whichever
-    `assist` build the cutting-worker image was built from, not something
-    worth recording per job.
+    (unlike `dogtrace_version`): a CuttingJob always runs against the
+    `assist` snapshot vendored into the cutting-worker image (ticket #112),
+    not something worth recording per job.
     """
     job = db.scalar(
         select(CuttingJob)

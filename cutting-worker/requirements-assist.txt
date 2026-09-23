@@ -1,0 +1,12 @@
+# Runtime dependencies of the vendored `assist` modules (ticket #112, see
+# assist/VENDORED.md) — upstream left them unpinned. Installed only in
+# cutting-worker/Dockerfile, never in CI's venv (CONTEXT.md's "CI/deploy
+# parity with `worker`" decision — worker/requirements.txt likewise leaves out
+# torch/dogtrace). matplotlib and pillow
+# are imported by framegrabber.py at module level (for a frame preview this
+# app never calls), so they stay while that file is kept unmodified.
+ffmpeg-python>=0.2,<0.3
+scipy>=1.18,<1.19
+numpy>=2.5,<2.6
+matplotlib>=3.11,<3.12
+pillow>=12.3,<13

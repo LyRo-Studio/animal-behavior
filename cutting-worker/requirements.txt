@@ -4,8 +4,8 @@ pydantic>=2.9,<3
 pydantic-settings>=2.5,<3
 boto3>=1.34,<2
 # app/services/cutting_jobs.py (reused as-is, see Dockerfile) pulls in
-# app/services/timestamp_excel.py, which needs this directly — not just
-# transitively through the real `assist` package's own install (Dockerfile
-# only, never this requirements.txt — see worker/requirements.txt's same
-# "no GPU/heavy deps here" convention).
+# app/services/timestamp_excel.py, which needs this directly. `assist`'s own
+# heavy dependencies live in requirements-assist.txt instead (Dockerfile
+# only, never CI — see worker/requirements.txt's same "no GPU/heavy deps
+# here" convention).
 openpyxl>=3.1,<3.2

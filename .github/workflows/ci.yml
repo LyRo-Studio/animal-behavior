@@ -166,9 +166,10 @@ jobs:
         # cutting-worker/pyproject.toml's `pythonpath` points `app.*` straight
         # at ../backend's own source (ticket #95, mirroring worker/pyproject
         # .toml's own "reuse, not a package install" decision) — this venv
-        # only needs cutting-worker/requirements*.txt installed, never the
-        # real `assist` package (that only exists inside a container built
-        # from cutting-worker/Dockerfile — see its own addopts comment).
+        # only needs cutting-worker/requirements.txt + requirements-dev.txt,
+        # never requirements-assist.txt (vendored `assist`'s ffmpeg/scipy
+        # stack only exists inside a container built from
+        # cutting-worker/Dockerfile — see pyproject.toml's addopts comment).
         run: |
           rm -rf .venv
           python3 -m venv .venv
