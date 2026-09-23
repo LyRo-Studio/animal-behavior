@@ -7,6 +7,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 from app.models.analysis_job import REQUESTED_BY_IDENTITY_MAX_LENGTH
 
+# Shared with app.api.consolidations, which rejects a too-long filename
+# before ever calling create_consolidation (caught in review: an unchecked
+# 256+ character filename previously reached the point of a completed S3
+# upload before failing on this column's own length constraint, breaking
+# the "never persist a row before the outcome is known" atomicity guarantee
+# by leaving an orphaned S3 object with no row to reference it).
+ORIGINAL_FILENAME_MAX_LENGTH = 255
+
 
 class ConsolidationCondition(str, enum.Enum):
     """Which of consolidation/observer_import.py's `deel` this consolidation
@@ -52,7 +60,9 @@ class Consolidation(Base):
     __tablename__ = "consolidations"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    original_filename: Mapped[str] = mapped_column(
+        String(ORIGINAL_FILENAME_MAX_LENGTH), nullable=False
+    )
     # Optional, user-settable label (ticket #117) — falls back to
     # original_filename when unset (frontend's job). Kept as a separate
     # column, never overwriting original_filename, so a rename never

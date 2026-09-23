@@ -490,8 +490,10 @@ boundary).
   Dockerfile can `COPY` files out of `backend/app` (see "Source reuse"
   above). A new root-level `.dockerignore` keeps that context from
   pulling in `.git`, `.env`, `backend/.venv`, `frontend/node_modules`, etc.
-  (`backend`'s and `frontend`'s own Dockerfiles keep their existing scoped
-  contexts and `.dockerignore` files unchanged).
+  (`frontend`'s own Dockerfile keeps its existing scoped context and
+  `.dockerignore` unchanged; `backend`'s did too, until ticket #115 moved
+  it to the repo root as well — see that entry below. Caught stale in
+  review: this line used to claim backend's stayed unchanged forever).
 - **`docker-compose.yml` only** (not `docker-compose.prod.yml`) gets the
   new `worker` service this ticket — a prod image-override entry mirroring
   `backend`/`frontend`'s pattern is deferred to the Docker/CI/CD wiring
@@ -1848,4 +1850,49 @@ notebook (`consolidatie_honden.ipynb`) that originally accompanied this
 code was deliberately not committed — its saved cell outputs embedded
 real research data (test/dog IDs) from having been run against a real,
 non-fixture export.
+
+**Consolidation core flow (ticket #115, part of issue #113) — backend
+build context is the repo root, same reason as `worker`/`cutting-worker`:**
+`backend/Dockerfile` only ever had `backend/` as its build context, so
+`consolidation/` (a repo-root sibling, per #114) was unreachable inside
+the built image — a real deploy-time gap, not caught until the image was
+actually built and `consolidation` failed to import. Fixed the same way
+`worker`/`cutting-worker` already solve this: `docker-compose.yml`,
+`.github/workflows/deploy.yml`, and `backend/Dockerfile` itself all
+switched to repo-root context with explicit `COPY`s (only the two `.py`
+modules the adapter imports, never `consolidation/`'s `requirements.txt`,
+notebook, or sample fixtures); `backend/.dockerignore` (now redundant,
+since Docker only reads the `.dockerignore` at the build context root)
+was deleted; the root `.dockerignore` gained `consolidation/*.xlsx` /
+`consolidation/*.ipynb` entries as a second guard against ever baking
+real research data into an image, alongside `.gitignore`'s existing one.
+`backend/pyproject.toml`'s `pythonpath` gained `".."` so pytest/CI resolve
+`consolidation/` the same way `worker/pyproject.toml` already does for
+`"../backend"`. Verified by actually building the image and importing
+`consolidation` from inside it, not just by reasoning about the config.
+
+**Consolidation core flow — synchronous, single-write persistence:** A
+`Consolidation` row is written exactly once, only after its outcome
+(`completed` or `failed`) is already known — never a pre-created
+`queued`/`processing` row later updated. This is what makes the
+"never mark completed before the result is persisted" atomicity
+requirement trivial to hold: there's nothing to roll back or reconcile,
+since nothing is written until the real outcome is in hand. The
+consequence (caught in review, fixed before merge): a genuinely
+unexpected exception (storage/DB failure, or a bug) must propagate
+uncaught rather than being wrapped into a synthesized `failed` row —
+there is no row yet at that point to attach one to.
+
+**Consolidation core flow — nginx body-size limit:** `client_max_body_size`
+(shared across every route — see "Request bodies are small JSON
+documents" in `nginx/snippets/server-common.conf`) was still `1m`, which
+would have silently rejected any real upload to the new
+`POST /api/consolidations` before it ever reached the backend's own,
+more generous `consolidation_max_file_size_bytes` (25 MiB) — caught in
+review, not during initial implementation. Raised the shared default to
+`30m` (global, not a scoped `location` override — simpler, and every
+other route's body stays effectively small regardless of the ceiling)
+rather than adding a second, narrower size setting to reconcile.
+Video-upload sizing (a separate, much larger question — real files can
+run into multiple GiB) is tracked separately in issue #119, still open.
 

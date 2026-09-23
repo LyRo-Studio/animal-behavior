@@ -18,10 +18,16 @@ from app.api.deps import (
     identity_rate_limit_key,
     raise_if_throttled,
 )
+from app.api.media_browser import content_disposition
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.audit_log import AuditAction
-from app.models.consolidation import Consolidation, ConsolidationCondition, ConsolidationStatus
+from app.models.consolidation import (
+    ORIGINAL_FILENAME_MAX_LENGTH,
+    Consolidation,
+    ConsolidationCondition,
+    ConsolidationStatus,
+)
 from app.schemas.consolidations import ConsolidationOut
 from app.services.audit_log import record_audit_event
 from app.services.consolidation import (
@@ -94,6 +100,11 @@ async def create_consolidation_endpoint(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="File must be an .xlsx Excel file.",
+        )
+    if len(file.filename) > ORIGINAL_FILENAME_MAX_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Filename must be at most {ORIGINAL_FILENAME_MAX_LENGTH} characters.",
         )
 
     file_bytes = await file.read()
@@ -184,7 +195,9 @@ def download_consolidation(
         body,
         media_type=_XLSX_MEDIA_TYPE,
         headers={
-            "Content-Disposition": f'attachment; filename="{consolidation.original_filename}"',
+            "Content-Disposition": content_disposition(
+                "attachment", consolidation.original_filename
+            ),
             "Content-Length": str(info.size),
         },
     )

@@ -143,6 +143,15 @@ def test_create_consolidation_rejects_an_empty_file(client, db_session):
     assert db_session.scalar(select(Consolidation)) is None
 
 
+def test_create_consolidation_rejects_a_too_long_filename(client, db_session):
+    long_name = "a" * 252 + ".xlsx"  # 257 chars, over ORIGINAL_FILENAME_MAX_LENGTH (255)
+
+    response = _upload(client, filename=long_name)
+
+    assert response.status_code == 400
+    assert db_session.scalar(select(Consolidation)) is None
+
+
 def test_create_consolidation_rejects_an_oversized_file(client, db_session, monkeypatch):
     from app.core.config import settings
 

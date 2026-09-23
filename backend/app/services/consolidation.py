@@ -83,10 +83,16 @@ class ObserverConsolidationRunner:
         self, *, input_path: Path, output_path: Path, condition: ConsolidationCondition
     ) -> None:
         deel = _CONDITION_TO_DEEL[condition]
+
+        # KeyError/BadZipFile/InvalidFileException/OSError are scoped to
+        # *reading* the workbook only, not the whole pipeline (caught in
+        # review): bereken_observer does its own pandas merges/groupby/
+        # pivot, which could in principle raise a KeyError of its own for a
+        # genuine bug unrelated to a missing sheet — catching that here
+        # too would silently misreport a real defect as a user input
+        # problem, with nothing logged anywhere to diagnose it.
         try:
             bron = lees_observer(str(input_path), deel=deel)
-            berekend = bereken_observer(bron)
-            schrijf_resultaat(str(output_path), bron, berekend, str(input_path))
         except ValueError as exc:
             raise ConsolidationInputError(str(exc)) from exc
         except KeyError as exc:
@@ -98,10 +104,26 @@ class ObserverConsolidationRunner:
             # Same "your file's shape is wrong" class of problem as every
             # other validation failure here.
             raise ConsolidationInputError(f"Missing expected sheet: {exc}") from exc
-        except (BadZipFile, InvalidFileException) as exc:
+        except (BadZipFile, InvalidFileException, OSError) as exc:
+            # OSError alongside the two openpyxl-specific types: a
+            # structurally-valid ZIP with corrupted/missing internal OOXML
+            # parts makes openpyxl's load_workbook raise a bare OSError
+            # ("File contains no valid workbook part") rather than either
+            # of those — confirmed by direct reproduction in review, not
+            # previously covered.
             raise ConsolidationInputError(
                 "The uploaded file is not a valid Excel workbook."
             ) from exc
+
+        try:
+            berekend = bereken_observer(bron)
+            schrijf_resultaat(str(output_path), bron, berekend, str(input_path))
+        except ValueError as exc:
+            # consolideer() (called from bereken_observer) raises its own
+            # ValueErrors for the same class of validation failure as
+            # lees_observer's — still mapped here, just no longer sharing
+            # the KeyError/OSError catches above with it.
+            raise ConsolidationInputError(str(exc)) from exc
 
 
 _consolidation_runner: ConsolidationRunner = ObserverConsolidationRunner()
@@ -152,46 +174,58 @@ def create_consolidation(
     input_path = workspace / "input.xlsx"
     output_path = workspace / "result.xlsx"
 
+    def _persist(**outcome_fields: object) -> Consolidation:
+        # Shared by both outcomes below (caught in review: previously
+        # duplicated field-by-field, risking the two falling out of sync)
+        # — original_filename/condition/requested_by_identity/
+        # input_size_bytes/completed_at are common to every Consolidation
+        # this function ever writes; outcome_fields supplies the rest
+        # (status, and whichever of failure_reason/result_storage_key/
+        # result_size_bytes apply).
+        consolidation = Consolidation(
+            original_filename=original_filename,
+            condition=condition,
+            requested_by_identity=requested_by_identity,
+            input_size_bytes=len(file_bytes),
+            completed_at=datetime.now(UTC),
+            **outcome_fields,
+        )
+        db.add(consolidation)
+        db.commit()
+        db.refresh(consolidation)
+        return consolidation
+
     try:
         input_path.write_bytes(file_bytes)
 
         try:
             runner.run(input_path=input_path, output_path=output_path, condition=condition)
         except ConsolidationInputError as exc:
-            consolidation = Consolidation(
-                original_filename=original_filename,
-                condition=condition,
-                status=ConsolidationStatus.FAILED,
-                requested_by_identity=requested_by_identity,
-                failure_reason=str(exc)[:500],
-                input_size_bytes=len(file_bytes),
-                completed_at=datetime.now(UTC),
-            )
-            db.add(consolidation)
-            db.commit()
-            db.refresh(consolidation)
-            return consolidation
+            failure_reason = str(exc)[:500]
+            logger.info("Consolidation failed for %r: %s", original_filename, failure_reason)
+            return _persist(status=ConsolidationStatus.FAILED, failure_reason=failure_reason)
 
         result_size_bytes = output_path.stat().st_size
         key = f"consolidations/{job_id}/result.xlsx"
         s3.upload_file(output_path, key)
 
-        consolidation = Consolidation(
-            original_filename=original_filename,
-            condition=condition,
+        return _persist(
             status=ConsolidationStatus.COMPLETED,
-            requested_by_identity=requested_by_identity,
             result_storage_key=key,
-            input_size_bytes=len(file_bytes),
             result_size_bytes=result_size_bytes,
-            completed_at=datetime.now(UTC),
         )
-        db.add(consolidation)
-        db.commit()
-        db.refresh(consolidation)
-        return consolidation
     finally:
-        shutil.rmtree(workspace, ignore_errors=True)
+        try:
+            shutil.rmtree(workspace)
+        except OSError:
+            # Logged, not silently swallowed (caught in review) — the
+            # docstring above promises the workspace is "always removed",
+            # and docker-compose.yml's rationale for not mounting a
+            # dedicated volume for this directory explicitly assumes that
+            # holds; a failure here means it doesn't, and should be visible.
+            logger.warning(
+                "Failed to remove consolidation temp workspace %s", workspace, exc_info=True
+            )
 
 
 def get_consolidation(db: Session, *, consolidation_id: int) -> Consolidation:

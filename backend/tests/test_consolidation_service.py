@@ -6,7 +6,9 @@ test_consolidations_api.py (which fake this runner entirely).
 """
 
 import os
+import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 import openpyxl
 import pytest
@@ -40,6 +42,56 @@ def test_missing_required_sheet_raises_consolidation_input_error(tmp_path: Path)
     workbook.save(input_path)
 
     with pytest.raises(ConsolidationInputError, match="Results \\(2\\)"):
+        ObserverConsolidationRunner().run(
+            input_path=input_path,
+            output_path=tmp_path / "result.xlsx",
+            condition=ConsolidationCondition.ME_ZE,
+        )
+
+
+def test_corrupted_but_valid_zip_raises_consolidation_input_error(tmp_path: Path) -> None:
+    """A .xlsx that IS a structurally valid ZIP (unlike the garbage-bytes
+    case above) but whose internal OOXML parts are missing/corrupted makes
+    openpyxl's load_workbook raise a bare OSError, not BadZipFile or
+    InvalidFileException — found in review, not caught by the original
+    exception mapping."""
+    input_path = tmp_path / "input.xlsx"
+    with zipfile.ZipFile(input_path, "w") as zf:
+        zf.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types/>')
+        zf.writestr("_rels/.rels", '<?xml version="1.0"?><Relationships/>')
+
+    with pytest.raises(ConsolidationInputError):
+        ObserverConsolidationRunner().run(
+            input_path=input_path,
+            output_path=tmp_path / "result.xlsx",
+            condition=ConsolidationCondition.ME_ZE,
+        )
+
+
+def test_a_bug_inside_bereken_observer_is_not_miscategorized_as_input_error(
+    tmp_path: Path,
+) -> None:
+    """The KeyError/OSError/BadZipFile/InvalidFileException catches are
+    scoped to lees_observer's own workbook-reading step only (found in
+    review: they originally wrapped the whole pipeline) — a KeyError from
+    a genuine bug elsewhere (e.g. inside bereken_observer's own pandas
+    merges) must propagate uncaught, not be silently reported to the user
+    as "your file's shape is wrong"."""
+    workbook = openpyxl.Workbook()
+    for name in ("Results", "Results (2)", "Results (REL)"):
+        workbook.create_sheet(name)
+    del workbook["Sheet"]
+    input_path = tmp_path / "input.xlsx"
+    workbook.save(input_path)
+
+    with (
+        patch("app.services.consolidation.lees_observer", return_value={"deel": "1+2"}),
+        patch(
+            "app.services.consolidation.bereken_observer",
+            side_effect=KeyError("unrelated_bug"),
+        ),
+        pytest.raises(KeyError, match="unrelated_bug"),
+    ):
         ObserverConsolidationRunner().run(
             input_path=input_path,
             output_path=tmp_path / "result.xlsx",
