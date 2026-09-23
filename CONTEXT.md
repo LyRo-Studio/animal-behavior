@@ -1828,3 +1828,24 @@ implementation-time judgment calls:
   during this ticket to run it against for real; it's wired up and ready,
   not yet exercised.
 
+**Consolidation domain code (ticket #114, part of issue #113's Excel
+consolidation feature) — approved stack deviation:** `consolidation/`
+(`consolidatie.py`, `observer_import.py`) is pre-existing Observer XT
+research-data processing code, committed as-is per issue #113's explicit
+instruction not to rewrite the algorithm. It depends on `pandas` (added to
+`backend/requirements.txt` at `>=3.0,<3.1`), which sits outside the
+mandatory backend stack (ENGINEERING-STANDARDS.md §1 names
+SQLAlchemy/Pydantic for data handling, not pandas) — approved because the
+domain logic itself is unmodified and pandas is the vocabulary it's
+already written in; rewriting it onto SQLAlchemy/Pydantic types was
+explicitly out of scope. `openpyxl` was already an approved dependency
+(ticket #94). The module's own `pas_ethogram_indeling_toe`/
+`verwerk_alle_delen` entry point is confirmed non-functional (imports a
+nonexistent `ethogram_controle` module and reads a nonexistent reference
+file) and is excluded from the web feature; only `lees_observer`/
+`bereken_observer`/`schrijf_resultaat` are wired into #115's adapter. A
+notebook (`consolidatie_honden.ipynb`) that originally accompanied this
+code was deliberately not committed — its saved cell outputs embedded
+real research data (test/dog IDs) from having been run against a real,
+non-fixture export.
+

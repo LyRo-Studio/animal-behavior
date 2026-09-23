@@ -12,7 +12,15 @@ pyjwt[crypto]>=2.9,<3
 boto3>=1.34,<2
 # Ticket #94 (Cutting job foundation, part of issue #93's Feature C):
 # app/services/timestamp_excel.py reads the timestamp workbook's first tab.
+# Also used by consolidation/ (ticket #114, issue #113's Excel consolidation
+# feature) — version pinned to match that module's own requirements.txt.
 openpyxl>=3.1,<3.2
+# Ticket #114 (issue #113's Excel consolidation feature): consolidation/'s
+# domain code (consolidatie.py, observer_import.py) operates on pandas
+# DataFrames; the adapter built in ticket #115 calls that code directly, so
+# pandas needs to be installed alongside openpyxl. Version matches
+# consolidation/requirements.txt.
+pandas>=3.0,<3.1
 # Ticket #94: FastAPI's Form()/File() (POST /cutting-jobs) need this to
 # parse multipart/form-data — no other endpoint in this app has needed it
 # until now.
