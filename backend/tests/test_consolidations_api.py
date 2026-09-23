@@ -439,3 +439,166 @@ def test_list_consolidations_is_bounded_to_the_newest_rows(db_session):
     listed = list_consolidations(db_session, limit=2)
 
     assert [row.id for row in listed] == [ids[2], ids[1]]
+
+
+def _rename(client, consolidation_id, display_name, *, headers=None):
+    return client.patch(
+        f"/api/consolidations/{consolidation_id}",
+        json={"display_name": display_name},
+        headers=headers,
+    )
+
+
+def test_rename_consolidation_updates_display_name_only(client, db_session):
+    created = _upload(client, filename="export.xlsx", condition="ZE").json()
+
+    response = _rename(client, created["id"], "Pilot dogs, week 3")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["display_name"] == "Pilot dogs, week 3"
+    assert body["original_filename"] == "export.xlsx"
+    assert {key: value for key, value in body.items() if key != "display_name"} == {
+        key: value for key, value in created.items() if key != "display_name"
+    }
+    row = db_session.get(Consolidation, created["id"])
+    db_session.refresh(row)
+    assert row.display_name == "Pilot dogs, week 3"
+    assert row.original_filename == "export.xlsx"
+
+
+def test_rename_consolidation_keeps_the_original_filename_visible_in_the_history_list(client):
+    consolidation_id = _upload(client, filename="export.xlsx").json()["id"]
+    _rename(client, consolidation_id, "Pilot dogs, week 3")
+
+    listed = client.get("/api/consolidations").json()
+
+    [row] = [row for row in listed if row["id"] == consolidation_id]
+    assert row["display_name"] == "Pilot dogs, week 3"
+    assert row["original_filename"] == "export.xlsx"
+
+
+def test_rename_consolidation_does_not_change_the_download_filename(client):
+    consolidation_id = _upload(client, filename="export.xlsx").json()["id"]
+    _rename(client, consolidation_id, "Pilot dogs, week 3")
+
+    response = client.get(f"/api/consolidations/{consolidation_id}/download")
+
+    assert response.status_code == 200
+    assert 'filename="export.xlsx"' in response.headers["content-disposition"]
+
+
+def test_rename_consolidation_writes_a_renamed_audit_row(client, db_session):
+    consolidation_id = _upload(client).json()["id"]
+
+    # The audit log's own identity source (ADR-0005), not the attribution
+    # header — unverified here, since no JWT is sent.
+    response = _rename(
+        client,
+        consolidation_id,
+        "Pilot dogs, week 3",
+        headers={"X-authentik-email": "renamer@vives.be"},
+    )
+
+    assert response.status_code == 200, response.text
+    rows = db_session.scalars(
+        select(AuditLog).where(AuditLog.action == AuditAction.CONSOLIDATION_RENAMED)
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].target_type == "consolidation"
+    assert rows[0].target == str(consolidation_id)
+    assert rows[0].identity == "renamer@vives.be"
+    assert rows[0].identity_verified is False
+
+
+def test_rename_consolidation_trims_surrounding_whitespace(client):
+    consolidation_id = _upload(client).json()["id"]
+
+    response = _rename(client, consolidation_id, "  Pilot dogs  ")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == "Pilot dogs"
+
+
+def test_rename_consolidation_to_blank_or_null_clears_the_display_name(client):
+    """Clearing the label falls back to original_filename (the frontend's
+    job) — a blank name is never stored as a label of its own."""
+    consolidation_id = _upload(client).json()["id"]
+    _rename(client, consolidation_id, "Pilot dogs")
+
+    blank = _rename(client, consolidation_id, "   ")
+    assert blank.status_code == 200, blank.text
+    assert blank.json()["display_name"] is None
+
+    _rename(client, consolidation_id, "Pilot dogs")
+    cleared = _rename(client, consolidation_id, None)
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["display_name"] is None
+
+
+def test_rename_consolidation_rejects_a_too_long_display_name(client, db_session):
+    consolidation_id = _upload(client).json()["id"]
+
+    response = _rename(client, consolidation_id, "x" * 256)
+
+    assert response.status_code == 422
+    row = db_session.get(Consolidation, consolidation_id)
+    db_session.refresh(row)
+    assert row.display_name is None
+
+
+def test_rename_consolidation_requires_the_display_name_field(client):
+    consolidation_id = _upload(client).json()["id"]
+
+    response = client.patch(f"/api/consolidations/{consolidation_id}", json={})
+
+    assert response.status_code == 422
+
+
+def test_rename_consolidation_rejects_an_attempt_to_change_the_original_filename(
+    client, db_session
+):
+    """original_filename is immutable (issue #113) — not even an accepted
+    field of the rename request."""
+    consolidation_id = _upload(client, filename="export.xlsx").json()["id"]
+
+    response = client.patch(
+        f"/api/consolidations/{consolidation_id}",
+        json={"display_name": "Renamed", "original_filename": "forged.xlsx"},
+    )
+
+    assert response.status_code == 422
+    row = db_session.get(Consolidation, consolidation_id)
+    db_session.refresh(row)
+    assert row.original_filename == "export.xlsx"
+
+
+def test_rename_consolidation_for_an_unknown_id_is_not_found(client, db_session):
+    response = _rename(client, 999999, "Anything")
+
+    assert response.status_code == 404
+    assert (
+        db_session.scalar(
+            select(AuditLog).where(AuditLog.action == AuditAction.CONSOLIDATION_RENAMED)
+        )
+        is None
+    )
+
+
+def test_rename_consolidation_created_by_another_identity_still_succeeds(client):
+    """Fully shared (issue #113, ADR-0004) — no ownership check on rename."""
+    create_response = client.post(
+        "/api/consolidations",
+        data={"condition": "ME_ZE"},
+        files={"file": ("export.xlsx", BytesIO(_WORKBOOK_BYTES), "application/octet-stream")},
+        headers=identity_headers("owner@vives.be"),
+    )
+
+    response = _rename(
+        client,
+        create_response.json()["id"],
+        "Renamed by someone else",
+        headers=identity_headers("someone-else@vives.be"),
+    )
+
+    assert response.status_code == 200, response.text

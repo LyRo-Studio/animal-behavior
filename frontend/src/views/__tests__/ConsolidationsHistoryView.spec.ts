@@ -6,11 +6,13 @@ import ConsolidationsHistoryView from '../ConsolidationsHistoryView.vue'
 
 const listConsolidationsMock = vi.hoisted(() => vi.fn())
 const downloadConsolidationMock = vi.hoisted(() => vi.fn())
+const renameConsolidationMock = vi.hoisted(() => vi.fn())
 
 vi.mock('@/services/consolidations', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/consolidations')>()),
   listConsolidations: listConsolidationsMock,
   downloadConsolidation: downloadConsolidationMock,
+  renameConsolidation: renameConsolidationMock,
 }))
 
 function createTestRouter() {
@@ -63,6 +65,7 @@ describe('ConsolidationsHistoryView', () => {
   afterEach(() => {
     listConsolidationsMock.mockReset()
     downloadConsolidationMock.mockReset()
+    renameConsolidationMock.mockReset()
   })
 
   it('loads and lists every consolidation with its filename, condition, status and date', async () => {
@@ -209,5 +212,145 @@ describe('ConsolidationsHistoryView', () => {
     const wrapper = await mountView()
 
     expect(wrapper.text()).toContain('Failed to load consolidations.')
+  })
+
+  describe('inline rename', () => {
+    async function startRename(wrapper: Awaited<ReturnType<typeof mountView>>, rowIndex = 0) {
+      const row = wrapper.findAll('[data-testid="consolidation-history-row"]')[rowIndex]
+      await row.find('[data-testid="consolidation-history-rename"]').trigger('click')
+      return row
+    }
+
+    it('opens an input prefilled with the current display name', async () => {
+      listConsolidationsMock.mockResolvedValue([consolidation({ displayName: 'Pilot dogs' })])
+
+      const wrapper = await mountView()
+      const row = await startRename(wrapper)
+
+      const input = row.find('[data-testid="consolidation-history-rename-input"]')
+      expect((input.element as HTMLInputElement).value).toBe('Pilot dogs')
+    })
+
+    it('opens an empty input, hinting at the original filename, when there is no display name', async () => {
+      listConsolidationsMock.mockResolvedValue([
+        consolidation({ displayName: null, originalFilename: 'export.xlsx' }),
+      ])
+
+      const wrapper = await mountView()
+      const row = await startRename(wrapper)
+
+      const input = row.find('[data-testid="consolidation-history-rename-input"]')
+      expect((input.element as HTMLInputElement).value).toBe('')
+      expect(input.attributes('placeholder')).toBe('export.xlsx')
+    })
+
+    it('saves the new name and shows it, keeping the original filename visible', async () => {
+      listConsolidationsMock.mockResolvedValue([
+        consolidation({ id: 7, displayName: null, originalFilename: 'export.xlsx' }),
+      ])
+      renameConsolidationMock.mockResolvedValue(
+        consolidation({
+          id: 7,
+          displayName: 'Pilot dogs, week 3',
+          originalFilename: 'export.xlsx',
+        }),
+      )
+
+      const wrapper = await mountView()
+      const row = await startRename(wrapper)
+      await row
+        .find('[data-testid="consolidation-history-rename-input"]')
+        .setValue('  Pilot dogs, week 3  ')
+      await row.find('[data-testid="consolidation-history-rename-save"]').trigger('click')
+      await flushPromises()
+
+      expect(renameConsolidationMock).toHaveBeenCalledWith(7, 'Pilot dogs, week 3')
+      expect(row.find('[data-testid="consolidation-history-rename-input"]').exists()).toBe(false)
+      expect(row.find('[data-testid="consolidation-history-name"]').text()).toBe(
+        'Pilot dogs, week 3',
+      )
+      expect(row.find('[data-testid="consolidation-history-original-filename"]').text()).toContain(
+        'export.xlsx',
+      )
+    })
+
+    it('saves on Enter', async () => {
+      listConsolidationsMock.mockResolvedValue([consolidation({ id: 7 })])
+      renameConsolidationMock.mockResolvedValue(consolidation({ id: 7, displayName: 'Renamed' }))
+
+      const wrapper = await mountView()
+      const row = await startRename(wrapper)
+      const input = row.find('[data-testid="consolidation-history-rename-input"]')
+      await input.setValue('Renamed')
+      await input.trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+
+      expect(renameConsolidationMock).toHaveBeenCalledWith(7, 'Renamed')
+    })
+
+    it('clears the display name when saved blank, falling back to the original filename', async () => {
+      listConsolidationsMock.mockResolvedValue([
+        consolidation({ id: 7, displayName: 'Pilot dogs', originalFilename: 'export.xlsx' }),
+      ])
+      renameConsolidationMock.mockResolvedValue(
+        consolidation({ id: 7, displayName: null, originalFilename: 'export.xlsx' }),
+      )
+
+      const wrapper = await mountView()
+      const row = await startRename(wrapper)
+      await row.find('[data-testid="consolidation-history-rename-input"]').setValue('   ')
+      await row.find('[data-testid="consolidation-history-rename-save"]').trigger('click')
+      await flushPromises()
+
+      expect(renameConsolidationMock).toHaveBeenCalledWith(7, null)
+      expect(row.find('[data-testid="consolidation-history-name"]').text()).toBe('export.xlsx')
+    })
+
+    it('cancels without saving, on the cancel button or Escape', async () => {
+      listConsolidationsMock.mockResolvedValue([consolidation({ displayName: 'Pilot dogs' })])
+
+      const wrapper = await mountView()
+      let row = await startRename(wrapper)
+      await row.find('[data-testid="consolidation-history-rename-input"]').setValue('Other')
+      await row.find('[data-testid="consolidation-history-rename-cancel"]').trigger('click')
+
+      expect(row.find('[data-testid="consolidation-history-rename-input"]').exists()).toBe(false)
+      expect(row.find('[data-testid="consolidation-history-name"]').text()).toBe('Pilot dogs')
+
+      row = await startRename(wrapper)
+      await row
+        .find('[data-testid="consolidation-history-rename-input"]')
+        .trigger('keydown', { key: 'Escape' })
+
+      expect(row.find('[data-testid="consolidation-history-rename-input"]').exists()).toBe(false)
+      expect(renameConsolidationMock).not.toHaveBeenCalled()
+    })
+
+    it('shows a rename error on its row and keeps the input open', async () => {
+      listConsolidationsMock.mockResolvedValue([consolidation({ id: 8 }), consolidation({ id: 7 })])
+      renameConsolidationMock.mockRejectedValue(new Error('Consolidation not found.'))
+
+      const wrapper = await mountView()
+      const row = await startRename(wrapper, 1)
+      await row.find('[data-testid="consolidation-history-rename-input"]').setValue('Renamed')
+      await row.find('[data-testid="consolidation-history-rename-save"]').trigger('click')
+      await flushPromises()
+
+      const rows = wrapper.findAll('[data-testid="consolidation-history-row"]')
+      expect(rows[1].text()).toContain('Consolidation not found.')
+      expect(rows[0].text()).not.toContain('Consolidation not found.')
+      expect(rows[1].find('[data-testid="consolidation-history-rename-input"]').exists()).toBe(true)
+    })
+
+    it('limits the input to the backend maximum length', async () => {
+      listConsolidationsMock.mockResolvedValue([consolidation()])
+
+      const wrapper = await mountView()
+      const row = await startRename(wrapper)
+
+      expect(
+        row.find('[data-testid="consolidation-history-rename-input"]').attributes('maxlength'),
+      ).toBe('255')
+    })
   })
 })

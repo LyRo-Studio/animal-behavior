@@ -1,10 +1,10 @@
 """Excel consolidation upload/consolidate/download (ticket #115, part of
-issue #113) and its history list (ticket #116) — mirrors
-app/api/analyses.py's "no auth, identity for attribution only" shape
-(ticket #72). Processing is synchronous: the create endpoint's response
-already carries the final outcome, so there is no
-separate GET-by-id/status-polling endpoint here (issue #113: "simplest
-reliable architecture", no worker/queue).
+issue #113), its history list (ticket #116) and rename (ticket #117) —
+mirrors app/api/analyses.py's "no auth, identity for attribution only"
+shape (ticket #72). Processing is synchronous: the create endpoint's
+response already carries the final outcome, so there is no separate
+GET-by-id/status-polling endpoint here (issue #113: "simplest reliable
+architecture", no worker/queue).
 """
 
 from pathlib import Path
@@ -29,7 +29,7 @@ from app.models.consolidation import (
     ConsolidationCondition,
     ConsolidationStatus,
 )
-from app.schemas.consolidations import ConsolidationOut
+from app.schemas.consolidations import ConsolidationOut, RenameConsolidationRequest
 from app.services.audit_log import record_audit_event
 from app.services.consolidation import (
     ConsolidationNotFoundError,
@@ -38,6 +38,7 @@ from app.services.consolidation import (
     get_consolidation,
     get_consolidation_runner,
     list_consolidations,
+    rename_consolidation,
     run_consolidation,
     start_consolidation,
     validate_workbook_opens,
@@ -194,6 +195,33 @@ def list_consolidations_endpoint(db: Session = Depends(get_db)) -> list[Consolid
     per-identity filtering (ticket #116, mirroring app.api.analyses'
     list_analyses). Includes `failed` rows with their failure_reason."""
     return list_consolidations(db)
+
+
+@router.patch("/{consolidation_id}", response_model=ConsolidationOut)
+def rename_consolidation_endpoint(
+    consolidation_id: int,
+    payload: RenameConsolidationRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Consolidation:
+    """Set or clear `consolidation_id`'s display_name (ticket #117). No
+    ownership check — fully shared, like download (ADR-0004). No CSRF token,
+    like every other state-changing endpoint since ticket #72 — see
+    CONTEXT.md's "Consolidation rename" decision for why, and for the
+    app-wide open question that leaves."""
+    try:
+        consolidation = rename_consolidation(
+            db, consolidation_id=consolidation_id, display_name=payload.display_name
+        )
+    except ConsolidationNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Consolidation not found."
+        ) from None
+
+    _record_verified_audit_event(
+        db, request, action=AuditAction.CONSOLIDATION_RENAMED, consolidation_id=consolidation_id
+    )
+    return consolidation
 
 
 @router.get("/{consolidation_id}/download")

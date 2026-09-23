@@ -15,6 +15,9 @@ from app.models.analysis_job import REQUESTED_BY_IDENTITY_MAX_LENGTH
 ORIGINAL_FILENAME_MAX_LENGTH = 255
 # Shared with app.services.consolidation, which truncates to it.
 FAILURE_REASON_MAX_LENGTH = 500
+# Shared with app.schemas.consolidations, which rejects a longer rename
+# (ticket #117) before it ever reaches this column's own constraint.
+DISPLAY_NAME_MAX_LENGTH = 255
 
 
 class ConsolidationCondition(str, enum.Enum):
@@ -68,7 +71,7 @@ class Consolidation(Base):
     # original_filename when unset (frontend's job). Kept as a separate
     # column, never overwriting original_filename, so a rename never
     # destroys the source file's provenance.
-    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(DISPLAY_NAME_MAX_LENGTH), nullable=True)
     condition: Mapped[ConsolidationCondition] = mapped_column(
         Enum(
             ConsolidationCondition,

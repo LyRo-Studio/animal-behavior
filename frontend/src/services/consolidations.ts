@@ -102,6 +102,31 @@ export async function listConsolidations(): Promise<Consolidation[]> {
   return rows.map(toConsolidation)
 }
 
+// Same bound as the backend's DISPLAY_NAME_MAX_LENGTH
+// (backend/app/models/consolidation.py) — the backend enforces it
+// regardless; this only stops the input from accepting more.
+export const CONSOLIDATION_DISPLAY_NAME_MAX_LENGTH = 255
+
+// Ticket #117: set a consolidation's display name, or clear it with `null`
+// (the history list then falls back to `originalFilename`, which a rename
+// never changes).
+export async function renameConsolidation(
+  id: number,
+  displayName: string | null,
+): Promise<Consolidation> {
+  const response = await fetch(`${API_BASE_URL}/consolidations/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ display_name: displayName }),
+  })
+
+  if (!response.ok) {
+    throw await errorFromResponse(response, 'Failed to rename consolidation.')
+  }
+
+  return toConsolidation(await response.json())
+}
+
 // A plain download (ticket #115, mirroring downloadAnalysisReport) — fetch
 // + Blob, no native <a>/<video> request involved.
 export async function downloadConsolidation(id: number): Promise<Blob> {

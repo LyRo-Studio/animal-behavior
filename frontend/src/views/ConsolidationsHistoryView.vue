@@ -3,8 +3,10 @@ import { onMounted, ref } from 'vue'
 
 import {
   CONSOLIDATION_CONDITION_LABELS,
+  CONSOLIDATION_DISPLAY_NAME_MAX_LENGTH,
   downloadConsolidation,
   listConsolidations,
+  renameConsolidation,
   type Consolidation,
 } from '@/services/consolidations'
 import { formatDate } from '@/utils/date'
@@ -50,6 +52,43 @@ async function download(consolidation: Consolidation) {
     downloadingId.value = null
   }
 }
+
+// Inline rename (ticket #117) — one row at a time. The input starts from the
+// current display name (empty when there is none, with the original
+// filename as a placeholder), and saving it blank clears the display name.
+const renamingId = ref<number | null>(null)
+const renameDraft = ref('')
+const isSavingRename = ref(false)
+const renameError = ref<string | null>(null)
+
+function startRename(consolidation: Consolidation) {
+  renamingId.value = consolidation.id
+  renameDraft.value = consolidation.displayName ?? ''
+  renameError.value = null
+}
+
+function cancelRename() {
+  renamingId.value = null
+  renameError.value = null
+}
+
+async function saveRename(consolidation: Consolidation) {
+  if (isSavingRename.value) return
+
+  isSavingRename.value = true
+  renameError.value = null
+  try {
+    const renamed = await renameConsolidation(consolidation.id, renameDraft.value.trim() || null)
+    consolidations.value = consolidations.value.map((row) =>
+      row.id === renamed.id ? renamed : row,
+    )
+    renamingId.value = null
+  } catch (err) {
+    renameError.value = err instanceof Error ? err.message : 'Failed to rename consolidation.'
+  } finally {
+    isSavingRename.value = false
+  }
+}
 </script>
 
 <template>
@@ -84,12 +123,54 @@ async function download(consolidation: Consolidation) {
         >
           <div class="flex items-center justify-between gap-4">
             <div class="min-w-0">
-              <p
-                class="truncate font-medium text-foreground"
-                data-testid="consolidation-history-name"
-              >
-                {{ consolidation.displayName ?? consolidation.originalFilename }}
-              </p>
+              <div v-if="renamingId === consolidation.id" class="flex items-center gap-2">
+                <input
+                  v-model="renameDraft"
+                  type="text"
+                  aria-label="Display name"
+                  data-testid="consolidation-history-rename-input"
+                  :maxlength="CONSOLIDATION_DISPLAY_NAME_MAX_LENGTH"
+                  :placeholder="consolidation.originalFilename"
+                  :disabled="isSavingRename"
+                  class="min-w-0 flex-1 rounded-md border border-border bg-surface px-2 py-1 text-sm text-foreground"
+                  @keydown.enter="saveRename(consolidation)"
+                  @keydown.escape="cancelRename"
+                />
+                <button
+                  type="button"
+                  data-testid="consolidation-history-rename-save"
+                  :disabled="isSavingRename"
+                  class="font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                  @click="saveRename(consolidation)"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  data-testid="consolidation-history-rename-cancel"
+                  :disabled="isSavingRename"
+                  class="text-muted hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                  @click="cancelRename"
+                >
+                  Cancel
+                </button>
+              </div>
+              <div v-else class="flex items-center gap-2">
+                <p
+                  class="truncate font-medium text-foreground"
+                  data-testid="consolidation-history-name"
+                >
+                  {{ consolidation.displayName ?? consolidation.originalFilename }}
+                </p>
+                <button
+                  type="button"
+                  data-testid="consolidation-history-rename"
+                  class="shrink-0 text-primary hover:underline"
+                  @click="startRename(consolidation)"
+                >
+                  Rename
+                </button>
+              </div>
               <p
                 v-if="consolidation.displayName"
                 class="truncate text-muted"
@@ -130,6 +211,13 @@ async function download(consolidation: Consolidation) {
             data-testid="consolidation-history-failure-reason"
           >
             {{ consolidation.failureReason }}
+          </p>
+          <p
+            v-if="renamingId === consolidation.id && renameError"
+            class="mt-1 text-danger"
+            role="alert"
+          >
+            {{ renameError }}
           </p>
           <p v-if="downloadErrors[consolidation.id]" class="mt-1 text-danger" role="alert">
             {{ downloadErrors[consolidation.id] }}
