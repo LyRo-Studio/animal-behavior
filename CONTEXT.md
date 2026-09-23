@@ -1930,3 +1930,32 @@ a download (the same `GET /consolidations/{id}/download` as #115).
 "stuck `processing`" gap from #115's core-flow decision: those rows are
 listed as they are, with status `processing` and no download action.
 They are not hidden, and nothing reconciles them.
+
+**Consolidation rename (ticket #117, part of issue #113):**
+`PATCH /api/consolidations/{id}` with `{"display_name": ...}` sets the
+user-facing label. `display_name` is required but nullable: `null` or a
+blank string clears it, and the history list falls back to
+`original_filename`. Surrounding whitespace is trimmed before the
+255-character check (`DISPLAY_NAME_MAX_LENGTH`). The body is
+`extra="forbid"`, so trying to send `original_filename` is a 422, not
+silently ignored. `original_filename` is never changed and stays the
+download filename. Any status can be renamed, since it's only a label.
+There's no ownership check (fully shared, ADR-0004).
+`CONSOLIDATION_RENAMED` (migration `0013`) records who renamed which
+consolidation, not the old or new name. `audit_log` has no field for
+details, and adding one wasn't worth it for a label. Not rate limited,
+same as `POST /analyses/{id}/cancel`: it's one small row update.
+No CSRF token either, same as every other state-changing endpoint since
+#72. The app itself issues no cookie or session (see #72's CORS note), so
+it has no credential of its own for a forged request to use.
+ENGINEERING-STANDARDS.md §5 says CORS is not a replacement for CSRF
+protection, so the JSON `PATCH` needing a preflight is not counted as the
+control here. **Open, app-wide, not specific to rename:** authentik's own
+session cookie in front of the app *is* a browser-managed credential.
+Whether a cross-site request carries it depends on that cookie's SameSite
+setting, which lives in Mechatronics' authentik config, not this repo.
+Every state-changing endpoint (`POST /analyses`, `/analyses/{id}/cancel`,
+`POST /consolidations`, this `PATCH`) inherits the same answer. The frontend
+renames inline in `ConsolidationsHistoryView`, one row at a time: Enter
+saves, Escape cancels, and a failure stays on its row with the input still
+open.

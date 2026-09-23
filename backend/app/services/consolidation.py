@@ -291,6 +291,20 @@ def get_consolidation(db: Session, *, consolidation_id: int) -> Consolidation:
     return consolidation
 
 
+def rename_consolidation(
+    db: Session, *, consolidation_id: int, display_name: str | None
+) -> Consolidation:
+    """Set (or, with None, clear) `consolidation_id`'s display_name (ticket
+    #117). Never touches original_filename — the source file's provenance
+    survives any rename. Allowed whatever the row's status: it's only a
+    label. Raises ConsolidationNotFoundError for a nonexistent id."""
+    consolidation = get_consolidation(db, consolidation_id=consolidation_id)
+    consolidation.display_name = display_name
+    db.commit()
+    db.refresh(consolidation)
+    return consolidation
+
+
 # Every consolidation is visible to everyone (fully shared, like
 # AnalysisJob since ticket #72), so an unscoped listing grows without bound
 # as history accumulates — capped to the newest rows, same reasoning and
