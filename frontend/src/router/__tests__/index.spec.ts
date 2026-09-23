@@ -12,6 +12,8 @@ describe('router', () => {
     ['/media', 'media'],
     ['/analyses', 'analyses-history'],
     ['/analyses/7', 'analysis-detail'],
+    ['/consolidation', 'consolidation'],
+    ['/consolidations', 'consolidations-history'],
   ])('lets a visitor straight onto %s', async (path, name) => {
     await router.push(path)
     await router.isReady()

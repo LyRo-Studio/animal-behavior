@@ -31,6 +31,7 @@ from zipfile import BadZipFile
 from consolidation.observer_import import bereken_observer, lees_observer, schrijf_resultaat
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.consolidation import (
@@ -288,3 +289,27 @@ def get_consolidation(db: Session, *, consolidation_id: int) -> Consolidation:
     if consolidation is None:
         raise ConsolidationNotFoundError(consolidation_id)
     return consolidation
+
+
+# Every consolidation is visible to everyone (fully shared, like
+# AnalysisJob since ticket #72), so an unscoped listing grows without bound
+# as history accumulates — capped to the newest rows, same reasoning and
+# ceiling as app.services.analyses.MAX_LISTED_ANALYSIS_JOBS
+# (ENGINEERING-STANDARDS.md §5: avoid unbounded database queries).
+MAX_LISTED_CONSOLIDATIONS = 500
+
+
+def list_consolidations(
+    db: Session, *, limit: int = MAX_LISTED_CONSOLIDATIONS
+) -> list[Consolidation]:
+    """The newest Consolidations (up to `limit`), whoever requested them and
+    whatever their status — backs the history page (ticket #116). Failed
+    rows are deliberately included (issue #113: a failed attempt still
+    shows up, with its reason), as are rows stuck `processing` (see
+    Consolidation's own docstring — nothing reconciles those)."""
+    stmt = (
+        select(Consolidation)
+        .order_by(Consolidation.created_at.desc(), Consolidation.id.desc())
+        .limit(limit)
+    )
+    return list(db.scalars(stmt))

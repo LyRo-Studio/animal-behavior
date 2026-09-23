@@ -16,3 +16,11 @@ export function triggerBrowserDownload(url: string, filename?: string): void {
   link.click()
   link.remove()
 }
+
+// A fetched Blob saved under `filename` — the object-URL wrap/revoke around
+// triggerBrowserDownload that each Blob download needs.
+export function triggerBlobDownload(blob: Blob, filename: string): void {
+  const objectUrl = URL.createObjectURL(blob)
+  triggerBrowserDownload(objectUrl, filename)
+  URL.revokeObjectURL(objectUrl)
+}

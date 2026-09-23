@@ -361,3 +361,81 @@ def test_download_consolidation_created_by_another_identity_still_succeeds(clien
     )
 
     assert response.status_code == 200
+
+
+def test_list_consolidations_returns_every_identitys_consolidations(client):
+    """Fully shared visibility (ticket #116, mirroring /analyses since
+    ticket #72) — no per-identity filtering of the history list."""
+    client.post(
+        "/api/consolidations",
+        data={"condition": "ME"},
+        files={"file": ("mine.xlsx", BytesIO(_WORKBOOK_BYTES), "application/octet-stream")},
+        headers=identity_headers("mine@vives.be"),
+    )
+    client.post(
+        "/api/consolidations",
+        data={"condition": "ZE"},
+        files={"file": ("theirs.xlsx", BytesIO(_WORKBOOK_BYTES), "application/octet-stream")},
+        headers=identity_headers("other@vives.be"),
+    )
+
+    response = client.get("/api/consolidations", headers=identity_headers("mine@vives.be"))
+
+    assert response.status_code == 200
+    listed = {(row["original_filename"], row["requested_by_identity"]) for row in response.json()}
+    assert listed == {("mine.xlsx", "mine@vives.be"), ("theirs.xlsx", "other@vives.be")}
+
+
+def test_list_consolidations_includes_completed_and_failed_rows_newest_first(
+    client, consolidation_runner
+):
+    completed_id = _upload(client, filename="good.xlsx", condition="ME").json()["id"]
+    consolidation_runner.error = ConsolidationInputError("fases: ontbrekende kolommen")
+    failed_id = _upload(client, filename="bad.xlsx", condition="ZE").json()["id"]
+
+    response = client.get("/api/consolidations")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [row["id"] for row in body] == [failed_id, completed_id]
+    failed, completed = body
+    assert failed["status"] == "failed"
+    assert failed["failure_reason"] == "fases: ontbrekende kolommen"
+    assert failed["original_filename"] == "bad.xlsx"
+    assert failed["condition"] == "ZE"
+    assert completed["status"] == "completed"
+    assert completed["failure_reason"] is None
+    for row in body:
+        assert {"original_filename", "display_name", "condition", "created_at", "status"} <= (
+            row.keys()
+        )
+
+
+def test_list_consolidations_is_empty_when_there_are_none(client):
+    response = client.get("/api/consolidations")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_list_consolidations_is_bounded_to_the_newest_rows(db_session):
+    """Every consolidation is visible to everyone, so an unscoped listing
+    would grow without bound — capped like list_analysis_jobs
+    (ENGINEERING-STANDARDS.md §5: avoid unbounded database queries)."""
+    from app.models.consolidation import ConsolidationCondition
+    from app.services.consolidation import list_consolidations, start_consolidation
+
+    ids = [
+        start_consolidation(
+            db_session,
+            requested_by_identity=None,
+            original_filename=f"export-{index}.xlsx",
+            condition=ConsolidationCondition.ME,
+            input_size_bytes=1,
+        ).id
+        for index in range(3)
+    ]
+
+    listed = list_consolidations(db_session, limit=2)
+
+    assert [row.id for row in listed] == [ids[2], ids[1]]

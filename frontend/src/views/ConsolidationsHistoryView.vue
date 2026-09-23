@@ -1,0 +1,141 @@
+<script setup lang="ts">
+import { onMounted, ref } from 'vue'
+
+import {
+  CONSOLIDATION_CONDITION_LABELS,
+  downloadConsolidation,
+  listConsolidations,
+  type Consolidation,
+} from '@/services/consolidations'
+import { formatDate } from '@/utils/date'
+import { triggerBlobDownload } from '@/utils/download'
+
+const consolidations = ref<Consolidation[]>([])
+const isLoading = ref(true)
+const loadError = ref<string | null>(null)
+
+async function loadConsolidations() {
+  isLoading.value = true
+  loadError.value = null
+  try {
+    // Every consolidation, whoever ran it, newest first (ticket #116: fully
+    // shared, like AnalysesHistoryView) — the backend already orders and
+    // bounds it.
+    consolidations.value = await listConsolidations()
+  } catch {
+    loadError.value = 'Failed to load consolidations.'
+  } finally {
+    isLoading.value = false
+  }
+}
+
+onMounted(loadConsolidations)
+
+const downloadingId = ref<number | null>(null)
+// Keyed by consolidation id, so an error shows on the row it happened on.
+const downloadErrors = ref<Record<number, string>>({})
+
+async function download(consolidation: Consolidation) {
+  if (downloadingId.value !== null) return
+
+  downloadingId.value = consolidation.id
+  delete downloadErrors.value[consolidation.id]
+  try {
+    const blob = await downloadConsolidation(consolidation.id)
+    triggerBlobDownload(blob, consolidation.originalFilename)
+  } catch (err) {
+    downloadErrors.value[consolidation.id] =
+      err instanceof Error ? err.message : 'Failed to download file.'
+  } finally {
+    downloadingId.value = null
+  }
+}
+</script>
+
+<template>
+  <main class="min-h-screen bg-background font-sans text-foreground">
+    <header class="flex items-center justify-between border-b border-border bg-surface px-6 py-4">
+      <h1 class="font-serif text-xl text-primary">Consolidation History</h1>
+      <div class="flex items-center gap-4">
+        <RouterLink
+          :to="{ name: 'consolidation' }"
+          class="text-sm font-medium text-primary hover:underline"
+        >
+          New consolidation
+        </RouterLink>
+        <RouterLink :to="{ name: 'home' }" class="text-sm font-medium text-primary hover:underline">
+          Back to Home
+        </RouterLink>
+      </div>
+    </header>
+
+    <section class="mx-auto max-w-2xl px-6 py-10">
+      <p v-if="isLoading" class="text-sm text-muted">Loading…</p>
+      <p v-else-if="loadError" class="text-sm text-danger" role="alert">{{ loadError }}</p>
+      <p v-else-if="consolidations.length === 0" class="text-sm text-muted">
+        No consolidations yet.
+      </p>
+      <ul v-else class="divide-y divide-border rounded-md border border-border">
+        <li
+          v-for="consolidation in consolidations"
+          :key="consolidation.id"
+          data-testid="consolidation-history-row"
+          class="px-4 py-3 text-sm"
+        >
+          <div class="flex items-center justify-between gap-4">
+            <div class="min-w-0">
+              <p
+                class="truncate font-medium text-foreground"
+                data-testid="consolidation-history-name"
+              >
+                {{ consolidation.displayName ?? consolidation.originalFilename }}
+              </p>
+              <p
+                v-if="consolidation.displayName"
+                class="truncate text-muted"
+                data-testid="consolidation-history-original-filename"
+              >
+                Source: {{ consolidation.originalFilename }}
+              </p>
+              <p class="text-muted">
+                <span data-testid="consolidation-history-condition">{{
+                  CONSOLIDATION_CONDITION_LABELS[consolidation.condition]
+                }}</span>
+                ·
+                <span data-testid="consolidation-history-status">
+                  {{ consolidation.status }} · {{ formatDate(consolidation.createdAt) }}
+                </span>
+                <span
+                  v-if="consolidation.requestedByIdentity"
+                  data-testid="consolidation-history-requested-by"
+                >
+                  · {{ consolidation.requestedByIdentity }}
+                </span>
+              </p>
+            </div>
+            <button
+              v-if="consolidation.status === 'completed'"
+              type="button"
+              data-testid="consolidation-history-download"
+              :disabled="downloadingId !== null"
+              class="shrink-0 rounded-md bg-primary px-3 py-1.5 font-medium text-white hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+              @click="download(consolidation)"
+            >
+              {{ downloadingId === consolidation.id ? 'Downloading…' : 'Download' }}
+            </button>
+          </div>
+          <p
+            v-if="consolidation.status === 'failed'"
+            class="mt-1 text-danger"
+            data-testid="consolidation-history-failure-reason"
+          >
+            {{ consolidation.failureReason }}
+          </p>
+          <p v-if="downloadErrors[consolidation.id]" class="mt-1 text-danger" role="alert">
+            {{ downloadErrors[consolidation.id] }}
+          </p>
+        </li>
+      </ul>
+    </section>
+  </main>
+</template>
