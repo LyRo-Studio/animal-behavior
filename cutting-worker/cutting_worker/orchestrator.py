@@ -14,12 +14,14 @@ import shutil
 from collections.abc import Callable
 from pathlib import Path
 
+from app.models.audit_log import AuditAction
 from app.models.cutting_job import (
     CuttingJob,
     CuttingJobOutput,
     CuttingJobOutputStatus,
     CuttingJobStatus,
 )
+from app.services.audit_log import record_audit_event
 from app.services.cutting_jobs import claim_next_queued_cutting_job, finalize_cutting_job
 from app.services.s3_client import S3Client
 from sqlalchemy.orm import Session
@@ -102,7 +104,7 @@ def _fail_after_unhandled_error(db: Session, job: CuttingJob) -> None:
     the next startup is the correct fallback, not a second recovery layer.
     """
     _fail_pending_outputs(db, job, _BATCH_FAILURE_REASON)
-    finalize_cutting_job(db, job)
+    _finalize_and_audit_job(db, job)
 
 
 def _fail_pending_outputs(db: Session, job: CuttingJob, failure_reason: str) -> None:
@@ -152,7 +154,7 @@ def _run_claimed_job(
             job.test_id,
         )
         _fail_pending_outputs(db, job, _BATCH_FAILURE_REASON)
-        finalize_cutting_job(db, job)
+        _finalize_and_audit_job(db, job)
         return
 
     # Fallback sweep of the output directory, for anything the cutter wrote
@@ -165,9 +167,58 @@ def _run_claimed_job(
             _upload_output(db, job, output, local_path, s3_client=s3_client)
     _fail_pending_outputs(db, job, _PIPELINE_FAILURE_REASON)
 
-    finalized = finalize_cutting_job(db, job)
+    finalized = _finalize_and_audit_job(db, job)
     if finalized.status == CuttingJobStatus.SUCCEEDED:
         _discard_source_uploads(job)
+
+
+def _finalize_and_audit_job(db: Session, job: CuttingJob) -> CuttingJob:
+    """Finalize `job` (`finalize_cutting_job`) and write the matching
+    CUTTING_COMPLETED / CUTTING_FAILED audit row (ticket #99) — the one seam
+    every finalize path goes through, so none can reach a terminal status
+    without its audit row. Mirrors worker/orchestrator.py's
+    `_finalize_and_audit_job`:
+
+    - identity is the job's own `requested_by_identity`, with
+      `identity_verified=False`: there's no live request here to verify a
+      JWT against;
+    - the audit write and its commit are best-effort and never propagate.
+      The job's real outcome is already committed by then, so an audit
+      failure must never reach `process_next_job`'s catch-all recovery,
+      which would re-fail an already-succeeded job (and keep its source
+      upload instead of discarding it).
+    """
+    job = finalize_cutting_job(db, job)
+
+    if job.status == CuttingJobStatus.SUCCEEDED:
+        action = AuditAction.CUTTING_COMPLETED
+        failure_reason = None
+    else:
+        failed_count = sum(
+            1 for output in job.outputs if output.status == CuttingJobOutputStatus.FAILED
+        )
+        action = AuditAction.CUTTING_FAILED
+        failure_reason = f"{failed_count} of {len(job.outputs)} phases failed."
+
+    try:
+        record_audit_event(
+            db,
+            identity=job.requested_by_identity,
+            identity_verified=False,
+            action=action,
+            target_type="cutting_job",
+            target=str(job.id),
+            failure_reason=failure_reason,
+        )
+        db.commit()
+    except Exception:
+        logger.exception(
+            "cutting_job_id=%s failed to commit %s audit event after finalizing the job",
+            job.id,
+            action,
+        )
+
+    return job
 
 
 def _make_output_written_callback(

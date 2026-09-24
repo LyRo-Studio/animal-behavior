@@ -1757,6 +1757,9 @@ ticket #112), rather than the ad-hoc, manual process used today.
   `CONTEXT.md`'s Feature A section already flagged this feature as
   needing its own events later; the existing schema (`target_type`/
   `target`, no FK, best-effort writes) generalizes with no changes needed.
+  *Correction, ticket #99:* the table's shape needed no change, but
+  `audit_action` is a native Postgres enum, so the three new values still
+  needed a migration (0015), the same as 0011–0014 did for consolidation.
 - **Rate limiting:** creating a CuttingJob reuses the existing per-identity
   `rate_limit.py` machinery, same reasoning as Feature B's `POST
   /analyses` limit — an upload-triggering endpoint is at least as
@@ -1848,7 +1851,8 @@ didn't pin down exactly:
   ticket's own acceptance criteria don't ask for them (mirrors ticket #45,
   which also shipped without audit events — those came later, via ticket
   #82). Deferred to whichever future ticket adds the cutting-worker, same
-  as `ANALYSIS_STARTED` etc. arrived after the worker existed.
+  as `ANALYSIS_STARTED` etc. arrived after the worker existed. *Done in
+  ticket #99*; see "Cutting audit events (ticket #99)" below.
 
 **Cutting worker (ticket #95) — shipped; mirrors ticket #47's own scoping
 for the analysis worker.** A new `cutting-worker/` service (own Docker
@@ -2149,6 +2153,37 @@ Implementation-time judgment calls:
   with `assist`'s ffmpeg/scipy-backed modules stubbed in `sys.modules`,
   since CI never installs `requirements-assist.txt`. The opt-in real test
   also asserts the reported order.
+
+**Cutting audit events (ticket #99) — shipped.** `CUTTING_STARTED`,
+`CUTTING_COMPLETED` and `CUTTING_FAILED` (migration 0015), all with
+`target_type="cutting_job"` and the job id as `target`, mirroring the
+`ANALYSIS_*` events:
+
+- **`CUTTING_STARTED`** is written by the API, once per job actually
+  created: one row for `POST /cutting-jobs`, one per created job in a batch
+  (#97). Nothing is written for a rejected Test or for #96's confirmation
+  block, since no job exists. Attribution uses `get_verified_identity`,
+  like `ANALYSIS_STARTED`; `requested_by_identity` stays the plain
+  `get_identity` value.
+- **`CUTTING_COMPLETED`/`CUTTING_FAILED`** are written by the cutting-worker
+  through `_finalize_and_audit_job` in `orchestrator.py`. Every finalize
+  path goes through it: the normal end, `cut()` raising, and an error
+  escaping entirely. Attribution is the job's own `requested_by_identity`,
+  always with `identity_verified=False` (no live request to verify).
+  There's no `completed_with_errors` counterpart because
+  `CuttingJobStatus` has none (ticket #95). A failed job's
+  `failure_reason` is a count, `"N of M phases failed."`, so a partial
+  failure is distinguishable from a whole-job one without a new action.
+- **Best-effort everywhere.** `record_audit_event` already swallows a
+  failed write. Both new call sites also guard the commit that makes the
+  row durable:
+  - **API:** the job is already committed by `create_cutting_job`, so a
+    failure here can't turn creation into an error response. The analysis
+    endpoint's `_record_verified_audit_event` leaves its commit unguarded.
+  - **Worker:** as in the analysis worker, an audit failure after a job
+    succeeded must never reach `process_next_job`'s catch-all recovery.
+    That would re-fail nothing now (it fails only `pending` outputs since
+    #98), but it would skip discarding the source upload.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`

@@ -30,6 +30,10 @@ class AuditAction(str, enum.Enum):
     CONSOLIDATION_RENAMED = "consolidation_renamed"
     # Ticket #118.
     CONSOLIDATION_DELETED = "consolidation_deleted"
+    # Ticket #99, part of issue #93's video cutting feature (Feature C).
+    CUTTING_STARTED = "cutting_started"
+    CUTTING_COMPLETED = "cutting_completed"
+    CUTTING_FAILED = "cutting_failed"
 
 
 class AuditLog(Base):

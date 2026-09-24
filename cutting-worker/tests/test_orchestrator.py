@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from pathlib import Path
 
+from app.models.audit_log import AuditAction, AuditLog
 from app.models.cutting_job import (
     CuttingJob,
     CuttingJobOutput,
@@ -348,3 +349,106 @@ def test_an_error_escaping_after_the_cut_keeps_cuts_already_committed_live(
     statuses = {f"{o.condition}_{o.phase}": o.status for o in job.outputs}
     assert statuses.pop("ZE_F7") == CuttingJobOutputStatus.FAILED
     assert set(statuses.values()) == {CuttingJobOutputStatus.SUCCEEDED}
+
+
+# --- CUTTING_COMPLETED / CUTTING_FAILED audit events (ticket #99) ---
+
+
+def _audit_rows_for(db_session, job) -> list[AuditLog]:
+    return list(
+        db_session.scalars(
+            select(AuditLog).where(
+                AuditLog.target_type == "cutting_job", AuditLog.target == str(job.id)
+            )
+        )
+    )
+
+
+def test_a_succeeded_job_writes_a_cutting_completed_audit_row(db_session, work_root, uploads_root):
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+
+    process_next_job(
+        db_session, s3_client=FakeS3Client(), video_cutter=FakeVideoCutter(), work_root=work_root
+    )
+
+    (row,) = _audit_rows_for(db_session, job)
+    assert row.action == AuditAction.CUTTING_COMPLETED
+    # Worker-driven: the job's own attribution, never freshly verified.
+    assert row.identity == "jan.peeters@vives.be"
+    assert row.identity_verified is False
+    assert row.failure_reason is None
+
+
+def test_a_job_with_a_failed_phase_writes_a_cutting_failed_audit_row(
+    db_session, work_root, uploads_root
+):
+    job = build_cutting_job(db_session, cameras=("C1", "C2"), uploads_root=uploads_root)
+
+    process_next_job(
+        db_session,
+        s3_client=FakeS3Client(),
+        video_cutter=FakeVideoCutter(missing_outputs=frozenset({("C2", "ME_F2")})),
+        work_root=work_root,
+    )
+
+    (row,) = _audit_rows_for(db_session, job)
+    assert row.action == AuditAction.CUTTING_FAILED
+    assert row.failure_reason == "1 of 30 phases failed."
+
+
+def test_a_whole_job_failure_writes_a_cutting_failed_audit_row(db_session, work_root, uploads_root):
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+
+    process_next_job(
+        db_session,
+        s3_client=FakeS3Client(),
+        video_cutter=FakeVideoCutter(raises=RuntimeError("could not read source video")),
+        work_root=work_root,
+    )
+
+    (row,) = _audit_rows_for(db_session, job)
+    assert row.action == AuditAction.CUTTING_FAILED
+    assert row.failure_reason == "15 of 15 phases failed."
+    assert "could not read source video" not in row.failure_reason
+
+
+def test_an_error_escaping_the_run_still_writes_exactly_one_cutting_failed_row(
+    db_session, work_root, uploads_root
+):
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+
+    process_next_job(
+        db_session,
+        s3_client=_FailingUploadS3Client("cuts/T001/T001_C1_ZE_F7.mp4"),
+        video_cutter=FakeVideoCutter(unreported_outputs=frozenset({("C1", "ZE_F7")})),
+        work_root=work_root,
+    )
+
+    (row,) = _audit_rows_for(db_session, job)
+    assert row.action == AuditAction.CUTTING_FAILED
+    assert row.failure_reason == "1 of 15 phases failed."
+
+
+def test_a_failed_audit_write_after_success_never_fails_the_job(
+    db_session, work_root, uploads_root, monkeypatch
+):
+    """Mirrors the analysis worker's regression test: the job's real
+    outcome is already committed, so an audit failure must never reach
+    `process_next_job`'s catch-all recovery and re-fail it."""
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+    upload_path = job.c1_source_path
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("simulated audit write failure")
+
+    monkeypatch.setattr("cutting_worker.orchestrator.record_audit_event", _raise)
+
+    process_next_job(
+        db_session, s3_client=FakeS3Client(), video_cutter=FakeVideoCutter(), work_root=work_root
+    )
+
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.SUCCEEDED
+    assert all(o.status == CuttingJobOutputStatus.SUCCEEDED for o in job.outputs)
+    assert not Path(upload_path).parent.exists()
+    assert _audit_rows_for(db_session, job) == []
