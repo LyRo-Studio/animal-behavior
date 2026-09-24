@@ -4,6 +4,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.cutting_job import CuttingJobOutputStatus, CuttingJobStatus
+from app.services.cutting_jobs import MAX_TESTS_PER_BATCH
 
 _TestId = Annotated[str, Field(min_length=1, max_length=50)]
 _Filename = Annotated[str, Field(min_length=1, max_length=255)]
@@ -65,6 +66,14 @@ class CuttingJobBatchEntryIn(BaseModel):
     c1_upload_id: str | None = None
     c2_upload_id: str | None = None
     confirm_overwrite: bool = False
+
+
+# `POST /cutting-jobs/batch`'s whole `tests` list: 1-5 entries, bounded at
+# the schema level like CreateAnalysisRequest.test_ids (the service enforces
+# the same limit itself for any other caller).
+CuttingJobBatchEntries = Annotated[
+    list[CuttingJobBatchEntryIn], Field(min_length=1, max_length=MAX_TESTS_PER_BATCH)
+]
 
 
 class CuttingJobBatchErrorOut(BaseModel):

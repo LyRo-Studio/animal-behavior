@@ -26,6 +26,7 @@ from app.services.cutting_jobs import (
     submit_cutting_job_batch,
 )
 from app.services.cutting_uploads import append_upload_chunk, start_upload
+from app.services.timestamp_excel import MalformedTimestampCellError
 
 _PHASE_HEADERS = [f"{condition}_F{n}" for condition in ("ME", "ZE") for n in range(1, 9)]
 _HEADERS = ["Test ID", "Dog ID", "C1/C2", *_PHASE_HEADERS]
@@ -190,6 +191,39 @@ def test_one_tests_validation_failure_does_not_block_the_others(
     assert by_test["T002"].job is None
     assert isinstance(by_test["T002"].error, ReferenceCameraMismatchError)
     assert {job.test_id for job in db_session.query(CuttingJob)} == {"T001", "T003"}
+
+
+def test_a_malformed_cell_in_one_tests_row_fails_only_that_test(
+    db_session, s3_client, media_prober, tmp_path
+):
+    """The batch shares one workbook; T002's own bad cell must not take
+    T001 down with it (issue #93 user story 10)."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(_HEADERS)
+    blank_phases = [None] * (len(_PHASE_HEADERS) - 1)
+    sheet.append(["T001", "Rex", "C1", time(1, 0, 0), *blank_phases])
+    sheet.append(["T002", "Rex", "C1", "-", *blank_phases])
+    buffer = BytesIO()
+    workbook.save(buffer)
+
+    results = submit_cutting_job_batch(
+        db_session,
+        requested_by_identity=None,
+        excel_bytes=buffer.getvalue(),
+        submissions=[
+            CuttingJobSubmission(
+                test_id=test_id, c1_upload_id=_completed_upload(tmp_path, test_id=test_id)
+            )
+            for test_id in ("T001", "T002")
+        ],
+        upload_root=tmp_path,
+        s3=s3_client,
+        media_prober=media_prober,
+    )
+
+    assert results[0].job is not None
+    assert isinstance(results[1].error, MalformedTimestampCellError)
 
 
 def test_an_unknown_upload_id_fails_only_its_own_test(

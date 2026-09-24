@@ -34,9 +34,8 @@ from app.services.timestamp_excel import (
     MalformedTestIdError,
     MalformedTimestampCellError,
     TestRowNotFoundError,
-    find_test_row,
     normalize_test_id,
-    parse_timestamp_workbook,
+    read_test_row,
 )
 
 # One (condition, phase) slot per expected CuttingJobOutput, per uploaded
@@ -266,8 +265,7 @@ def create_cutting_job(
         if not source_filename_matches_camera(upload.filename, test_id, upload.camera):
             raise InvalidSourceFilenameError(upload.filename)
 
-    rows = parse_timestamp_workbook(excel_bytes)
-    row = find_test_row(rows, test_id)
+    row = read_test_row(excel_bytes, test_id)
 
     if len(uploads) == 1 and uploads[0].camera != row.reference_camera:
         raise ReferenceCameraMismatchError(uploads[0].camera, row.reference_camera)
@@ -419,15 +417,15 @@ def submit_cutting_job_batch(
         raise EmptyBatchError
     if len(submissions) > MAX_TESTS_PER_BATCH:
         raise TooManyTestsInBatchError(len(submissions))
+    test_ids = [normalize_test_id(submission.test_id) for submission in submissions]
     seen_test_ids: set[str] = set()
-    for submission in submissions:
-        test_id = normalize_test_id(submission.test_id)
+    for test_id in test_ids:
         if test_id in seen_test_ids:
             raise DuplicateTestInBatchError(test_id)
         seen_test_ids.add(test_id)
 
     results = []
-    for submission in submissions:
+    for test_id, submission in zip(test_ids, submissions, strict=True):
         try:
             job = submit_cutting_job(
                 db,
@@ -439,9 +437,7 @@ def submit_cutting_job_batch(
                 media_prober=media_prober,
             )
         except CUTTING_JOB_VALIDATION_ERRORS as exc:
-            results.append(
-                CuttingJobSubmissionResult(test_id=normalize_test_id(submission.test_id), error=exc)
-            )
+            results.append(CuttingJobSubmissionResult(test_id=test_id, error=exc))
         else:
             results.append(CuttingJobSubmissionResult(test_id=job.test_id, job=job))
     return results

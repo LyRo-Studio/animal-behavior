@@ -516,8 +516,13 @@ def test_batch_over_five_tests_is_rejected_with_no_jobs_created(client, db_sessi
 
     response = _post_batch(client, entries)
 
-    assert response.status_code == 400
+    # A schema-level bound, like POST /analyses' 1-10 Tests (422, not 400).
+    assert response.status_code == 422
     assert db_session.query(CuttingJob).count() == 0
+
+
+def test_batch_rejects_an_empty_tests_list(client):
+    assert _post_batch(client, []).status_code == 422
 
 
 def test_batch_rejects_the_same_test_twice(client, db_session):
@@ -571,7 +576,14 @@ def test_batch_recut_proceeds_once_that_test_is_confirmed(client, s3_client):
 
 
 def test_batch_rejects_a_malformed_tests_field(client):
-    for tests in ("not json", json.dumps({"test_id": "T001"}), json.dumps([{"test": "T001"}])):
+    """FastAPI's own structured validation-error list, like every other 422."""
+    for tests in (
+        "not json",
+        json.dumps({"test_id": "T001"}),
+        json.dumps([{"test": "T001"}]),
+        json.dumps([{"test_id": "T001", "confirmOverwrite": True}]),
+        " " * 5000,
+    ):
         response = client.post(
             "/api/cutting-jobs/batch",
             data={"tests": tests},
@@ -579,6 +591,31 @@ def test_batch_rejects_a_malformed_tests_field(client):
         )
 
         assert response.status_code == 422, tests
+        assert isinstance(response.json()["detail"], list), tests
+
+
+def test_batch_rejects_an_oversized_timestamp_excel(client, db_session, monkeypatch):
+    monkeypatch.setattr(settings, "cutting_job_excel_max_file_size_bytes", 100)
+    upload_id = _completed_upload_id(client, test_id="T001")
+
+    response = _post_batch(client, [{"test_id": "T001", "c1_upload_id": upload_id}])
+
+    assert response.status_code == 400
+    assert db_session.query(CuttingJob).count() == 0
+
+
+def test_create_cutting_job_rejects_an_oversized_timestamp_excel(client, db_session, monkeypatch):
+    monkeypatch.setattr(settings, "cutting_job_excel_max_file_size_bytes", 100)
+    upload_id = _completed_upload_id(client, test_id="T001")
+
+    response = client.post(
+        "/api/cutting-jobs",
+        data={"test_id": "T001", "c1_upload_id": upload_id},
+        files={"excel": ("timestamps.xlsx", _excel_bytes(), "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    assert db_session.query(CuttingJob).count() == 0
 
 
 def test_batch_costs_one_rate_limit_attempt_however_many_tests_it_names(client, monkeypatch):

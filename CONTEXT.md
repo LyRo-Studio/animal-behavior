@@ -2009,7 +2009,11 @@ Implementation-time judgment calls:
   fields the single endpoint takes. A researcher's timestamp Excel holds
   every Test's row, so there's one file to send. Tests needing different
   workbooks go in separate submissions. Unknown keys are rejected (422), so
-  a misspelled `confirm_overwrite` can never be silently ignored.
+  a misspelled `confirm_overwrite` can never be silently ignored. The raw
+  `tests` field is capped at 4096 characters. The workbook is capped at
+  `cutting_job_excel_max_file_size_bytes` (5 MiB), which also applies to
+  the single endpoint; neither had a size limit before
+  (ENGINEERING-STANDARDS.md §5).
 - **Response: always 200 once the batch is accepted, with one result per
   Test in submission order.** Each result carries either `job` or `error`.
   `error` has the same `status_code`/`detail`/`code` that Test alone would
@@ -2018,11 +2022,14 @@ Implementation-time judgment calls:
   "Cuts already exist" is therefore `error.code == "cuts_already_exist"`,
   and confirming means resubmitting that Test with `confirm_overwrite`.
   Every Test in a batch gets its own confirmation.
-- **Rejected outright (400, nothing created):** an empty batch, more than
-  five Tests, or the same Test twice after normalization (`"513"` and
-  `"T513"` are the same Test). Two jobs for one Test would race to write
-  the same `cuts/<Test>/` keys. These batch-level checks all run before any
-  Test is processed.
+- **Rejected outright, nothing created:** an empty `tests` list or more than
+  five Tests is a 422. That's a schema-level bound (`CuttingJobBatchEntries`),
+  like `CreateAnalysisRequest.test_ids`' 1–10, and FastAPI's usual structured
+  `detail` list. `submit_cutting_job_batch` enforces the same limit itself
+  for direct callers (`EmptyBatchError`/`TooManyTestsInBatchError`). The
+  same Test twice after normalization (`"513"` and `"T513"` are the same
+  Test) is a 400, since two jobs for one Test would race to write the same
+  `cuts/<Test>/` keys. All of these run before any Test is processed.
 - **Per-Test failures are exactly `CUTTING_JOB_VALIDATION_ERRORS`.** That
   covers every ingestion rule, and now also an unknown, incomplete or
   mismatched upload id: `resolve_source_upload`, moved into the service
@@ -2030,19 +2037,37 @@ Implementation-time judgment calls:
   else (such as a database error) is unexpected and fails the request, but
   jobs created earlier in the batch stay. Each job commits as it's
   created, since the jobs are independent.
-- **The workbook is parsed once per Test,** at most five times per request,
+- **Only the submitted Test's own row is validated, not the whole sheet
+  (caught in review).** `create_cutting_job` used to call
+  `parse_timestamp_workbook`, which validates every row. In a batch, one
+  malformed cell in Test A's row, or in a row for a Test not being cut at
+  all, failed all five Tests (issue #93 user story 10: "one bad upload
+  doesn't block the other four"). It now calls `read_test_row`, which fully
+  validates only the first row whose Test ID matches and skips every other
+  row unvalidated. A row whose own Test ID cell is blank or malformed can't
+  be attributed to any Test, so it's skipped too; if it was meant to be the
+  requested Test's, the error is "no row for this Test" rather than the
+  cell-specific one. Workbook-level problems (unreadable file, missing
+  headers) still fail every Test. This changes the single endpoint as well:
+  an unrelated row's bad cell no longer rejects a single submission. That's
+  in line with the #94 rule's purpose, which was never letting a malformed
+  cell reach `assist` for the Test being cut. `parse_timestamp_workbook`
+  (whole sheet) stays, sharing the same per-row parser.
+- **The workbook is read once per Test,** at most five times per request,
   rather than threading a pre-parsed workbook through `create_cutting_job`.
-  Cheap enough at this size, and it keeps `create_cutting_job`'s tested
-  interface unchanged. Since `parse_timestamp_workbook` validates every row,
-  one malformed cell anywhere fails every Test in the batch with the same
-  error, just as it would fail each single submission.
+  Cheap enough at 5 MiB or less, and it keeps `create_cutting_job`'s tested
+  interface unchanged.
 - **Rate limiting: one attempt per submission,** on the same
   `create-cutting-job` key as the single endpoint, however many Tests the
   batch names. Charging per Test would let one #96 block-and-confirm round
   trip on a batch of five use the entire 10-per-5-minutes budget. Actual
   load stays bounded anyway: every job needs its own completed upload
   (upload start is limited to 30 per 5 minutes and capped by storage), and
-  the cutting-worker runs one job at a time.
+  the cutting-worker runs one job at a time. **Needs sign-off:** issue #93
+  says "creating a CuttingJob" reuses the rate limiter, and this lets one
+  identity create up to 5× as many jobs per window as the setting suggests.
+  Charging per Test instead is a one-line change in
+  `_enforce_create_rate_limit`.
 - **A plain `def` endpoint** (reading the Excel through `excel.file`), so up
   to five Tests' worth of ffprobe, S3 and database work runs in FastAPI's
   threadpool instead of blocking the event loop. The single endpoint is

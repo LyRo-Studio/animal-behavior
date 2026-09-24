@@ -21,6 +21,7 @@ from app.services.timestamp_excel import (
     find_test_row,
     normalize_test_id,
     parse_timestamp_workbook,
+    read_test_row,
 )
 
 _CONDITIONS = ("ME", "ZE")
@@ -256,3 +257,55 @@ def test_find_test_row_raises_for_no_match():
 
     with pytest.raises(TestRowNotFoundError):
         find_test_row(rows, "T404")
+
+
+# --- read_test_row (ticket #97: one Test's row, without the rest) ---
+
+
+def test_read_test_row_ignores_malformed_rows_belonging_to_other_tests():
+    """A batch shares one workbook, so another Test's bad cell must never
+    fail this Test — its own row is the only one validated in full."""
+    data = _workbook_bytes(
+        [
+            _row("T001", ME_F3="-"),
+            _row("T002", ME_F1=time(1, 0, 0)),
+            _row("T003", reference_camera="C9"),
+            _row(None, ME_F1=time(2, 0, 0)),
+        ]
+    )
+
+    row = read_test_row(data, "T002")
+
+    assert row.test_id == "T002"
+    assert row.row_number == 3
+    assert row.phase_timestamps == {"ME_F1": 60}
+
+
+def test_read_test_row_still_rejects_the_requested_tests_own_malformed_cell():
+    data = _workbook_bytes([_row("T001"), _row("T002", ME_F3="-")])
+
+    with pytest.raises(MalformedTimestampCellError) as exc_info:
+        read_test_row(data, "T002")
+    assert exc_info.value.row_number == 3
+    assert exc_info.value.column == "ME_F3"
+
+
+def test_read_test_row_normalizes_a_bare_numeric_lookup_and_cell():
+    data = _workbook_bytes([_row(513)])
+
+    assert read_test_row(data, "513").test_id == "T513"
+    assert read_test_row(data, "t513").test_id == "T513"
+
+
+def test_read_test_row_raises_for_no_match():
+    data = _workbook_bytes([_row("T001")])
+
+    with pytest.raises(TestRowNotFoundError):
+        read_test_row(data, "T404")
+
+
+def test_read_test_row_still_rejects_workbook_level_problems():
+    with pytest.raises(InvalidWorkbookError):
+        read_test_row(b"this is not an xlsx file", "T001")
+    with pytest.raises(ExcelSchemaError):
+        read_test_row(_workbook_bytes([["T001"]], headers=["Test ID"]), "T001")

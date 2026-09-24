@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.orm import Session
@@ -18,7 +19,7 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.models.cutting_job import CuttingJob
 from app.schemas.cutting_jobs import (
-    CuttingJobBatchEntryIn,
+    CuttingJobBatchEntries,
     CuttingJobBatchErrorOut,
     CuttingJobBatchOut,
     CuttingJobBatchResultOut,
@@ -28,13 +29,11 @@ from app.schemas.cutting_jobs import (
 )
 from app.services.cutting_jobs import (
     CUTTING_JOB_VALIDATION_ERRORS,
-    MAX_TESTS_PER_BATCH,
     CutsAlreadyExistError,
     CuttingJobNotFoundError,
     CuttingJobSubmission,
     DuplicateCameraUploadError,
     DuplicateTestInBatchError,
-    EmptyBatchError,
     IncompleteSourceUploadError,
     InvalidSourceFilenameError,
     MismatchedSourceUploadError,
@@ -42,7 +41,6 @@ from app.services.cutting_jobs import (
     ReferenceCameraMismatchError,
     SourceVideoCollisionError,
     SourceVideoNotDecodableError,
-    TooManyTestsInBatchError,
     UnknownSourceUploadError,
     get_cutting_job,
     submit_cutting_job,
@@ -234,6 +232,17 @@ def _describe_rejection(exc: Exception) -> _Rejection:
     raise TypeError(f"not a cutting-job validation error: {exc!r}")
 
 
+def _within_excel_size_limit(excel_bytes: bytes) -> bytes:
+    """`excel_bytes`, read with a one-byte margin, unless it's over
+    `cutting_job_excel_max_file_size_bytes` (ENGINEERING-STANDARDS.md §5:
+    "limit request body and upload sizes") — it's parsed once per Test."""
+    if len(excel_bytes) > settings.cutting_job_excel_max_file_size_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Timestamp Excel is too large."
+        )
+    return excel_bytes
+
+
 def _enforce_create_rate_limit(limiter: RateLimiter, identity: str | None) -> None:
     """One attempt per submission, single or batch alike (CONTEXT.md's
     ticket #97 notes): a batch is one submission, however many Tests it
@@ -273,7 +282,9 @@ async def create_cutting_job_endpoint(
     """
     _enforce_create_rate_limit(limiter, identity)
 
-    excel_bytes = await excel.read()
+    excel_bytes = _within_excel_size_limit(
+        await excel.read(settings.cutting_job_excel_max_file_size_bytes + 1)
+    )
 
     try:
         return submit_cutting_job(
@@ -298,12 +309,16 @@ async def create_cutting_job_endpoint(
         return JSONResponse(status_code=rejection.status_code, content=content)
 
 
-_BATCH_ENTRIES = TypeAdapter(list[CuttingJobBatchEntryIn])
+_batch_entries_adapter = TypeAdapter(CuttingJobBatchEntries)
+
+# Generous for five entries (each at most ~200 characters) while bounding
+# the raw JSON before it's parsed at all (ENGINEERING-STANDARDS.md §5).
+_BATCH_TESTS_FIELD_MAX_LENGTH = 4096
 
 
 @router.post("/batch", response_model=CuttingJobBatchOut)
 def create_cutting_job_batch_endpoint(
-    tests: str = Form(...),
+    tests: str = Form(..., max_length=_BATCH_TESTS_FIELD_MAX_LENGTH),
     excel: UploadFile = File(...),
     identity: str | None = Depends(get_identity),
     db: Session = Depends(get_db),
@@ -319,8 +334,9 @@ def create_cutting_job_batch_endpoint(
     Always 200 once the batch itself is accepted, with one result per Test
     in submission order — a created `job`, or the `error` (status code,
     detail, and `code` where one applies) that Test alone would have got
-    from `POST /cutting-jobs`. An empty or oversized batch, or the same Test
-    twice, is a 400 with no job created.
+    from `POST /cutting-jobs`. A malformed, empty or oversized `tests` list
+    is a 422 (a schema-level bound, like `POST /analyses`' 1-10 Tests), and
+    the same Test twice a 400 — either way, no job is created.
 
     A plain `def`, unlike `POST /cutting-jobs`, so up to five Tests' worth
     of ffprobe/S3/database work runs in the threadpool rather than on the
@@ -329,13 +345,20 @@ def create_cutting_job_batch_endpoint(
     _enforce_create_rate_limit(limiter, identity)
 
     try:
-        entries = _BATCH_ENTRIES.validate_json(tests)
-    except ValidationError:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="`tests` must be a JSON list of {test_id, c1_upload_id, c2_upload_id, "
-            "confirm_overwrite} entries.",
+        entries = _batch_entries_adapter.validate_json(tests)
+    except ValidationError as exc:
+        # Re-raised as FastAPI's own validation error, so the 422 has the
+        # same structured `detail` list as every other one.
+        raise RequestValidationError(
+            [
+                {**error, "loc": ("body", "tests", *error["loc"])}
+                for error in exc.errors(include_url=False)
+            ]
         ) from None
+
+    excel_bytes = _within_excel_size_limit(
+        excel.file.read(settings.cutting_job_excel_max_file_size_bytes + 1)
+    )
 
     try:
         results = submit_cutting_job_batch(
@@ -350,20 +373,11 @@ def create_cutting_job_batch_endpoint(
                 for entry in entries
             ],
             requested_by_identity=identity,
-            excel_bytes=excel.file.read(),
+            excel_bytes=excel_bytes,
             upload_root=root,
             s3=s3,
             media_prober=media_prober,
         )
-    except EmptyBatchError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Submit at least one Test."
-        ) from None
-    except TooManyTestsInBatchError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Submit at most {MAX_TESTS_PER_BATCH} Tests at once.",
-        ) from None
     except DuplicateTestInBatchError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

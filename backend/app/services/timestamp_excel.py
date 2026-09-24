@@ -13,6 +13,8 @@ below if a real sheet uses different header text.
 """
 
 import re
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from io import BytesIO
@@ -202,16 +204,15 @@ def _parse_time_cell(value: object, *, row_number: int, column: str) -> int | No
     return seconds
 
 
-def parse_timestamp_workbook(data: bytes) -> list[ExcelRow]:
-    """Every data row on `data`'s first tab, validated against the
-    Test ID/Dog ID/C1-C2/F1-F8 ME+ZE schema.
+@contextmanager
+def _data_rows(data: bytes) -> Iterator[Iterator[tuple[int, Callable[[str], object]]]]:
+    """Open `data`'s first tab, check its header row, and yield an iterator
+    of `(row_number, cell)` for every non-blank data row, where
+    `cell(header)` reads that row's value in the named column.
 
     Raises InvalidWorkbookError if `data` isn't a readable .xlsx workbook at
-    all, ExcelSchemaError if the first tab is missing a required column
-    header, and MalformedTestIdError/MalformedReferenceCameraError/
-    MalformedTimestampCellError for the first malformed cell encountered
-    (rather than crashing partway, or silently skipping it) — CONTEXT.md's
-    Feature C "Ingestion validation" decision.
+    all, and ExcelSchemaError if the first tab is missing a required column
+    header — both workbook-level problems, whichever row a caller wants.
     """
     try:
         workbook = load_workbook(BytesIO(data), data_only=True, read_only=True)
@@ -229,50 +230,89 @@ def parse_timestamp_workbook(data: bytes) -> list[ExcelRow]:
         if missing:
             raise ExcelSchemaError(missing)
 
-        def cell(row: tuple, header: str) -> object:
-            index = header_index[header]
-            return row[index] if index < len(row) else None
+        def rows() -> Iterator[tuple[int, Callable[[str], object]]]:
+            for row_number, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+                if all(value is None for value in row):
+                    continue
 
-        rows: list[ExcelRow] = []
-        for row_number, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
-            if all(value is None for value in row):
-                continue
+                def cell(header: str, row: tuple = row) -> object:
+                    index = header_index[header]
+                    return row[index] if index < len(row) else None
 
-            raw_test_id = cell(row, _TEST_ID_HEADER)
-            if raw_test_id is None or not str(raw_test_id).strip():
-                raise MalformedTestIdError(row_number, raw_test_id)
-            test_id = normalize_test_id(raw_test_id)
-            if not _TEST_ID_RE.match(test_id):
-                raise MalformedTestIdError(row_number, raw_test_id)
-            test_id = test_id.upper()
+                yield row_number, cell
 
-            raw_dog_id = cell(row, _DOG_ID_HEADER)
-            dog_id = str(raw_dog_id).strip() if raw_dog_id is not None else ""
-
-            raw_camera = cell(row, _REFERENCE_CAMERA_HEADER)
-            reference_camera = str(raw_camera).strip().upper() if raw_camera is not None else ""
-            if reference_camera not in ("C1", "C2"):
-                raise MalformedReferenceCameraError(row_number, raw_camera)
-
-            phase_timestamps: dict[str, int] = {}
-            for header in _PHASE_HEADERS:
-                seconds = _parse_time_cell(cell(row, header), row_number=row_number, column=header)
-                if seconds is not None:
-                    phase_timestamps[header] = seconds
-
-            rows.append(
-                ExcelRow(
-                    row_number=row_number,
-                    test_id=test_id,
-                    dog_id=dog_id,
-                    reference_camera=reference_camera,
-                    phase_timestamps=phase_timestamps,
-                )
-            )
-
-        return rows
+        yield rows()
     finally:
         workbook.close()
+
+
+def _parse_row(row_number: int, cell: Callable[[str], object]) -> ExcelRow:
+    """One data row, validated in full — raises MalformedTestIdError/
+    MalformedReferenceCameraError/MalformedTimestampCellError for its first
+    malformed cell (rather than crashing partway, or silently skipping it) —
+    CONTEXT.md's Feature C "Ingestion validation" decision."""
+    raw_test_id = cell(_TEST_ID_HEADER)
+    if raw_test_id is None or not str(raw_test_id).strip():
+        raise MalformedTestIdError(row_number, raw_test_id)
+    test_id = normalize_test_id(raw_test_id)
+    if not _TEST_ID_RE.match(test_id):
+        raise MalformedTestIdError(row_number, raw_test_id)
+    test_id = test_id.upper()
+
+    raw_dog_id = cell(_DOG_ID_HEADER)
+    dog_id = str(raw_dog_id).strip() if raw_dog_id is not None else ""
+
+    raw_camera = cell(_REFERENCE_CAMERA_HEADER)
+    reference_camera = str(raw_camera).strip().upper() if raw_camera is not None else ""
+    if reference_camera not in ("C1", "C2"):
+        raise MalformedReferenceCameraError(row_number, raw_camera)
+
+    phase_timestamps: dict[str, int] = {}
+    for header in _PHASE_HEADERS:
+        seconds = _parse_time_cell(cell(header), row_number=row_number, column=header)
+        if seconds is not None:
+            phase_timestamps[header] = seconds
+
+    return ExcelRow(
+        row_number=row_number,
+        test_id=test_id,
+        dog_id=dog_id,
+        reference_camera=reference_camera,
+        phase_timestamps=phase_timestamps,
+    )
+
+
+def parse_timestamp_workbook(data: bytes) -> list[ExcelRow]:
+    """Every data row on `data`'s first tab, validated against the
+    Test ID/Dog ID/C1-C2/F1-F8 ME+ZE schema.
+
+    Raises InvalidWorkbookError/ExcelSchemaError for a workbook-level
+    problem (see `_data_rows`), and the first malformed cell's own error
+    (see `_parse_row`) in any row.
+    """
+    with _data_rows(data) as rows:
+        return [_parse_row(row_number, cell) for row_number, cell in rows]
+
+
+def read_test_row(data: bytes, test_id: str) -> ExcelRow:
+    """The first row on `data`'s first tab whose Test ID matches `test_id`
+    (normalized/uppercased on both sides), validated in full — every other
+    row is skipped without being validated at all.
+
+    Ticket #97: a batch submission shares one workbook across up to five
+    Tests, so another row's malformed cell (or a row for a Test not being
+    cut at all) must never fail this Test. A row whose own Test ID cell is
+    blank or malformed can't be attributed to any Test, so it's skipped too
+    — if it was meant to be `test_id`'s, this raises TestRowNotFoundError.
+    Workbook-level problems still raise InvalidWorkbookError/
+    ExcelSchemaError, as they would for any Test.
+    """
+    wanted = normalize_test_id(test_id).upper()
+    with _data_rows(data) as rows:
+        for row_number, cell in rows:
+            if normalize_test_id(cell(_TEST_ID_HEADER)).upper() == wanted:
+                return _parse_row(row_number, cell)
+    raise TestRowNotFoundError(test_id)
 
 
 def find_test_row(rows: list[ExcelRow], test_id: str) -> ExcelRow:
