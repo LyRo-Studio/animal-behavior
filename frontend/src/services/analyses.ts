@@ -71,18 +71,23 @@ function toAnalysisJob(row: AnalysisJobResponse): AnalysisJob {
   }
 }
 
+// Mirrors the backend's MAX_TESTS_PER_JOB (backend/app/services/
+// analyses.py) — CONTEXT.md's Feature B limit. The backend enforces it
+// regardless (400); this only lets the view stop an 11th Test being
+// selected in the first place.
+export const MAX_TESTS_PER_ANALYSIS = 10
+
 // Ticket #45's POST /analyses rejects the whole request (400) with a
 // user-safe `detail` string when any selected Cut isn't valid C2 analysis
 // input — surfaced here as-is rather than a generic message, via the
 // shared errorFromResponse ("backend already gives a specific, safe
-// reason"). Still a single-Test, hand-picked-Cuts call (ticket #89's
-// `test_ids`/`cuts` wire shape wrapped around today's one-Test flow) — the
-// multi-Test "Analyze selected Tests" wholesale action has no UI yet.
-export async function createAnalysis(testId: string, cutKeys: string[]): Promise<AnalysisJob> {
+// reason"). Shared by createAnalysis/createWholesaleAnalysis below, the two
+// shapes ticket #89's unified `{test_ids, cuts}` request allows.
+async function postAnalysis(body: { test_ids: string[]; cuts?: string[] }): Promise<AnalysisJob> {
   const response = await fetch(`${API_BASE_URL}/analyses`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ test_ids: [testId], cuts: cutKeys }),
+    body: JSON.stringify(body),
   })
 
   if (!response.ok) {
@@ -90,6 +95,21 @@ export async function createAnalysis(testId: string, cutKeys: string[]): Promise
   }
 
   return toAnalysisJob(await response.json())
+}
+
+// One Test, hand-picked Cuts — today's single-Test flow, unchanged in
+// meaning.
+export async function createAnalysis(testId: string, cutKeys: string[]): Promise<AnalysisJob> {
+  return postAnalysis({ test_ids: [testId], cuts: cutKeys })
+}
+
+// Issue #90's "Analyze selected Tests": every C2-eligible Cut of each listed
+// Test, derived server-side (CONTEXT.md's "Wholesale") — `cuts` is omitted
+// entirely, never sent alongside more than one Test (the backend rejects
+// that with a 400). A separate function rather than an optional `cutKeys`
+// on createAnalysis so that invalid combination can't be expressed here.
+export async function createWholesaleAnalysis(testIds: string[]): Promise<AnalysisJob> {
+  return postAnalysis({ test_ids: testIds })
 }
 
 // Thrown by getAnalysis/cancelAnalysis specifically for "no such job" (backend

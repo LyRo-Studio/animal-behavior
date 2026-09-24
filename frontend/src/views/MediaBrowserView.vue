@@ -2,7 +2,13 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { createAnalysis, listAnalyses, type AnalysisJob } from '@/services/analyses'
+import {
+  createAnalysis,
+  createWholesaleAnalysis,
+  listAnalyses,
+  MAX_TESTS_PER_ANALYSIS,
+  type AnalysisJob,
+} from '@/services/analyses'
 import {
   CutInfoNotFoundError,
   DatasetFolderNotFoundError,
@@ -72,7 +78,7 @@ function isCutSelected(cut: Cut): boolean {
 }
 
 function toggleCutSelection(cut: Cut) {
-  if (!isAnalyzable(cut)) return
+  if (!isAnalyzable(cut) || isWholesaleSelection.value) return
   const next = new Set(selectedCutKeys.value)
   if (next.has(cut.key)) {
     next.delete(cut.key)
@@ -80,6 +86,23 @@ function toggleCutSelection(cut: Cut) {
     next.add(cut.key)
   }
   selectedCutKeys.value = next
+}
+
+// Issue #90's "select all Cuts in this Test" — every C2 Cut of the listed
+// Test, the same set wholesale selection derives server-side, but submitted
+// as today's hand-picked request so it stays a single-Test convenience.
+const analyzableCuts = computed(() => (cuts.value ?? []).filter(isAnalyzable))
+const areAllAnalyzableCutsSelected = computed(
+  () =>
+    analyzableCuts.value.length > 0 &&
+    analyzableCuts.value.every((cut) => selectedCutKeys.value.has(cut.key)),
+)
+
+function toggleAllCutsSelection() {
+  if (isWholesaleSelection.value) return
+  selectedCutKeys.value = areAllAnalyzableCutsSelected.value
+    ? new Set()
+    : new Set(analyzableCuts.value.map((cut) => cut.key))
 }
 
 // Same stale-response guard as `searchToken`/`datasetLoadToken` above,
@@ -90,7 +113,12 @@ function toggleCutSelection(cut: Cut) {
 let analysisToken = 0
 
 async function analyzeSelected() {
-  if (selectedCutKeys.value.size === 0 || !selectedTestId.value || isCreatingAnalysis.value) {
+  if (
+    selectedCutKeys.value.size === 0 ||
+    !selectedTestId.value ||
+    isCreatingAnalysis.value ||
+    isWholesaleSelection.value
+  ) {
     return
   }
 
@@ -118,6 +146,69 @@ async function analyzeSelected() {
     if (currentToken === analysisToken) {
       isCreatingAnalysis.value = false
     }
+  }
+}
+
+// Issue #90 (Feature B): the Tests checked for a wholesale "Analyze
+// selected Tests" job — independent of `selectedTestId` (the one Test whose
+// Cuts are currently listed), and deliberately *not* reset by `search()`:
+// searching Test after Test to check each one is the whole point. An array,
+// not a Set, so the job's Tests keep the order they were checked in.
+const selectedTestIds = ref<string[]>([])
+const isCreatingWholesaleAnalysis = ref(false)
+const wholesaleAnalysisError = ref<string | null>(null)
+
+// More than one Test checked means the job is wholesale for every one of
+// them (CONTEXT.md's "Wholesale") — per-Cut hand-picking only exists for
+// the single-Test case, so it's switched off entirely rather than left
+// half-working alongside.
+const isWholesaleSelection = computed(() => selectedTestIds.value.length > 1)
+
+function isTestSelected(testId: string): boolean {
+  return selectedTestIds.value.includes(testId)
+}
+
+// Unchecking always stays possible; only adding an 11th is blocked —
+// client-side for usability, the backend rejects it regardless (400).
+const isTestLimitReached = computed(() => selectedTestIds.value.length >= MAX_TESTS_PER_ANALYSIS)
+
+function canToggleTest(testId: string): boolean {
+  return isTestSelected(testId) || !isTestLimitReached.value
+}
+
+function toggleTestSelection(testId: string) {
+  if (!canToggleTest(testId)) return
+  selectedTestIds.value = isTestSelected(testId)
+    ? selectedTestIds.value.filter((id) => id !== testId)
+    : [...selectedTestIds.value, testId]
+  wholesaleAnalysisError.value = null
+  // A hand-picked Cut left checked (but now disabled) would misleadingly
+  // suggest only it would be analyzed — drop it, same "never leave a stale
+  // selection showing" rule search() follows.
+  if (isWholesaleSelection.value) selectedCutKeys.value = new Set()
+}
+
+// No stale-response token (unlike analyzeSelected's `analysisToken`): the
+// Test selection this submits isn't tied to the listed Test and survives
+// `search()`, so a response landing after a new search still belongs here.
+async function analyzeSelectedTests() {
+  if (!isWholesaleSelection.value || isCreatingWholesaleAnalysis.value) return
+
+  isCreatingWholesaleAnalysis.value = true
+  wholesaleAnalysisError.value = null
+  try {
+    const job = await createWholesaleAnalysis([...selectedTestIds.value])
+    // Same reasoning as analyzeSelected's own navigation above: the job
+    // already exists, so a navigation failure isn't an analysis failure.
+    try {
+      await router.push({ name: 'analysis-detail', params: { id: job.id } })
+    } catch {
+      // See above.
+    }
+  } catch (err) {
+    wholesaleAnalysisError.value = err instanceof Error ? err.message : 'Failed to start analysis.'
+  } finally {
+    isCreatingWholesaleAnalysis.value = false
   }
 }
 
@@ -470,7 +561,19 @@ onMounted(() => {
             data-testid="test-suggestions"
             class="absolute z-10 mt-1 w-full rounded-md border border-border bg-surface shadow-md"
           >
-            <li v-for="id in suggestions" :key="id">
+            <li v-for="id in suggestions" :key="id" class="flex items-center">
+              <!-- Checking a Test only adds it to the multi-Test selection
+                   (and leaves the dropdown open for the next one); clicking
+                   its id still searches it, exactly as before. -->
+              <input
+                type="checkbox"
+                data-testid="select-test"
+                :aria-label="`Select ${id} for multi-Test analysis`"
+                :checked="isTestSelected(id)"
+                :disabled="!canToggleTest(id)"
+                class="ml-3 disabled:cursor-not-allowed disabled:opacity-50"
+                @change="toggleTestSelection(id)"
+              />
               <button
                 type="button"
                 data-testid="test-suggestion"
@@ -490,6 +593,58 @@ onMounted(() => {
         </button>
       </form>
 
+      <div
+        v-if="selectedTestIds.length > 0"
+        data-testid="selected-tests"
+        class="mt-6 rounded-md border border-border bg-surface p-4"
+      >
+        <h3 class="text-base font-medium text-foreground">
+          Selected Tests ({{ selectedTestIds.length }}/{{ MAX_TESTS_PER_ANALYSIS }})
+        </h3>
+        <p
+          v-if="isTestLimitReached"
+          data-testid="test-limit-reached"
+          class="mt-1 text-sm text-muted"
+        >
+          At most {{ MAX_TESTS_PER_ANALYSIS }} Tests can be analyzed together — submit larger
+          batches as separate analyses.
+        </p>
+        <p v-if="wholesaleAnalysisError" class="mt-2 text-sm text-danger" role="alert">
+          {{ wholesaleAnalysisError }}
+        </p>
+        <ul class="mt-2 flex flex-wrap gap-2">
+          <li
+            v-for="id in selectedTestIds"
+            :key="id"
+            data-testid="selected-test"
+            class="flex items-center gap-2 rounded-md border border-border bg-background px-2 py-1 text-sm"
+          >
+            {{ id }}
+            <button
+              type="button"
+              :aria-label="`Remove ${id} from selected Tests`"
+              class="text-muted hover:text-danger"
+              @click="toggleTestSelection(id)"
+            >
+              <span aria-hidden="true">×</span>
+            </button>
+          </li>
+        </ul>
+        <p v-if="!isWholesaleSelection" class="mt-2 text-sm text-muted">
+          Check at least one more Test to analyze them together. To analyze a single Test, search it
+          and pick its Cuts instead.
+        </p>
+        <button
+          type="button"
+          data-testid="analyze-selected-tests"
+          class="mt-4 rounded-md bg-primary px-4 py-2 font-medium text-white hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="!isWholesaleSelection || isCreatingWholesaleAnalysis"
+          @click="analyzeSelectedTests"
+        >
+          {{ isCreatingWholesaleAnalysis ? 'Starting analysis…' : 'Analyze selected Tests' }}
+        </button>
+      </div>
+
       <div v-if="selectedTestId" class="mt-10">
         <h2 class="text-lg font-medium text-foreground">Cuts for {{ selectedTestId }}</h2>
 
@@ -504,6 +659,14 @@ onMounted(() => {
           </p>
           <p v-if="analysisError" class="mt-2 text-sm text-danger" role="alert">
             {{ analysisError }}
+          </p>
+          <p
+            v-if="isWholesaleSelection"
+            data-testid="wholesale-note"
+            class="mt-2 text-sm text-muted"
+          >
+            Multiple Tests are selected, so every C2 Cut of each selected Test will be analyzed —
+            picking individual Cuts is only available with a single Test.
           </p>
           <video
             v-if="playbackUrl"
@@ -526,7 +689,16 @@ onMounted(() => {
             <thead>
               <tr class="border-b border-border text-muted">
                 <th class="py-2 pr-4 font-medium">
-                  <span class="sr-only">Select for analysis</span>
+                  <input
+                    type="checkbox"
+                    data-testid="select-all-cuts"
+                    :aria-label="`Select all C2 Cuts in ${selectedTestId} for analysis`"
+                    :checked="areAllAnalyzableCutsSelected"
+                    :indeterminate="selectedCutKeys.size > 0 && !areAllAnalyzableCutsSelected"
+                    :disabled="analyzableCuts.length === 0 || isWholesaleSelection"
+                    class="disabled:cursor-not-allowed disabled:opacity-50"
+                    @change="toggleAllCutsSelection"
+                  />
                 </th>
                 <th class="py-2 pr-4 font-medium">Filename</th>
                 <th class="py-2 pr-4 font-medium">Camera</th>
@@ -546,7 +718,7 @@ onMounted(() => {
                       data-testid="select-cut"
                       :aria-label="`Select ${cut.filename} for analysis`"
                       :checked="isCutSelected(cut)"
-                      :disabled="!isAnalyzable(cut)"
+                      :disabled="!isAnalyzable(cut) || isWholesaleSelection"
                       class="disabled:cursor-not-allowed disabled:opacity-50"
                       @change="toggleCutSelection(cut)"
                     />
@@ -632,7 +804,7 @@ onMounted(() => {
             type="button"
             data-testid="analyze-selected"
             class="mt-4 rounded-md bg-primary px-4 py-2 font-medium text-white hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="selectedCutKeys.size === 0 || isCreatingAnalysis"
+            :disabled="selectedCutKeys.size === 0 || isCreatingAnalysis || isWholesaleSelection"
             @click="analyzeSelected"
           >
             {{ isCreatingAnalysis ? 'Starting analysis…' : 'Analyze selected' }}

@@ -1369,9 +1369,10 @@ resolved design, not a proposal.
   of email on Home — unrelated to audit logging, split out rather than
   folded in.
 
-**Multi-test analysis (Feature B) — foundation implemented by ticket #89;
-worker/report generation (the analysis-id-first S3 prefix, per-Test report
-splitting) still not built, see that decision's amendment below.** an
+**Multi-test analysis (Feature B) — foundation implemented by ticket #89,
+frontend selection/submission by ticket #90; worker/report generation (the
+analysis-id-first S3 prefix, per-Test report splitting) still not built,
+see that decision's amendment below.** an
 `AnalysisJob` currently belongs to exactly one Test (`test_id`, a single
 required column). This lets one job span up to 10 Tests at once, submitted
 from a single "Analyze selected Tests" action, while keeping today's
@@ -1525,7 +1526,48 @@ not done here.
   necessary, not optional, since the old `{test_id, cuts}` request shape is
   no longer accepted. The multi-select "Analyze selected Tests" UI itself
   (CONTEXT.md's Feature B "Frontend" bullet above) is still unbuilt; no
-  checkbox/wholesale UI was added here.
+  checkbox/wholesale UI was added here. _Amended: built by ticket #90, see
+  below._
+
+**Multi-test analysis — frontend selection (ticket #90):** the Media
+Browser's multi-Test checkboxes and "Analyze selected Tests" action. The
+per-Test breakdown in `AnalysisView` is ticket #92, not this one.
+
+- **Checkboxes live beside each Test suggestion in the search dropdown**;
+  checking one only adds it to the **Test selection** (the dropdown stays
+  open for the next), while clicking the id still searches it exactly as
+  before. The selection is independent of the currently-listed Test and is
+  deliberately *not* reset by a new search — checking Tests one search at a
+  time is the intended workflow. Kept in check order, shown as removable
+  chips in a "Selected Tests (n/10)" panel.
+- **The 10-Test limit is enforced client-side by disabling every unchecked
+  Test's checkbox once 10 are checked** (with a note), mirroring the
+  backend's `MAX_TESTS_PER_JOB` via `MAX_TESTS_PER_ANALYSIS` in
+  `services/analyses.ts`. The backend still rejects an 11th regardless.
+- **"Analyze selected Tests" is enabled only with two or more Tests
+  checked** and always submits wholesale (`cuts` omitted). With exactly one
+  Test checked it stays disabled, pointing at the Cut table instead: the
+  single-Test case is always today's hand-picked request (`cuts` given), so
+  there is exactly one way to analyze a single Test, not two. A single
+  checked Test is therefore inert on its own — hand-picking always acts on
+  the *listed* Test, which may differ from the checked one; the panel's
+  hint says so rather than tying the two together.
+- **Two service functions, not one with an optional `cuts`:**
+  `createAnalysis(testId, cutKeys)` (unchanged signature) and
+  `createWholesaleAnalysis(testIds)`, sharing one private POST helper — so
+  the backend-rejected "`cuts` with several Tests" combination can't be
+  expressed from the frontend at all.
+- **More than one Test checked switches per-Cut hand-picking off entirely**:
+  Cut checkboxes, "select all" and "Analyze selected" are disabled (with a
+  note), and any hand-picked Cuts are cleared rather than left checked-but-
+  disabled, which would misleadingly suggest only they'd be analyzed.
+  Unchecking back down to one Test re-enables hand-picking but doesn't
+  restore the cleared picks.
+- **"Select all Cuts in this Test" is a header checkbox in the Cut table**
+  selecting every C2 Cut of the listed Test (indeterminate when only some
+  are picked). It submits through today's hand-picked request with those
+  Cut keys — a convenience over the existing flow, not a single-Test
+  wholesale request.
 
 **Video cutting + S3 ingestion (Feature C) — design finalized, not yet built:**
 lets a researcher upload a Test's source video(s) and have them sliced into

@@ -11,6 +11,7 @@ const requestMediaTokenMock = vi.hoisted(() => vi.fn())
 const mediaStreamUrlMock = vi.hoisted(() => vi.fn())
 const getCutMediaInfoMock = vi.hoisted(() => vi.fn())
 const createAnalysisMock = vi.hoisted(() => vi.fn())
+const createWholesaleAnalysisMock = vi.hoisted(() => vi.fn())
 const listAnalysesMock = vi.hoisted(() => vi.fn())
 // A real class, not a plain mock: the view does `err instanceof
 // TestNotFoundError`, so the mocked module needs to export the same
@@ -35,6 +36,9 @@ vi.mock('@/services/mediaBrowser', () => ({
 
 vi.mock('@/services/analyses', () => ({
   createAnalysis: createAnalysisMock,
+  createWholesaleAnalysis: createWholesaleAnalysisMock,
+  // Issue #88's 10-Test limit, which the backend's MAX_TESTS_PER_JOB enforces.
+  MAX_TESTS_PER_ANALYSIS: 10,
   listAnalyses: listAnalysesMock,
 }))
 
@@ -82,6 +86,7 @@ describe('MediaBrowserView', () => {
     mediaStreamUrlMock.mockReset()
     getCutMediaInfoMock.mockReset()
     createAnalysisMock.mockReset()
+    createWholesaleAnalysisMock.mockReset()
     listAnalysesMock.mockReset()
   })
 
@@ -886,5 +891,219 @@ describe('MediaBrowserView', () => {
 
     expect(wrapper.find('[data-testid="previous-analysis-link"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('No previous analyses for this Test.')
+  })
+
+  // Issue #90 (Feature B): multi-Test selection via a checkbox beside each
+  // Test suggestion, submitted wholesale by "Analyze selected Tests".
+  async function checkTests(wrapper: Awaited<ReturnType<typeof mountView>>, ids: string[]) {
+    for (const id of ids) {
+      await wrapper.find('input#test-search').setValue(id)
+      await wrapper.find(`input[aria-label="Select ${id} for multi-Test analysis"]`).setValue(true)
+    }
+  }
+
+  it('analyzes every checked Test wholesale and navigates to the new job', async () => {
+    listTestIdsMock.mockResolvedValue(['T001', 'T002', 'T003'])
+    createWholesaleAnalysisMock.mockResolvedValue({ id: 7, testIds: ['T001', 'T003'] })
+    const router = createTestRouter()
+    router.push('/media')
+    await router.isReady()
+    const wrapper = mount(MediaBrowserView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    await checkTests(wrapper, ['T001', 'T003'])
+    await wrapper.find('[data-testid="analyze-selected-tests"]').trigger('click')
+    await flushPromises()
+
+    expect(createWholesaleAnalysisMock).toHaveBeenCalledWith(['T001', 'T003'])
+    expect(createAnalysisMock).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.name).toBe('analysis-detail')
+    expect(router.currentRoute.value.params.id).toBe('7')
+  })
+
+  it('prevents checking an 11th Test once the 10-Test limit is reached', async () => {
+    const ids = Array.from({ length: 11 }, (_, i) => `T${String(i + 1).padStart(3, '0')}`)
+    listTestIdsMock.mockResolvedValue(ids)
+    const wrapper = await mountView()
+
+    await checkTests(wrapper, ids.slice(0, 10))
+    await wrapper.find('input#test-search').setValue('T011')
+
+    const eleventh = wrapper.find<HTMLInputElement>(
+      'input[aria-label="Select T011 for multi-Test analysis"]',
+    )
+    expect(eleventh.element.disabled).toBe(true)
+    expect(wrapper.find('[data-testid="test-limit-reached"]').text()).toContain('10 Tests')
+    expect(wrapper.findAll('[data-testid="selected-test"]')).toHaveLength(10)
+
+    // Already-checked Tests stay uncheckable at the limit.
+    await wrapper.find('input#test-search').setValue('T010')
+    const tenth = wrapper.find<HTMLInputElement>(
+      'input[aria-label="Select T010 for multi-Test analysis"]',
+    )
+    expect(tenth.element.disabled).toBe(false)
+    await tenth.setValue(false)
+    expect(wrapper.findAll('[data-testid="selected-test"]')).toHaveLength(9)
+    expect(wrapper.find('[data-testid="test-limit-reached"]').exists()).toBe(false)
+  })
+
+  it('disables per-Cut hand-picking once more than one Test is checked', async () => {
+    listTestIdsMock.mockResolvedValue(['T001', 'T002'])
+    listCutsMock.mockResolvedValue([C2_CUT])
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+    await wrapper.find('input[data-testid="select-cut"]').setValue(true)
+
+    await checkTests(wrapper, ['T001', 'T002'])
+
+    const cutCheckbox = wrapper.find<HTMLInputElement>('input[data-testid="select-cut"]')
+    expect(cutCheckbox.element.disabled).toBe(true)
+    expect(cutCheckbox.element.checked).toBe(false)
+    expect(
+      wrapper.find<HTMLButtonElement>('[data-testid="analyze-selected"]').element.disabled,
+    ).toBe(true)
+    expect(wrapper.find('[data-testid="wholesale-note"]').exists()).toBe(true)
+  })
+
+  it('keeps per-Cut hand-picking unchanged with exactly one Test checked', async () => {
+    listTestIdsMock.mockResolvedValue(['T001', 'T002'])
+    listCutsMock.mockResolvedValue([C1_CUT, C2_CUT])
+    createAnalysisMock.mockResolvedValue({ id: 42, testIds: ['T001'] })
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    await checkTests(wrapper, ['T002'])
+    await wrapper.findAll('input[data-testid="select-cut"]')[1]!.setValue(true)
+    await wrapper.find('[data-testid="analyze-selected"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="wholesale-note"]').exists()).toBe(false)
+    expect(createAnalysisMock).toHaveBeenCalledWith('T001', [C2_CUT.key])
+    expect(
+      wrapper.find<HTMLButtonElement>('[data-testid="analyze-selected-tests"]').element.disabled,
+    ).toBe(true)
+  })
+
+  const C2_CUT_F2 = {
+    ...C2_CUT,
+    key: 'cuts/T001/T001_C2_ME_F2.mp4',
+    filename: 'T001_C2_ME_F2.mp4',
+    phase: 'F2',
+  }
+
+  it('selects every C2 Cut in the Test at once, then analyzes them', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([C1_CUT, C2_CUT, C2_CUT_F2])
+    createAnalysisMock.mockResolvedValue({ id: 42, testIds: ['T001'] })
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+
+    await wrapper.find('input[data-testid="select-all-cuts"]').setValue(true)
+
+    const checked = wrapper
+      .findAll<HTMLInputElement>('input[data-testid="select-cut"]')
+      .map((c) => c.element.checked)
+    expect(checked).toEqual([false, true, true])
+
+    await wrapper.find('[data-testid="analyze-selected"]').trigger('click')
+    await flushPromises()
+    expect(createAnalysisMock).toHaveBeenCalledWith('T001', [C2_CUT.key, C2_CUT_F2.key])
+  })
+
+  it('clears every Cut again when "select all" is unchecked', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([C2_CUT, C2_CUT_F2])
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+    const selectAll = wrapper.find<HTMLInputElement>('input[data-testid="select-all-cuts"]')
+
+    await selectAll.setValue(true)
+    expect(selectAll.element.checked).toBe(true)
+    await selectAll.setValue(false)
+
+    expect(
+      wrapper.find<HTMLButtonElement>('[data-testid="analyze-selected"]').element.disabled,
+    ).toBe(true)
+  })
+
+  it('reflects hand-picking every C2 Cut in the "select all" checkbox', async () => {
+    listTestIdsMock.mockResolvedValue(['T001'])
+    listCutsMock.mockResolvedValue([C1_CUT, C2_CUT, C2_CUT_F2])
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+    const selectAll = wrapper.find<HTMLInputElement>('input[data-testid="select-all-cuts"]')
+    const cutCheckboxes = wrapper.findAll('input[data-testid="select-cut"]')
+
+    await cutCheckboxes[1]!.setValue(true)
+    expect(selectAll.element.checked).toBe(false)
+    expect(selectAll.element.indeterminate).toBe(true)
+
+    await cutCheckboxes[2]!.setValue(true)
+    expect(selectAll.element.checked).toBe(true)
+    expect(selectAll.element.indeterminate).toBe(false)
+  })
+
+  it('disables "select all" when the Test has no C2 Cut, or more than one Test is checked', async () => {
+    listTestIdsMock.mockResolvedValue(['T001', 'T002'])
+    listCutsMock.mockResolvedValue([C1_CUT])
+    const wrapper = await mountView()
+    await searchForSampleCut(wrapper)
+    expect(
+      wrapper.find<HTMLInputElement>('input[data-testid="select-all-cuts"]').element.disabled,
+    ).toBe(true)
+
+    listCutsMock.mockResolvedValue([C2_CUT])
+    await searchForSampleCut(wrapper)
+    const selectAll = wrapper.find<HTMLInputElement>('input[data-testid="select-all-cuts"]')
+    expect(selectAll.element.disabled).toBe(false)
+
+    await checkTests(wrapper, ['T001', 'T002'])
+    expect(selectAll.element.disabled).toBe(true)
+  })
+
+  it('keeps the Test selection across searches, so Tests can be checked one search at a time', async () => {
+    listTestIdsMock.mockResolvedValue(['T001', 'T002'])
+    listCutsMock.mockResolvedValue([C2_CUT])
+    const wrapper = await mountView()
+
+    await checkTests(wrapper, ['T001'])
+    await searchForSampleCut(wrapper)
+    await checkTests(wrapper, ['T002'])
+
+    const chips = wrapper.findAll('[data-testid="selected-test"]').map((c) => c.text())
+    expect(chips).toEqual([expect.stringContaining('T001'), expect.stringContaining('T002')])
+  })
+
+  it('removes a Test from the selection via its chip', async () => {
+    listTestIdsMock.mockResolvedValue(['T001', 'T002'])
+    const wrapper = await mountView()
+    await checkTests(wrapper, ['T001', 'T002'])
+
+    await wrapper.find('button[aria-label="Remove T001 from selected Tests"]').trigger('click')
+
+    const chips = wrapper.findAll('[data-testid="selected-test"]').map((c) => c.text())
+    expect(chips).toEqual([expect.stringContaining('T002')])
+    expect(
+      wrapper.find<HTMLButtonElement>('[data-testid="analyze-selected-tests"]').element.disabled,
+    ).toBe(true)
+  })
+
+  it('shows the backend message when starting a multi-Test analysis fails', async () => {
+    listTestIdsMock.mockResolvedValue(['T001', 'T002'])
+    createWholesaleAnalysisMock.mockRejectedValue(
+      new Error('The selected Tests/Cuts resolve to too many videos for one analysis.'),
+    )
+    const wrapper = await mountView()
+    await checkTests(wrapper, ['T001', 'T002'])
+
+    await wrapper.find('[data-testid="analyze-selected-tests"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="selected-tests"] [role="alert"]').text()).toBe(
+      'The selected Tests/Cuts resolve to too many videos for one analysis.',
+    )
+    expect(
+      wrapper.find<HTMLButtonElement>('[data-testid="analyze-selected-tests"]').element.disabled,
+    ).toBe(false)
   })
 })
