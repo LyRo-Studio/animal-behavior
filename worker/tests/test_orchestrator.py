@@ -31,6 +31,30 @@ def _seed_cut(s3_client: FakeS3Client, cut_key: str) -> None:
     s3_client.objects[cut_key] = b"fake-video-bytes"
 
 
+def _create_multi_test_job(db_session, s3_client: FakeS3Client, cuts_by_test) -> AnalysisJob:
+    """A wholesale job spanning every Test in `cuts_by_test` (issue #88's
+    Feature B) — seeds each Test's Cuts in `s3_client` first, since
+    wholesale derivation lists them from S3 at creation time."""
+    for cut_keys in cuts_by_test.values():
+        for cut_key in cut_keys:
+            _seed_cut(s3_client, cut_key)
+    return create_analysis_job(
+        db_session,
+        requested_by_identity="jan.peeters@vives.be",
+        test_ids=list(cuts_by_test),
+        s3=s3_client,
+    )
+
+
+def _uploaded_reports(s3_client: FakeS3Client) -> set[str]:
+    """Every combined or per-Test `casiop_report.xlsx` uploaded so far."""
+    return {
+        key
+        for key in s3_client.objects
+        if key.startswith("reports/") and key.endswith("/casiop_report.xlsx")
+    }
+
+
 def _audit_rows_for(db_session, job: AnalysisJob) -> list[AuditLog]:
     # Filters on this job's own target rather than assuming `audit_log`
     # starts empty — this suite runs against a real Postgres database that,
@@ -72,12 +96,14 @@ def test_process_next_job_all_videos_succeed_completes_and_uploads_report(db_ses
     assert job.dogtrace_version == "1.2.3"
     assert job.started_at is not None
     assert job.finished_at is not None
-    assert job.report_s3_prefix == f"reports/T001/{job.id}/"
+    assert job.report_s3_prefix == f"reports/{job.id}/"
     assert job.videos[0].status == AnalysisJobVideoStatus.SUCCEEDED
     assert job.videos[0].failure_reason is None
 
-    uploaded_keys = set(s3_client.objects) - {"cuts/T001/T001_C2_ME_F1.mp4"}
-    assert f"reports/T001/{job.id}/casiop_report.xlsx" in uploaded_keys
+    # Ticket #91: the analysis-id-first prefix applies to single-Test jobs
+    # too, but only the combined report is produced — no per-Test split.
+    assert _uploaded_reports(s3_client) == {f"reports/{job.id}/casiop_report.xlsx"}
+    assert dogtrace_runner.split_calls == []
     assert not (work_root / str(job.id)).exists()
 
     # Ticket #84: a job finishing `completed` writes ANALYSIS_COMPLETED,
@@ -120,7 +146,7 @@ def test_process_next_job_survives_a_failed_audit_write_after_success(
     assert processed is True
     db_session.refresh(job)
     assert job.status == AnalysisJobStatus.COMPLETED
-    assert job.report_s3_prefix == f"reports/T001/{job.id}/"
+    assert job.report_s3_prefix == f"reports/{job.id}/"
     assert job.videos[0].status == AnalysisJobVideoStatus.SUCCEEDED
     assert _audit_rows_for(db_session, job) == []
 
@@ -147,7 +173,7 @@ def test_process_next_job_partial_failure_completes_with_errors(db_session, work
     assert failed_video.status == AnalysisJobVideoStatus.FAILED
     assert failed_video.failure_reason
     assert "Traceback" not in failed_video.failure_reason
-    assert job.report_s3_prefix == f"reports/T001/{job.id}/"
+    assert job.report_s3_prefix == f"reports/{job.id}/"
 
     # Ticket #84: a job finishing `completed_with_errors` writes
     # ANALYSIS_COMPLETED_WITH_ERRORS with a short, bounded failure_reason.
@@ -504,3 +530,72 @@ class _SilentDogTraceRunner:
         progress: ProgressCallback | None = None,
     ) -> None:
         pass
+
+
+# Ticket #91 (issue #88's Feature B worker half): reports move to an
+# analysis-id-first prefix, and a job spanning more than one Test also gets
+# one report per Test alongside the combined one.
+
+
+def test_process_next_job_multi_test_job_uploads_combined_and_per_test_reports(
+    db_session, work_root
+):
+    s3_client = FakeS3Client()
+    job = _create_multi_test_job(
+        db_session,
+        s3_client,
+        {
+            "T001": ["cuts/T001/T001_C2_ME_F1.mp4", "cuts/T001/T001_C2_ZE_F1.mp4"],
+            "T002": ["cuts/T002/T002_C2_ME_F1.mp4"],
+        },
+    )
+
+    process_next_job(
+        db_session,
+        s3_client=s3_client,
+        dogtrace_runner=FakeDogTraceRunner(),
+        work_root=work_root,
+    )
+
+    db_session.refresh(job)
+    assert job.status == AnalysisJobStatus.COMPLETED
+    assert job.report_s3_prefix == f"reports/{job.id}/"
+    assert _uploaded_reports(s3_client) == {
+        f"reports/{job.id}/casiop_report.xlsx",
+        f"reports/{job.id}/T001/casiop_report.xlsx",
+        f"reports/{job.id}/T002/casiop_report.xlsx",
+    }
+
+
+@dataclass
+class _SplitFailingDogTraceRunner(FakeDogTraceRunner):
+    """Runs every video successfully, then fails while splitting the
+    combined report per Test (e.g. an unreadable report file)."""
+
+    def split_report_by_test(self, video_paths: list[Path], *, output_dir: Path) -> None:
+        raise RuntimeError("simulated per-Test split failure")
+
+
+def test_process_next_job_failed_per_test_split_keeps_the_combined_report(db_session, work_root):
+    # The per-Test files are a convenience on top of the combined report
+    # (the only downloadable one) — failing to produce them must not throw
+    # away an otherwise-successful job's results.
+    s3_client = FakeS3Client()
+    job = _create_multi_test_job(
+        db_session,
+        s3_client,
+        {"T001": ["cuts/T001/T001_C2_ME_F1.mp4"], "T002": ["cuts/T002/T002_C2_ME_F1.mp4"]},
+    )
+
+    process_next_job(
+        db_session,
+        s3_client=s3_client,
+        dogtrace_runner=_SplitFailingDogTraceRunner(),
+        work_root=work_root,
+    )
+
+    db_session.refresh(job)
+    assert job.status == AnalysisJobStatus.COMPLETED
+    assert all(video.status == AnalysisJobVideoStatus.SUCCEEDED for video in job.videos)
+    assert job.report_s3_prefix == f"reports/{job.id}/"
+    assert _uploaded_reports(s3_client) == {f"reports/{job.id}/casiop_report.xlsx"}

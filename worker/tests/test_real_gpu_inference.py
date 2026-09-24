@@ -86,16 +86,32 @@ def _any_real_c2_cut_key(client: BotoS3Client) -> str:
     pytest.fail("Real bucket has no C2 Cut to run real inference against.")
 
 
+def _real_c2_cut_keys_from_two_tests(client: BotoS3Client) -> list[str]:
+    """One real C2 Cut from each of the first two Tests that have one —
+    same "whatever the bucket holds" reasoning as `_any_real_c2_cut_key`."""
+    cut_keys_by_test: dict[str, str] = {}
+    for info in client.list_objects_info(prefix="cuts/"):
+        filename = info.key.rsplit("/", 1)[-1]
+        if _DOGTRACE_C2_FILENAME_RE.match(filename):
+            cut_keys_by_test.setdefault(info.key.split("/")[1], info.key)
+            if len(cut_keys_by_test) == 2:
+                return list(cut_keys_by_test.values())
+    pytest.fail("Real bucket has no two Tests with a C2 Cut to split a real report across.")
+
+
+def _download_to(client: BotoS3Client, cut_key: str, input_dir: Path) -> Path:
+    input_dir.mkdir(exist_ok=True)
+    local_path = input_dir / Path(cut_key).name
+    client.download_file(cut_key, local_path)
+    return local_path
+
+
 def test_real_dogtrace_runner_processes_a_real_c2_cut_on_a_real_gpu(tmp_path: Path):
     _require_real_gpu_and_dogtrace()
     client = _real_s3_client()
     cut_key = _any_real_c2_cut_key(client)
 
-    input_dir = tmp_path / "input"
-    input_dir.mkdir()
-    local_path = input_dir / Path(cut_key).name
-    client.download_file(cut_key, local_path)
-
+    local_path = _download_to(client, cut_key, tmp_path / "input")
     output_dir = tmp_path / "output"
     events: list[tuple[str, str]] = []
 
@@ -108,3 +124,29 @@ def test_real_dogtrace_runner_processes_a_real_c2_cut_on_a_real_gpu(tmp_path: Pa
     assert (local_path.name, "started") in events
     assert (local_path.name, "succeeded") in events
     assert any(output_dir.rglob("*.xlsx")), "Expected at least one report artifact to be produced."
+
+
+def test_real_dogtrace_runner_splits_a_real_combined_report_per_test(tmp_path: Path):
+    # Ticket #91: the only test that reads a report dogtrace itself
+    # produced — test_orchestrator.py's FakeDogTraceRunner never writes a
+    # real one — so it's the one check that `info_test_id` and the combined
+    # report's layout are what `split_report_by_test` assumes.
+    _require_real_gpu_and_dogtrace()
+    import pandas as pd
+
+    client = _real_s3_client()
+    cut_keys = _real_c2_cut_keys_from_two_tests(client)
+    local_paths = [_download_to(client, key, tmp_path / "input") for key in cut_keys]
+    output_dir = tmp_path / "output"
+    runner = RealDogTraceRunner()
+
+    runner.run_reporting(local_paths, output_dir=output_dir)
+    runner.split_report_by_test(local_paths, output_dir=output_dir)
+
+    combined = pd.read_excel(output_dir / "casiop_report.xlsx")
+    test_ids = sorted(key.split("/")[1] for key in cut_keys)
+    assert sorted(combined["info_test_id"]) == test_ids, "Expected both real videos to succeed."
+    for test_id in test_ids:
+        per_test = pd.read_excel(output_dir / test_id / "casiop_report.xlsx")
+        assert list(per_test["info_test_id"]) == [test_id]
+        assert list(per_test.columns) == list(combined.columns)
