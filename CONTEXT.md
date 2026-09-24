@@ -2200,6 +2200,77 @@ Implementation-time judgment calls:
   commit" helper. Merging those is a separate refactor, not part of this
   ticket.
 
+**Ingestion upload flow (ticket #100) — shipped, frontend only.** A new
+`CuttingUploadView` at `/cutting` (route `cutting-upload`, linked from Home
+as "Video Cutting"). It takes up to 5 Tests, each with a Test ID and a C1
+and/or C2 source video, plus one timestamp Excel for the whole batch. It
+uploads through #94's chunked protocol and submits through #97's
+`POST /cutting-jobs/batch`. Backend communication lives in
+`frontend/src/services/cuttingJobs.ts`. Implementation-time judgment calls:
+
+- **One Excel picker for the batch, not one per Test.** Issue #100 says
+  "each with source video(s) and a timestamp Excel", but #97's endpoint
+  takes one shared workbook, because a researcher's sheet holds every
+  Test's row. Tests that need different workbooks go in separate
+  submissions.
+- **Resuming works at two levels:**
+  - *Within one upload:* a dropped connection, or a 5xx such as a backend
+    restart, is retried after 1 s, 3 s, 10 s and 30 s. Before each retry
+    the client re-reads the backend's own byte count (`GET .../uploads/{id}`)
+    and carries on from there, since part of a dropped chunk may already
+    be written. A 409 (stale offset, or already complete) resyncs the same
+    way. The retry budget resets after every chunk that gets through, so
+    only a connection that stays down for all four retries fails the
+    upload. Starting the upload, and the check before resuming a remembered
+    one, are retried the same way (caught in review). A retried start whose
+    first response was lost can leave an empty, unused upload on the
+    backend. That's harmless, since the storage cap counts received bytes.
+  - *Across attempts:* the upload id is remembered in `localStorage`, keyed
+    by Test ID, camera, filename, size and `lastModified`. Submitting the
+    same file again, after giving up or after a page reload, continues that
+    upload. Before reusing it, the client checks that the backend still has
+    it with the same camera, filename and size; otherwise it starts a new
+    one. If storage is unavailable, an in-memory copy covers the current
+    page. The entry is forgotten once a job has been created from the
+    upload, so a later re-cut uploads the file afresh instead of pointing a
+    second job at the first job's source, which the worker may discard.
+    The key uses the Test ID as typed, uppercased and trimmed, not the
+    backend's normalized form. So "513" and "T513" don't share an entry;
+    that only costs a fresh upload.
+- **Chunks are 8 MiB,** well under nginx's shared 30 MiB
+  `client_max_body_size`, so no proxy change was needed. Issue #119 (an
+  explicit upload size limit) is about single-request uploads and is
+  unaffected.
+- **Uploads run strictly one at a time,** Test by Test and camera by
+  camera, before the one batch request. This keeps bandwidth predictable
+  and mirrors the cutting-worker's one-at-a-time posture.
+- **Failures are per Test.** An upload refused or lost for one Test (for
+  example a filename that doesn't match its Test/camera, or storage over the
+  cap) is shown on that Test as `<camera>: <backend detail>`, and the other
+  Tests are still submitted. A per-Test batch rejection (malformed Excel row,
+  reference-camera mismatch, non-decodable video, source collision) shows
+  its `error.detail` on that Test. A refusal of the whole batch (throttled,
+  duplicate Test) shows once, under the form. A Test that got a job is
+  locked and left out of the next submit. Pressing submit again retries
+  only the others, skipping any camera whose upload already finished.
+- **"Cuts already exist" (#96) has no confirm action yet.** Resubmitting
+  with `confirm_overwrite`, and the dialog that offers it, are ticket #101's
+  acceptance criteria. Until then the Test shows "<Test> already has Cuts.
+  Re-cutting a Test isn't possible from this page yet." instead of the
+  backend's `detail`, which says "Confirm to overwrite them" (caught in
+  review: that asked for an action the page can't take). #101 should replace
+  this message with the dialog.
+- **`CuttingJobView` is a one-shot snapshot,** because live progress is also
+  #101's. It lives at `/cutting-jobs/:id` (route `cutting-job-detail`) and
+  shows the Test, status, "N of M Cuts done", submitted time and requester.
+  It exists so each created job has somewhere to link to (#100: "navigates
+  to (or links) each created job"). #101 extends it with polling and
+  per-phase progress rather than adding a second page.
+- **The Test ID is pre-filled from the first chosen video's filename**
+  (`assist`'s rule: the name starts with the Test ID, followed by
+  `_C1_`/`_C2_`) when the field is still empty. The backend still validates
+  the filename against the Test/camera at upload start.
+
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
 (`consolidatie.py`, `observer_import.py`) is pre-existing Observer XT

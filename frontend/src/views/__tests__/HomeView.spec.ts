@@ -24,6 +24,7 @@ function createTestRouter() {
         name: 'consolidation',
         component: { template: '<div>consolidation</div>' },
       },
+      { path: '/cutting', name: 'cutting-upload', component: { template: '<div>cutting</div>' } },
     ],
   })
 }
@@ -66,7 +67,7 @@ describe('HomeView', () => {
     expect(wrapper.text()).toContain('Media Browser')
   })
 
-  it('links to Media Browser, Analyses, and Data Consolidation, with no Admin link and no logout', async () => {
+  it('links to Media Browser, Analyses, Data Consolidation, and Video Cutting, with no Admin link and no logout', async () => {
     const wrapper = await mountHome()
 
     const links = wrapper.findAllComponents({ name: 'RouterLink' })
@@ -74,6 +75,7 @@ describe('HomeView', () => {
       'Media Browser',
       'Analyses',
       'Data Consolidation',
+      'Video Cutting',
     ])
     expect(wrapper.text()).not.toContain('Admin')
     expect(wrapper.find('button').exists()).toBe(false)
