@@ -6,6 +6,7 @@ is a regular package, so same-named modules in both would otherwise shadow
 each other unpredictably. Mirrors worker/tests/doubles.py's own reasoning.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
 from io import BytesIO
@@ -19,6 +20,8 @@ from openpyxl import Workbook
 from cutting_worker.video_cutter import PHASE_ORDER
 
 _HEADERS = ["Test ID", "Dog ID", "C1/C2", *PHASE_ORDER]
+# Every object reports the same last_modified; nothing here reads it.
+_LAST_MODIFIED = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 @dataclass
@@ -38,11 +41,17 @@ class FakeS3Client:
             raise S3ObjectNotFoundError(key)
         raise AssertionError(f"unexpected collision: {key!r} already exists in FakeS3Client")
 
-    def list_objects_info(self, prefix: str = "", *, recursive: bool = True):
+    def list_objects_info(
+        self, prefix: str = "", *, recursive: bool = True
+    ) -> Iterator[S3ObjectInfo]:
+        # Same filtering as backend/tests/fakes.py's FakeS3Client (folder
+        # markers skipped), so `has_cuts` behaves identically in both suites.
         for key, data in self.objects.items():
-            rest = key[len(prefix) :]
-            if key.startswith(prefix) and (recursive or "/" not in rest):
-                yield S3ObjectInfo(key=key, size=len(data), last_modified=datetime.now(UTC))
+            if key.endswith("/") or not key.startswith(prefix):
+                continue
+            if not recursive and "/" in key[len(prefix) :]:
+                continue
+            yield S3ObjectInfo(key=key, size=len(data), last_modified=_LAST_MODIFIED)
 
     def upload_file(self, local_path: Path, key: str) -> None:
         self.objects[key] = Path(local_path).read_bytes()

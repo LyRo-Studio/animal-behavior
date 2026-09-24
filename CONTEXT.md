@@ -1950,8 +1950,9 @@ no job is created. Implementation-time judgment calls:
 
 - **"Already has Cuts" means any object directly under `cuts/<Test>/`**
   (non-recursive, stopping at the first object found): the same prefix the
-  cutting-worker uploads to, and the same "a Test exists iff it has a Cut"
-  rule `media_browser.py` already uses. It's checked against the Excel row's
+  cutting-worker uploads to. Implemented as `media_browser.has_cuts`, next to
+  `list_cuts_for_test`, because `media_browser.py` already owns the "a Test
+  exists iff it has a Cut" rule. It's checked against the Excel row's
   validated Test ID, never the raw request value.
 - **Checked last, after every other ingestion rule** (filenames, Excel,
   reference camera, ffprobe, source collision). So a researcher who confirms
@@ -1979,6 +1980,13 @@ no job is created. Implementation-time judgment calls:
   for example a phase now marked skipped, or a legacy `ZE_F8`. Deleting
   those was never asked for (issue #93: "confirm on re-cut", not "replace
   the Test's Cuts"). Revisit if stale leftovers turn out to confuse people.
+- **Known gap: in-flight jobs aren't checked.** Only Cuts already in S3
+  trigger the confirmation, which is exactly what #96's acceptance criteria
+  ask for. Two unconfirmed jobs for a Test with no Cuts yet (one still
+  `queued`/`running`, one newly submitted) both go through, and the later
+  one silently overwrites the earlier one's Cuts. Closing that would mean
+  also checking for an unfinished `CuttingJob` on the same Test. Left for a
+  follow-up, since it overlaps batch submission (#97).
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
