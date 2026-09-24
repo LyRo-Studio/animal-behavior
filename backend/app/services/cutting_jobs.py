@@ -18,11 +18,26 @@ from app.models.cutting_job import (
     CuttingJobOutputStatus,
     CuttingJobStatus,
 )
-from app.services.cutting_uploads import source_filename_matches_camera
+from app.services.cutting_uploads import (
+    UploadNotFoundError,
+    get_upload_status,
+    source_filename_matches_camera,
+    upload_blob_path,
+)
 from app.services.media_browser import has_cuts
 from app.services.media_prober import MediaProbeError, MediaProber
 from app.services.s3_client import S3Client, S3ObjectNotFoundError
-from app.services.timestamp_excel import find_test_row, normalize_test_id, parse_timestamp_workbook
+from app.services.timestamp_excel import (
+    ExcelSchemaError,
+    InvalidWorkbookError,
+    MalformedReferenceCameraError,
+    MalformedTestIdError,
+    MalformedTimestampCellError,
+    TestRowNotFoundError,
+    find_test_row,
+    normalize_test_id,
+    parse_timestamp_workbook,
+)
 
 # One (condition, phase) slot per expected CuttingJobOutput, per uploaded
 # camera — ZE_F8 deliberately excluded: every phase is sliced [this
@@ -119,6 +134,75 @@ class CutsAlreadyExistError(Exception):
 
 class CuttingJobNotFoundError(Exception):
     """Raised for a nonexistent CuttingJob id."""
+
+
+class SourceUploadNotUsableError(Exception):
+    """An upload id named in a submission can't be used for it (ticket #97
+    moved this check here from the API layer, so one bad upload id fails
+    only its own Test within a batch). See the three subclasses."""
+
+    def __init__(self, camera: str) -> None:
+        self.camera = camera
+        super().__init__(camera)
+
+
+class UnknownSourceUploadError(SourceUploadNotUsableError):
+    """No upload exists with that id."""
+
+
+class IncompleteSourceUploadError(SourceUploadNotUsableError):
+    """The upload exists but hasn't received all its declared bytes yet."""
+
+
+class MismatchedSourceUploadError(SourceUploadNotUsableError):
+    """The upload was declared for a different Test or camera."""
+
+
+class EmptyBatchError(Exception):
+    """A batch submission named no Tests at all."""
+
+
+class TooManyTestsInBatchError(Exception):
+    """A batch submission named more than `MAX_TESTS_PER_BATCH` Tests —
+    rejected outright, before any job is created (ticket #97)."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        super().__init__(count)
+
+
+class DuplicateTestInBatchError(Exception):
+    """A batch submission named the same (normalized) Test more than once —
+    rejected outright: two jobs for one Test would race to write the same
+    `cuts/<Test>/` keys."""
+
+    def __init__(self, test_id: str) -> None:
+        self.test_id = test_id
+        super().__init__(test_id)
+
+
+# Everything one Test's submission can be rejected with. Within a batch,
+# any of these fails only that Test (ticket #97); anything else (e.g. a
+# database error) is unexpected and propagates.
+CUTTING_JOB_VALIDATION_ERRORS: tuple[type[Exception], ...] = (
+    SourceUploadNotUsableError,
+    NoSourceVideoUploadedError,
+    DuplicateCameraUploadError,
+    InvalidSourceFilenameError,
+    InvalidWorkbookError,
+    ExcelSchemaError,
+    MalformedTestIdError,
+    MalformedReferenceCameraError,
+    MalformedTimestampCellError,
+    TestRowNotFoundError,
+    ReferenceCameraMismatchError,
+    SourceVideoNotDecodableError,
+    SourceVideoCollisionError,
+    CutsAlreadyExistError,
+)
+
+# Issue #93's Feature C "Batch submission" decision.
+MAX_TESTS_PER_BATCH = 5
 
 
 def _derive_source_collision_key(test_id: str, filename: str) -> str:
@@ -234,6 +318,133 @@ def create_cutting_job(
     db.commit()
     db.refresh(job)
     return job
+
+
+@dataclass(frozen=True)
+class CuttingJobSubmission:
+    """One Test's worth of a submission, naming its source videos by the
+    upload ids app/services/cutting_uploads.py minted — not yet resolved or
+    validated."""
+
+    test_id: str
+    c1_upload_id: str | None = None
+    c2_upload_id: str | None = None
+    confirm_overwrite: bool = False
+
+
+@dataclass(frozen=True)
+class CuttingJobSubmissionResult:
+    """One Test's outcome within a batch: exactly one of `job`/`error` is
+    set. `error` is always one of `CUTTING_JOB_VALIDATION_ERRORS`."""
+
+    test_id: str
+    job: CuttingJob | None = None
+    error: Exception | None = None
+
+
+def resolve_source_upload(
+    upload_root: Path, upload_id: str, *, camera: str, test_id: str
+) -> SourceVideoUpload:
+    """The local file behind a fully received upload declared for exactly
+    this (normalized) `test_id` and `camera`."""
+    try:
+        upload_status = get_upload_status(upload_root, upload_id)
+    except UploadNotFoundError:
+        raise UnknownSourceUploadError(camera) from None
+    if not upload_status.complete:
+        raise IncompleteSourceUploadError(camera)
+    if upload_status.test_id != test_id or upload_status.camera != camera:
+        raise MismatchedSourceUploadError(camera)
+    return SourceVideoUpload(
+        camera=camera,
+        local_path=upload_blob_path(upload_root, upload_id),
+        filename=upload_status.filename,
+    )
+
+
+def submit_cutting_job(
+    db: Session,
+    *,
+    submission: CuttingJobSubmission,
+    requested_by_identity: str | None,
+    excel_bytes: bytes,
+    upload_root: Path,
+    s3: S3Client,
+    media_prober: MediaProber,
+) -> CuttingJob:
+    """Resolve `submission`'s upload ids, then `create_cutting_job` — one
+    Test, as `POST /cutting-jobs` and each entry of a batch both need."""
+    # Normalized the same way `start_upload` already normalized whatever
+    # test_id an upload was declared under — otherwise a bare-numeric
+    # test_id here would never match a normalized "T..." upload record.
+    test_id = normalize_test_id(submission.test_id)
+    uploads = [
+        resolve_source_upload(upload_root, upload_id, camera=camera, test_id=test_id)
+        for camera, upload_id in (("C1", submission.c1_upload_id), ("C2", submission.c2_upload_id))
+        if upload_id is not None
+    ]
+    return create_cutting_job(
+        db,
+        requested_by_identity=requested_by_identity,
+        test_id=test_id,
+        excel_bytes=excel_bytes,
+        uploads=uploads,
+        s3=s3,
+        media_prober=media_prober,
+        confirm_overwrite=submission.confirm_overwrite,
+    )
+
+
+def submit_cutting_job_batch(
+    db: Session,
+    *,
+    submissions: list[CuttingJobSubmission],
+    requested_by_identity: str | None,
+    excel_bytes: bytes,
+    upload_root: Path,
+    s3: S3Client,
+    media_prober: MediaProber,
+) -> list[CuttingJobSubmissionResult]:
+    """Submit up to `MAX_TESTS_PER_BATCH` Tests at once, all read from the
+    same timestamp workbook, each becoming its own independent CuttingJob
+    (ticket #97). Results come back in submission order.
+
+    An empty or oversized batch, or one naming the same Test twice, is
+    rejected outright before any job is created. Past that, each Test
+    succeeds or fails on its own: one Test's validation failure is recorded
+    in its result and never stops the rest, and each job is committed as
+    it's created.
+    """
+    if not submissions:
+        raise EmptyBatchError
+    if len(submissions) > MAX_TESTS_PER_BATCH:
+        raise TooManyTestsInBatchError(len(submissions))
+    seen_test_ids: set[str] = set()
+    for submission in submissions:
+        test_id = normalize_test_id(submission.test_id)
+        if test_id in seen_test_ids:
+            raise DuplicateTestInBatchError(test_id)
+        seen_test_ids.add(test_id)
+
+    results = []
+    for submission in submissions:
+        try:
+            job = submit_cutting_job(
+                db,
+                submission=submission,
+                requested_by_identity=requested_by_identity,
+                excel_bytes=excel_bytes,
+                upload_root=upload_root,
+                s3=s3,
+                media_prober=media_prober,
+            )
+        except CUTTING_JOB_VALIDATION_ERRORS as exc:
+            results.append(
+                CuttingJobSubmissionResult(test_id=normalize_test_id(submission.test_id), error=exc)
+            )
+        else:
+            results.append(CuttingJobSubmissionResult(test_id=job.test_id, job=job))
+    return results
 
 
 def get_cutting_job(db: Session, *, cutting_job_id: int) -> CuttingJob:

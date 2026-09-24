@@ -53,3 +53,37 @@ class CuttingJobOut(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     outputs: list[CuttingJobOutputOut]
+
+
+class CuttingJobBatchEntryIn(BaseModel):
+    """Ticket #97: one Test's entry in `POST /cutting-jobs/batch`'s `tests`
+    list — the same fields `POST /cutting-jobs` takes for a single Test."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    test_id: _TestId
+    c1_upload_id: str | None = None
+    c2_upload_id: str | None = None
+    confirm_overwrite: bool = False
+
+
+class CuttingJobBatchErrorOut(BaseModel):
+    """Why one Test in a batch got no job: the same status code, `detail`
+    and (ticket #96) `code` that Test alone would get from
+    `POST /cutting-jobs`."""
+
+    status_code: int
+    detail: str
+    code: str | None
+
+
+class CuttingJobBatchResultOut(BaseModel):
+    """Exactly one of `job`/`error` is set."""
+
+    test_id: str
+    job: CuttingJobOut | None
+    error: CuttingJobBatchErrorOut | None
+
+
+class CuttingJobBatchOut(BaseModel):
+    results: list[CuttingJobBatchResultOut]

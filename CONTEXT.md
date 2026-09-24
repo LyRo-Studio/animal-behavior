@@ -1986,7 +1986,68 @@ no job is created. Implementation-time judgment calls:
   `queued`/`running`, one newly submitted) both go through, and the later
   one silently overwrites the earlier one's Cuts. Closing that would mean
   also checking for an unfinished `CuttingJob` on the same Test. Left for a
-  follow-up, since it overlaps batch submission (#97).
+  follow-up, since it overlaps batch submission (#97). *Partly closed by
+  #97:* the same Test twice within one batch is now rejected. Two separate
+  submissions for one Test still both go through.
+
+**Cutting-job batch submission (ticket #97) — shipped, backend only; the
+upload UI is ticket #100.** `POST /cutting-jobs/batch` takes 1–5 Tests in
+one call, each becoming its own independent `CuttingJob`, via
+`submit_cutting_job_batch` in `app/services/cutting_jobs.py`. The single
+`POST /cutting-jobs` stays as it was. Both share `submit_cutting_job`, which
+resolves one Test's upload ids and calls `create_cutting_job`.
+Implementation-time judgment calls:
+
+- **A new endpoint rather than changing `POST /cutting-jobs`.** The single
+  endpoint's contract (201 with the job, or that Test's own status code,
+  including #96's 409) is already tested and is what #101 was specified
+  against. The frontend (#100) is expected to use the batch endpoint, so a
+  single-Test submission there is a batch of one.
+- **Request: one shared timestamp workbook for the whole batch, plus a
+  `tests` form field holding a JSON list** of
+  `{test_id, c1_upload_id, c2_upload_id, confirm_overwrite}`, the same
+  fields the single endpoint takes. A researcher's timestamp Excel holds
+  every Test's row, so there's one file to send. Tests needing different
+  workbooks go in separate submissions. Unknown keys are rejected (422), so
+  a misspelled `confirm_overwrite` can never be silently ignored.
+- **Response: always 200 once the batch is accepted, with one result per
+  Test in submission order.** Each result carries either `job` or `error`.
+  `error` has the same `status_code`/`detail`/`code` that Test alone would
+  get from `POST /cutting-jobs`. Both endpoints build it from one mapping,
+  `_describe_rejection` in `app/api/cutting_jobs.py`. A per-Test
+  "Cuts already exist" is therefore `error.code == "cuts_already_exist"`,
+  and confirming means resubmitting that Test with `confirm_overwrite`.
+  Every Test in a batch gets its own confirmation.
+- **Rejected outright (400, nothing created):** an empty batch, more than
+  five Tests, or the same Test twice after normalization (`"513"` and
+  `"T513"` are the same Test). Two jobs for one Test would race to write
+  the same `cuts/<Test>/` keys. These batch-level checks all run before any
+  Test is processed.
+- **Per-Test failures are exactly `CUTTING_JOB_VALIDATION_ERRORS`.** That
+  covers every ingestion rule, and now also an unknown, incomplete or
+  mismatched upload id: `resolve_source_upload`, moved into the service
+  from the API layer so one bad upload id fails only its own Test. Anything
+  else (such as a database error) is unexpected and fails the request, but
+  jobs created earlier in the batch stay. Each job commits as it's
+  created, since the jobs are independent.
+- **The workbook is parsed once per Test,** at most five times per request,
+  rather than threading a pre-parsed workbook through `create_cutting_job`.
+  Cheap enough at this size, and it keeps `create_cutting_job`'s tested
+  interface unchanged. Since `parse_timestamp_workbook` validates every row,
+  one malformed cell anywhere fails every Test in the batch with the same
+  error, just as it would fail each single submission.
+- **Rate limiting: one attempt per submission,** on the same
+  `create-cutting-job` key as the single endpoint, however many Tests the
+  batch names. Charging per Test would let one #96 block-and-confirm round
+  trip on a batch of five use the entire 10-per-5-minutes budget. Actual
+  load stays bounded anyway: every job needs its own completed upload
+  (upload start is limited to 30 per 5 minutes and capped by storage), and
+  the cutting-worker runs one job at a time.
+- **A plain `def` endpoint** (reading the Excel through `excel.file`), so up
+  to five Tests' worth of ffprobe, S3 and database work runs in FastAPI's
+  threadpool instead of blocking the event loop. The single endpoint is
+  still `async def` doing the same work inline for one Test, as it was
+  before this ticket.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
