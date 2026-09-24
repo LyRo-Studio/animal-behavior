@@ -19,6 +19,7 @@ positional 16-element list.
 """
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -46,6 +47,7 @@ class VideoCutter(Protocol):
         phase_timestamps: dict[str, int],
         source_paths: dict[str, Path],
         output_dir: Path,
+        on_output: Callable[[Path], None],
     ) -> None:
         """Slice every producible phase (see `PHASE_ORDER` above) for every
         camera in `source_paths` ("C1"/"C2" -> its local source video) into
@@ -57,6 +59,14 @@ class VideoCutter(Protocol):
         success/failure from which expected files actually appear here, the
         same "no progress callback, watch the output directory" approach
         issue #93 documents for ticket #98's live progress.
+
+        `on_output` is called with each output file's path as soon as that
+        file is completely written (ticket #98's live per-phase progress) —
+        never for a phase that failed or was skipped. An exception it raises
+        propagates out of `cut()` rather than being mistaken for that
+        phase's own slicing failure. Everything `on_output` reports is also
+        still on disk in `output_dir` afterward, so a caller may equally
+        rely on scanning it once `cut()` returns.
 
         Raises only for a failure that makes the *whole* job unrunnable
         (e.g. two cameras given but their audio can't be cross-correlated at
@@ -86,6 +96,7 @@ class RealVideoCutter:
         phase_timestamps: dict[str, int],
         source_paths: dict[str, Path],
         output_dir: Path,
+        on_output: Callable[[Path], None],
     ) -> None:
         from assist.framegrabber import FrameGrabber
         from assist.lag_correlation import LagCorrelation
@@ -143,3 +154,8 @@ class RealVideoCutter:
                         camera,
                         phase_name,
                     )
+                    continue
+                # Outside the try above: a failure in `on_output` itself (e.g.
+                # uploading this Cut) isn't this phase failing to slice.
+                if output_file.is_file():
+                    on_output(output_file)

@@ -1749,7 +1749,9 @@ ticket #112), rather than the ad-hoc, manual process used today.
 - **Progress: fine-grained per phase, inferred by watching the output
   directory** for each phase's file as it appears (`assist` itself has no
   progress callback of any kind, on any branch) — not a change to `assist`
-  to add one (still true of the vendored copy since #112).
+  to add one (still true of the vendored copy since #112). *Refined by
+  ticket #98:* the signal is a callback from this app's own per-phase loop,
+  not a directory watcher. See "Per-phase progress (ticket #98)" below.
 - **Audit log: gets its own events now**, mirroring the `ANALYSIS_*`
   pattern (e.g. `CUTTING_STARTED`/`CUTTING_COMPLETED`/`CUTTING_FAILED`) —
   `CONTEXT.md`'s Feature A section already flagged this feature as
@@ -2073,6 +2075,54 @@ Implementation-time judgment calls:
   threadpool instead of blocking the event loop. The single endpoint is
   still `async def` doing the same work inline for one Test, as it was
   before this ticket.
+
+**Per-phase progress (ticket #98) — shipped, backend/cutting-worker only;
+the progress UI is ticket #101.** Each `CuttingJobOutput` now goes from
+`pending` to `succeeded` while its job is still `running`, and
+`GET /cutting-jobs/{id}` shows that as it happens. `assist` is unchanged.
+Implementation-time judgment calls:
+
+- **Approved-by-reasoning deviation: an `on_output(path)` callback, not a
+  directory watcher.** Issue #93 said to watch the output directory
+  because `assist` has no progress callback. Since ticket #95, though, the
+  per-phase loop that calls `assist`'s `Slicer` is this app's own code
+  (`RealVideoCutter.cut`). So `VideoCutter.cut` now takes `on_output`, called
+  with each phase's file path once `Slicer.slice` has returned and the file
+  exists. That still honours the reason behind the decision (no change to
+  `assist`), and it avoids two problems a real watcher has:
+  - **Guessing completion:** ffmpeg creates the output file as soon as it
+    starts writing, so a file appearing doesn't mean the phase is done.
+  - **Threading:** it would need a second thread running `cut()` beside the
+    orchestrator's database session.
+
+  The signal still means "this phase's file is now complete in the output
+  directory".
+- **Succeeded means uploaded, live.** The orchestrator's `on_output` uploads
+  that Cut to `cuts/<Test>/`, marks its output `succeeded` and commits
+  straight away, one commit per phase. That keeps `finalize_cutting_job`'s
+  rule that a succeeded output is durably in S3. Uploads are now spread
+  across the run instead of all happening at the end. A reported file no
+  `CuttingJobOutput` expects is logged and ignored. A repeat report for an
+  output that's no longer `pending` is ignored.
+- **Failures are still only known at the end.** A phase that fails to slice
+  or is skipped is never reported (an absence isn't an event), so its output
+  stays `pending` until `cut()` returns. Then the existing post-run directory
+  scan runs as before. It still picks up any file the cutter wrote without
+  reporting, and marks everything left `failed`. So the live signal is an
+  optimisation; the scan remains the source of truth for what was produced.
+- **A mid-run crash now fails only what's still pending.** If `cut()` raises
+  partway (for example an S3 upload inside `on_output` fails; it propagates
+  rather than being taken for that phase's own slicing failure), outputs
+  already uploaded and committed stay `succeeded`, and the job still ends
+  `failed`. Before this ticket nothing was uploaded until `cut()` returned,
+  so "fail everything" was accurate. `_fail_after_unhandled_error` (an error
+  escaping entirely) still fails every output, as its docstring explains.
+  Crash recovery (`requeue_stuck_running_cutting_jobs`) already resets
+  outputs to `pending`, and a rerun overwrites the same keys.
+- **`RealVideoCutter`'s loop is now unit-tested** (`test_video_cutter.py`),
+  with `assist`'s ffmpeg/scipy-backed modules stubbed in `sys.modules`,
+  since CI never installs `requirements-assist.txt`. The opt-in real test
+  also asserts the reported order.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`

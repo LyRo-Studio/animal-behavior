@@ -14,7 +14,7 @@ from io import BytesIO
 from openpyxl import Workbook
 
 from app.core.config import settings
-from app.models.cutting_job import CuttingJob
+from app.models.cutting_job import CuttingJob, CuttingJobOutputStatus, CuttingJobStatus
 from tests.helpers import identity_headers
 
 _CONDITIONS = ("ME", "ZE")
@@ -653,6 +653,31 @@ def test_get_cutting_job_returns_status(client):
 
     assert response.status_code == 200
     assert response.json()["status"] == "queued"
+
+
+def test_get_cutting_job_shows_per_phase_progress_while_still_running(client, db_session):
+    """Ticket #98: the cutting-worker commits each output as it succeeds,
+    before the job itself is done — the status endpoint shows that mix."""
+    upload = _start_upload(client, size=4)
+    _upload_all_bytes(client, upload["upload_id"], b"data")
+    created = client.post(
+        "/api/cutting-jobs",
+        data={"test_id": "T001", "c1_upload_id": upload["upload_id"]},
+        files={"excel": ("timestamps.xlsx", _excel_bytes(), "application/octet-stream")},
+    ).json()
+    job = db_session.get(CuttingJob, created["id"])
+    job.status = CuttingJobStatus.RUNNING
+    first_output = next(o for o in job.outputs if (o.condition, o.phase) == ("ME", "F1"))
+    first_output.status = CuttingJobOutputStatus.SUCCEEDED
+    db_session.commit()
+
+    body = client.get(f"/api/cutting-jobs/{created['id']}").json()
+
+    assert body["status"] == "running"
+    assert {(o["condition"], o["phase"]): o["status"] for o in body["outputs"]} == {
+        ("ME", "F1"): "succeeded",
+        ("ME", "F2"): "pending",
+    }
 
 
 def test_get_cutting_job_for_unknown_id_is_not_found(client):

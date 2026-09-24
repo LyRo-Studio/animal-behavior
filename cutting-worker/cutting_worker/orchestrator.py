@@ -120,6 +120,24 @@ def _run_claimed_job(
     if job.c2_source_path is not None:
         source_paths["C2"] = Path(job.c2_source_path)
 
+    outputs_by_filename = {_expected_output_filename(job, output): output for output in job.outputs}
+
+    def on_output(local_path: Path) -> None:
+        """Live per-phase progress (ticket #98): each Cut is uploaded and
+        its CuttingJobOutput marked succeeded — and committed, so
+        `GET /cutting-jobs/{id}` sees it — as soon as the cutter reports
+        its file written, while the job is still `running`."""
+        output = outputs_by_filename.get(local_path.name)
+        if output is None:
+            logger.warning(
+                "cutting_job_id=%s ignoring unexpected output file %s", job.id, local_path.name
+            )
+            return
+        if output.status != CuttingJobOutputStatus.PENDING:
+            return
+        _upload_output(db, job, output, local_path, s3_client=s3_client)
+        db.commit()
+
     try:
         video_cutter.cut(
             test_id=job.test_id,
@@ -127,6 +145,7 @@ def _run_claimed_job(
             phase_timestamps=job.phase_timestamps,
             source_paths=source_paths,
             output_dir=output_dir,
+            on_output=on_output,
         )
     except Exception:
         logger.exception(
@@ -134,30 +153,54 @@ def _run_claimed_job(
             job.id,
             job.test_id,
         )
+        # Only what's still pending: a Cut already uploaded and committed
+        # live (ticket #98) did durably succeed, even though the job as a
+        # whole now can't.
         for output in job.outputs:
-            output.status = CuttingJobOutputStatus.FAILED
-            output.failure_reason = _BATCH_FAILURE_REASON
-            db.add(output)
+            if output.status == CuttingJobOutputStatus.PENDING:
+                output.status = CuttingJobOutputStatus.FAILED
+                output.failure_reason = _BATCH_FAILURE_REASON
+                db.add(output)
         db.commit()
         db.refresh(job)
         finalize_cutting_job(db, job)
         return
 
-    for output in job.outputs:
-        local_path = output_dir / _expected_output_filename(job, output)
+    # Fallback sweep of the output directory, for anything the cutter wrote
+    # without reporting it; whatever's still pending after that was never
+    # produced. Failures are only knowable here, once the cutter is done —
+    # a missing file is an absence, not an event to report.
+    for filename, output in outputs_by_filename.items():
+        if output.status != CuttingJobOutputStatus.PENDING:
+            continue
+        local_path = output_dir / filename
         if local_path.is_file():
-            s3_client.upload_file(local_path, f"cuts/{job.test_id}/{local_path.name}")
-            output.status = CuttingJobOutputStatus.SUCCEEDED
+            _upload_output(db, job, output, local_path, s3_client=s3_client)
         else:
             output.status = CuttingJobOutputStatus.FAILED
             output.failure_reason = _PIPELINE_FAILURE_REASON
-        db.add(output)
+            db.add(output)
     db.commit()
     db.refresh(job)
 
     finalized = finalize_cutting_job(db, job)
     if finalized.status == CuttingJobStatus.SUCCEEDED:
         _discard_source_uploads(job)
+
+
+def _upload_output(
+    db: Session,
+    job: CuttingJob,
+    output: CuttingJobOutput,
+    local_path: Path,
+    *,
+    s3_client: S3Client,
+) -> None:
+    """Upload one produced Cut to `cuts/<Test>/` and mark its output
+    succeeded — the caller commits."""
+    s3_client.upload_file(local_path, f"cuts/{job.test_id}/{local_path.name}")
+    output.status = CuttingJobOutputStatus.SUCCEEDED
+    db.add(output)
 
 
 def _expected_output_filename(job: CuttingJob, output: CuttingJobOutput) -> str:

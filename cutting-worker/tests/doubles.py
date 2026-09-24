@@ -6,7 +6,7 @@ is a regular package, so same-named modules in both would otherwise shadow
 each other unpredictably. Mirrors worker/tests/doubles.py's own reasoning.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
 from io import BytesIO
@@ -79,10 +79,17 @@ class FakeVideoCutter:
     failing to slice while the rest of the job still succeeds. `raises`, if
     set, is raised before anything is written, simulating a whole-job
     failure (e.g. audio cross-correlation failing outright).
+
+    Each file is written one at a time and reported through `on_output`
+    (ticket #98), unless `report_outputs` is False (a cutter that writes but
+    never reports). `after_each_output`, if set, is called with each file's
+    path right after it's reported — a test's window into the job mid-run.
     """
 
     missing_outputs: frozenset[tuple[str, str]] = field(default_factory=frozenset)
     raises: Exception | None = None
+    report_outputs: bool = True
+    after_each_output: Callable[[Path], None] | None = None
     calls: list[dict] = field(default_factory=list)
 
     def cut(
@@ -93,6 +100,7 @@ class FakeVideoCutter:
         phase_timestamps: dict[str, int],
         source_paths: dict[str, Path],
         output_dir: Path,
+        on_output: Callable[[Path], None],
     ) -> None:
         self.calls.append(
             {
@@ -114,7 +122,12 @@ class FakeVideoCutter:
                     continue
                 if (camera, phase_name) in self.missing_outputs:
                     continue
-                (output_dir / f"{test_id}_{camera}_{phase_name}.mp4").write_bytes(b"fake-cut-bytes")
+                output_file = output_dir / f"{test_id}_{camera}_{phase_name}.mp4"
+                output_file.write_bytes(b"fake-cut-bytes")
+                if self.report_outputs:
+                    on_output(output_file)
+                if self.after_each_output is not None:
+                    self.after_each_output(output_file)
 
 
 def _workbook_bytes(test_id: str, *, reference_camera: str, phases: list[str]) -> bytes:

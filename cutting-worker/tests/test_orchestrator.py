@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from app.models.cutting_job import CuttingJobOutputStatus, CuttingJobStatus
+from app.models.cutting_job import (
+    CuttingJob,
+    CuttingJobOutput,
+    CuttingJobOutputStatus,
+    CuttingJobStatus,
+)
+from sqlalchemy import func, select
 
 from cutting_worker.orchestrator import process_next_job
 from tests.doubles import FakeS3Client, FakeVideoCutter, build_cutting_job
@@ -160,3 +166,125 @@ def test_process_next_job_processes_only_one_job_at_a_time(db_session, work_root
     db_session.refresh(second_job)
     assert first_job.status == CuttingJobStatus.SUCCEEDED
     assert second_job.status == CuttingJobStatus.QUEUED
+
+
+# --- Live per-phase progress (ticket #98) ---
+
+
+def _succeeded_output_count(db_session, job_id: int) -> int:
+    """Counted in the database (not read off an in-memory object), the way
+    `GET /cutting-jobs/{id}` would see it."""
+    return db_session.scalar(
+        select(func.count())
+        .select_from(CuttingJobOutput)
+        .where(
+            CuttingJobOutput.cutting_job_id == job_id,
+            CuttingJobOutput.status == CuttingJobOutputStatus.SUCCEEDED,
+        )
+    )
+
+
+def test_outputs_succeed_one_by_one_while_the_job_is_still_running(
+    db_session, work_root, uploads_root
+):
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+    s3_client = FakeS3Client()
+    observed = []
+
+    def observe(path: Path) -> None:
+        job_status = db_session.scalar(select(CuttingJob.status).where(CuttingJob.id == job.id))
+        observed.append(
+            (
+                _succeeded_output_count(db_session, job.id),
+                job_status,
+                f"cuts/T001/{path.name}" in s3_client.objects,
+            )
+        )
+
+    process_next_job(
+        db_session,
+        s3_client=s3_client,
+        video_cutter=FakeVideoCutter(after_each_output=observe),
+        work_root=work_root,
+    )
+
+    # One more succeeded phase after each file, each already uploaded, all
+    # before the job itself leaves `running`.
+    assert observed == [(n, CuttingJobStatus.RUNNING, True) for n in range(1, 16)]
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.SUCCEEDED
+
+
+def test_a_phase_skipped_mid_run_leaves_only_its_own_output_pending_until_the_end(
+    db_session, work_root, uploads_root
+):
+    """ME_F2 never gets a file: the phases after it still succeed live, and
+    ME_F2 itself is only marked failed once the cutter has finished."""
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+    observed = []
+
+    process_next_job(
+        db_session,
+        s3_client=FakeS3Client(),
+        video_cutter=FakeVideoCutter(
+            missing_outputs=frozenset({("C1", "ME_F2")}),
+            after_each_output=lambda path: observed.append(
+                _succeeded_output_count(db_session, job.id)
+            ),
+        ),
+        work_root=work_root,
+    )
+
+    assert observed == list(range(1, 15))
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.FAILED
+    statuses = {f"{o.condition}_{o.phase}": o.status for o in job.outputs}
+    assert statuses["ME_F2"] == CuttingJobOutputStatus.FAILED
+    assert statuses["ME_F3"] == CuttingJobOutputStatus.SUCCEEDED
+
+
+def test_a_written_but_unreported_output_is_still_picked_up_after_the_cut(
+    db_session, work_root, uploads_root
+):
+    """The post-run directory scan stays as a fallback: a file the cutter
+    wrote without reporting it still counts."""
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+    s3_client = FakeS3Client()
+
+    process_next_job(
+        db_session,
+        s3_client=s3_client,
+        video_cutter=FakeVideoCutter(report_outputs=False),
+        work_root=work_root,
+    )
+
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.SUCCEEDED
+    assert len([key for key in s3_client.objects if key.startswith("cuts/T001/")]) == 15
+
+
+class _StrayOutputVideoCutter(FakeVideoCutter):
+    """Reports a file no CuttingJobOutput expects before the real ones."""
+
+    def cut(self, *, output_dir: Path, on_output, **kwargs) -> None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stray = output_dir / "T001_C1_notes.txt"
+        stray.write_bytes(b"not a cut")
+        on_output(stray)
+        super().cut(output_dir=output_dir, on_output=on_output, **kwargs)
+
+
+def test_a_reported_file_no_output_expects_is_ignored(db_session, work_root, uploads_root):
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+    s3_client = FakeS3Client()
+
+    process_next_job(
+        db_session,
+        s3_client=s3_client,
+        video_cutter=_StrayOutputVideoCutter(),
+        work_root=work_root,
+    )
+
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.SUCCEEDED
+    assert "cuts/T001/T001_C1_notes.txt" not in s3_client.objects
