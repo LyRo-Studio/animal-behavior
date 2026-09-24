@@ -1,6 +1,13 @@
+from collections.abc import Callable
 from pathlib import Path
 
-from app.models.cutting_job import CuttingJobOutputStatus, CuttingJobStatus
+from app.models.cutting_job import (
+    CuttingJob,
+    CuttingJobOutput,
+    CuttingJobOutputStatus,
+    CuttingJobStatus,
+)
+from sqlalchemy import func, select
 
 from cutting_worker.orchestrator import process_next_job
 from tests.doubles import FakeS3Client, FakeVideoCutter, build_cutting_job
@@ -160,3 +167,184 @@ def test_process_next_job_processes_only_one_job_at_a_time(db_session, work_root
     db_session.refresh(second_job)
     assert first_job.status == CuttingJobStatus.SUCCEEDED
     assert second_job.status == CuttingJobStatus.QUEUED
+
+
+# --- Live per-phase progress (ticket #98) ---
+
+
+def _succeeded_output_count(db_session, job_id: int) -> int:
+    """Counted in the database, with autoflush off so a status change the
+    orchestrator only made in memory stays invisible. (Every test runs
+    inside one rolled-back transaction, so a truly separate connection
+    couldn't see even committed rows — see
+    `test_outputs_succeed_one_by_one_while_the_job_is_still_running` for how
+    the commit itself is checked.)"""
+    with db_session.no_autoflush:
+        return db_session.scalar(
+            select(func.count())
+            .select_from(CuttingJobOutput)
+            .where(
+                CuttingJobOutput.cutting_job_id == job_id,
+                CuttingJobOutput.status == CuttingJobOutputStatus.SUCCEEDED,
+            )
+        )
+
+
+def test_outputs_succeed_one_by_one_while_the_job_is_still_running(
+    db_session, work_root, uploads_root, monkeypatch
+):
+    """What `GET /cutting-jobs/{id}` relies on: each phase's status change is
+    committed as it happens, not just held in the worker's session."""
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+    s3_client = FakeS3Client()
+    observed = []
+    commits = []
+    real_commit = db_session.commit
+
+    def counting_commit() -> None:
+        commits.append(None)
+        real_commit()
+
+    monkeypatch.setattr(db_session, "commit", counting_commit)
+
+    def observe(path: Path) -> None:
+        with db_session.no_autoflush:
+            job_status = db_session.scalar(select(CuttingJob.status).where(CuttingJob.id == job.id))
+        observed.append(
+            (
+                _succeeded_output_count(db_session, job.id),
+                job_status,
+                f"cuts/T001/{path.name}" in s3_client.objects,
+                len(commits),
+            )
+        )
+
+    process_next_job(
+        db_session,
+        s3_client=s3_client,
+        video_cutter=FakeVideoCutter(after_each_output=observe),
+        work_root=work_root,
+    )
+
+    # One more succeeded phase after each file, each already uploaded and
+    # committed (one more commit each time), all before the job itself
+    # leaves `running`.
+    assert [entry[:3] for entry in observed] == [
+        (n, CuttingJobStatus.RUNNING, True) for n in range(1, 16)
+    ]
+    commit_counts = [entry[3] for entry in observed]
+    assert commit_counts == list(range(commit_counts[0], commit_counts[0] + 15))
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.SUCCEEDED
+
+
+def test_a_phase_skipped_mid_run_leaves_only_its_own_output_pending_until_the_end(
+    db_session, work_root, uploads_root
+):
+    """ME_F2 never gets a file: the phases after it still succeed live, and
+    ME_F2 itself is only marked failed once the cutter has finished."""
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+    observed = []
+
+    process_next_job(
+        db_session,
+        s3_client=FakeS3Client(),
+        video_cutter=FakeVideoCutter(
+            missing_outputs=frozenset({("C1", "ME_F2")}),
+            after_each_output=lambda path: observed.append(
+                _succeeded_output_count(db_session, job.id)
+            ),
+        ),
+        work_root=work_root,
+    )
+
+    assert observed == list(range(1, 15))
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.FAILED
+    statuses = {f"{o.condition}_{o.phase}": o.status for o in job.outputs}
+    assert statuses["ME_F2"] == CuttingJobOutputStatus.FAILED
+    assert statuses["ME_F3"] == CuttingJobOutputStatus.SUCCEEDED
+
+
+def test_a_written_but_unreported_output_is_still_picked_up_after_the_cut(
+    db_session, work_root, uploads_root
+):
+    """The post-run directory scan stays as a fallback: a file the cutter
+    wrote without reporting it still counts."""
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+    s3_client = FakeS3Client()
+
+    process_next_job(
+        db_session,
+        s3_client=s3_client,
+        video_cutter=FakeVideoCutter(
+            unreported_outputs=frozenset({("C1", "ME_F3"), ("C1", "ZE_F7")})
+        ),
+        work_root=work_root,
+    )
+
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.SUCCEEDED
+    assert len([key for key in s3_client.objects if key.startswith("cuts/T001/")]) == 15
+
+
+class _StrayOutputVideoCutter(FakeVideoCutter):
+    """Reports a file no CuttingJobOutput expects before the real ones."""
+
+    def cut(self, *, output_dir: Path, on_output_written: Callable[[Path], None], **kwargs) -> None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stray = output_dir / "T001_C1_notes.txt"
+        stray.write_bytes(b"not a cut")
+        on_output_written(stray)
+        super().cut(output_dir=output_dir, on_output_written=on_output_written, **kwargs)
+
+
+def test_a_reported_file_no_output_expects_is_ignored(db_session, work_root, uploads_root):
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+    s3_client = FakeS3Client()
+
+    process_next_job(
+        db_session,
+        s3_client=s3_client,
+        video_cutter=_StrayOutputVideoCutter(),
+        work_root=work_root,
+    )
+
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.SUCCEEDED
+    assert "cuts/T001/T001_C1_notes.txt" not in s3_client.objects
+
+
+class _FailingUploadS3Client(FakeS3Client):
+    """Fails to upload exactly one key, succeeding for every other."""
+
+    def __init__(self, failing_key: str) -> None:
+        super().__init__()
+        self.failing_key = failing_key
+
+    def upload_file(self, local_path, key) -> None:
+        if key == self.failing_key:
+            raise RuntimeError("simulated S3 upload failure")
+        super().upload_file(local_path, key)
+
+
+def test_an_error_escaping_after_the_cut_keeps_cuts_already_committed_live(
+    db_session, work_root, uploads_root
+):
+    """ZE_F7 is left for the post-run scan, whose upload then fails — an
+    error escaping `_run_claimed_job` entirely. The 14 Cuts uploaded and
+    committed live stay `succeeded`; only ZE_F7 fails; the job fails."""
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+
+    process_next_job(
+        db_session,
+        s3_client=_FailingUploadS3Client("cuts/T001/T001_C1_ZE_F7.mp4"),
+        video_cutter=FakeVideoCutter(unreported_outputs=frozenset({("C1", "ZE_F7")})),
+        work_root=work_root,
+    )
+
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.FAILED
+    statuses = {f"{o.condition}_{o.phase}": o.status for o in job.outputs}
+    assert statuses.pop("ZE_F7") == CuttingJobOutputStatus.FAILED
+    assert set(statuses.values()) == {CuttingJobOutputStatus.SUCCEEDED}
