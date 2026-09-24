@@ -41,6 +41,16 @@ function job(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function video(overrides: Record<string, unknown> = {}) {
+  return {
+    cutKey: 'cuts/T001/T001_C2_ME_F1.mp4',
+    position: 0,
+    status: 'succeeded',
+    failureReason: null,
+    ...overrides,
+  }
+}
+
 async function mountView() {
   const router = createTestRouter()
   router.push('/analyses')
@@ -119,16 +129,21 @@ describe('AnalysesHistoryView', () => {
         testIds: ['T041', 'T002'],
         status: 'completed_with_errors',
         videos: [
-          { cutKey: 'cuts/T041/T041_C2_ME_F1.mp4', position: 0, status: 'succeeded' },
-          { cutKey: 'cuts/T041/T041_C2_ME_F2.mp4', position: 1, status: 'succeeded' },
-          { cutKey: 'cuts/T002/T002_C2_ME_F1.mp4', position: 2, status: 'succeeded' },
-          { cutKey: 'cuts/T002/T002_C2_ME_F2.mp4', position: 3, status: 'failed' },
+          video({ cutKey: 'cuts/T041/T041_C2_ME_F1.mp4', position: 0 }),
+          video({ cutKey: 'cuts/T041/T041_C2_ME_F2.mp4', position: 1 }),
+          video({ cutKey: 'cuts/T002/T002_C2_ME_F1.mp4', position: 2 }),
+          video({
+            cutKey: 'cuts/T002/T002_C2_ME_F2.mp4',
+            position: 3,
+            status: 'failed',
+            failureReason: 'The analysis did not produce a result for this video.',
+          }),
         ],
       }),
       job({
         id: 41,
         testIds: ['T001'],
-        videos: [{ cutKey: 'cuts/T001/T001_C2_ME_F1.mp4', position: 0, status: 'succeeded' }],
+        videos: [video()],
       }),
     ])
 

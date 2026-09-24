@@ -109,9 +109,7 @@ const failedVideos = computed(
 )
 
 // Issue #92 — see hasTestBreakdown for when it's shown at all.
-const testBreakdown = computed(() =>
-  job.value && hasTestBreakdown(job.value) ? breakdownByTest(job.value) : [],
-)
+const testBreakdown = computed(() => (job.value ? breakdownByTest(job.value) : []))
 
 function filename(cutKey: string): string {
   return cutKey.slice(cutKey.lastIndexOf('/') + 1)
@@ -222,7 +220,7 @@ async function downloadReport() {
         </div>
 
         <table
-          v-if="testBreakdown.length > 0"
+          v-if="hasTestBreakdown(job)"
           data-testid="test-breakdown"
           class="mt-6 w-full text-left text-sm"
         >

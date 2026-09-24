@@ -395,17 +395,19 @@ describe('AnalysisView', () => {
   })
 
   it('updates the per-Test breakdown live while a multi-Test job runs', async () => {
-    getAnalysisMock.mockResolvedValue(
+    const runningJob = (t041Second: string, t002First: string) =>
       job({
         testIds: ['T041', 'T002'],
         status: 'running',
         videos: [
           video({ cutKey: 'cuts/T041/T041_C2_ME_F1.mp4', status: 'succeeded' }),
-          video({ cutKey: 'cuts/T041/T041_C2_ME_F2.mp4', status: 'processing' }),
-          video({ cutKey: 'cuts/T002/T002_C2_ME_F1.mp4', status: 'pending' }),
+          video({ cutKey: 'cuts/T041/T041_C2_ME_F2.mp4', status: t041Second }),
+          video({ cutKey: 'cuts/T002/T002_C2_ME_F1.mp4', status: t002First }),
         ],
-      }),
-    )
+      })
+    getAnalysisMock
+      .mockResolvedValueOnce(runningJob('processing', 'pending'))
+      .mockResolvedValueOnce(runningJob('failed', 'processing'))
 
     const wrapper = await mountView()
 
@@ -413,7 +415,13 @@ describe('AnalysisView', () => {
       ['T041', '1', '0', '2'],
       ['T002', '0', '0', '1'],
     ])
-    expect(wrapper.find('[data-testid="progress-summary"]').text()).toContain('2/3 videos')
+
+    await vi.advanceTimersByTimeAsync(2000)
+
+    expect(breakdownRows(wrapper)).toEqual([
+      ['T041', '1', '1', '2'],
+      ['T002', '0', '0', '1'],
+    ])
   })
 
   it('hides the per-Test breakdown for a cancelled multi-Test job', async () => {
