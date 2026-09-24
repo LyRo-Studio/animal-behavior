@@ -11,7 +11,9 @@ from io import BytesIO
 
 import pytest
 from openpyxl import Workbook
+from sqlalchemy import select
 
+from app.models.audit_log import AuditAction, AuditLog
 from app.models.cutting_job import CuttingJob, CuttingJobStatus
 from app.services.cutting_jobs import (
     MAX_TESTS_PER_BATCH,
@@ -267,3 +269,41 @@ def test_recut_confirmation_is_per_test(db_session, s3_client, media_prober, tmp
     assert isinstance(results[0].error, CutsAlreadyExistError)
     assert results[1].job is not None
     assert results[2].job is not None
+
+
+def test_each_job_gets_its_cutting_started_row_as_it_is_created(
+    db_session, s3_client, media_prober, tmp_path
+):
+    """Ticket #99: not after the whole batch — T003 blows up unexpectedly,
+    yet T001's job (already committed) has its STARTED row."""
+
+    class _ExplodingProber:
+        """Probes T001's upload fine, then fails on T003's (the second)."""
+
+        calls = 0
+
+        def probe(self, path):
+            self.calls += 1
+            if self.calls == 2:
+                raise OSError("unexpected, not a validation error")
+            return media_prober.probe(path)
+
+    submissions = [
+        CuttingJobSubmission(test_id=t, c1_upload_id=_completed_upload(tmp_path, test_id=t))
+        for t in ("T001", "T003")
+    ]
+
+    with pytest.raises(OSError):
+        submit_cutting_job_batch(
+            db_session,
+            requested_by_identity=None,
+            excel_bytes=_workbook_bytes("T001", "T003"),
+            submissions=submissions,
+            upload_root=tmp_path,
+            s3=s3_client,
+            media_prober=_ExplodingProber(),
+        )
+
+    (job,) = db_session.scalars(select(CuttingJob))
+    (row,) = db_session.scalars(select(AuditLog))
+    assert (row.action, row.target) == (AuditAction.CUTTING_STARTED, str(job.id))

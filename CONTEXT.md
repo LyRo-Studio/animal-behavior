@@ -2159,31 +2159,46 @@ Implementation-time judgment calls:
 `target_type="cutting_job"` and the job id as `target`, mirroring the
 `ANALYSIS_*` events:
 
-- **`CUTTING_STARTED`** is written by the API, once per job actually
-  created: one row for `POST /cutting-jobs`, one per created job in a batch
-  (#97). Nothing is written for a rejected Test or for #96's confirmation
-  block, since no job exists. Attribution uses `get_verified_identity`,
-  like `ANALYSIS_STARTED`; `requested_by_identity` stays the plain
-  `get_identity` value.
+- **`CUTTING_STARTED` is written inside `create_cutting_job`, in the same
+  commit as the job,** not by the API afterward the way `ANALYSIS_STARTED`
+  is. Caught in review: the first version wrote the rows in the API once a
+  whole batch (#97) had been processed. But each batch job is committed,
+  and claimable by the worker, as soon as it's created. So a fast-failing
+  job could log `CUTTING_FAILED` before its `CUTTING_STARTED`, and an
+  unexpected error on a later Test left already-created jobs with no
+  `STARTED` row at all. Writing it with the job makes the two atomic. It's
+  still best-effort: `record_audit_event`'s own savepoint means a failed
+  write drops only the audit row, never the job.
+  - Exactly one row per job actually created: none for a rejected Test or
+    #96's confirmation block.
+  - The API passes the verified identity down as
+    `started_by: AuditIdentity`, a small `(identity, verified)` type in
+    `app/services/audit_log.py` wrapping `get_verified_identity`'s pair.
+    `requested_by_identity` stays the plain `get_identity` value.
+  - A direct caller that passes no `started_by`, such as the cutting-worker
+    test doubles, records an unattributed, unverified row.
 - **`CUTTING_COMPLETED`/`CUTTING_FAILED`** are written by the cutting-worker
   through `_finalize_and_audit_job` in `orchestrator.py`. Every finalize
   path goes through it: the normal end, `cut()` raising, and an error
-  escaping entirely. Attribution is the job's own `requested_by_identity`,
-  always with `identity_verified=False` (no live request to verify).
-  There's no `completed_with_errors` counterpart because
-  `CuttingJobStatus` has none (ticket #95). A failed job's
-  `failure_reason` is a count, `"N of M phases failed."`, so a partial
-  failure is distinguishable from a whole-job one without a new action.
-- **Best-effort everywhere.** `record_audit_event` already swallows a
-  failed write. Both new call sites also guard the commit that makes the
-  row durable:
-  - **API:** the job is already committed by `create_cutting_job`, so a
-    failure here can't turn creation into an error response. The analysis
-    endpoint's `_record_verified_audit_event` leaves its commit unguarded.
-  - **Worker:** as in the analysis worker, an audit failure after a job
-    succeeded must never reach `process_next_job`'s catch-all recovery.
-    That would re-fail nothing now (it fails only `pending` outputs since
-    #98), but it would skip discarding the source upload.
+  escaping entirely.
+  - Attribution is the job's own `requested_by_identity`, always with
+    `identity_verified=False` (no live request to verify).
+  - There's no `completed_with_errors` counterpart because
+    `CuttingJobStatus` has none (ticket #95).
+  - A failed job's `failure_reason` is a count, `"N of M Cuts failed."`,
+    counting camera × phase outputs, so a partial failure is
+    distinguishable from a whole-job one without a new action.
+  - As in the analysis worker, the audit write and its commit never
+    propagate. An audit failure after a job succeeded must never reach
+    `process_next_job`'s catch-all recovery, which would skip discarding
+    the source upload.
+- **`AUDIT_TARGET_TYPE = "cutting_job"`** lives in
+  `app/services/cutting_jobs.py`, shared by the backend and the
+  cutting-worker so the two sides can't drift apart.
+- **Not unified with the other call sites:** `analyses.py` and
+  `consolidations.py` each have their own "verified identity, record,
+  commit" helper. Merging those is a separate refactor, not part of this
+  ticket.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`

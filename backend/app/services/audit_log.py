@@ -6,6 +6,7 @@ rather than inserting `AuditLog` rows directly.
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete
@@ -14,6 +15,17 @@ from sqlalchemy.orm import Session
 from app.models.audit_log import AuditAction, AuditLog
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AuditIdentity:
+    """Who an audit event is attributed to, and whether that was verified —
+    `get_verified_identity`'s `(identity, identity_verified)` pair, for a
+    service that records an event on a request's behalf (ticket #99's
+    CUTTING_STARTED). The default is unattributed and unverified."""
+
+    identity: str | None = None
+    verified: bool = False
 
 
 def record_audit_event(

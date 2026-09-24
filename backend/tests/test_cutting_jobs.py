@@ -10,9 +10,13 @@ from io import BytesIO
 
 import pytest
 from openpyxl import Workbook
+from sqlalchemy import select
 
+from app.models.audit_log import AuditAction, AuditLog
 from app.models.cutting_job import CuttingJob, CuttingJobOutputStatus, CuttingJobStatus
+from app.services.audit_log import AuditIdentity
 from app.services.cutting_jobs import (
+    AUDIT_TARGET_TYPE,
     CutsAlreadyExistError,
     CuttingJobNotFoundError,
     DuplicateCameraUploadError,
@@ -427,3 +431,70 @@ def test_get_cutting_job_returns_the_created_job(db_session, s3_client, media_pr
 def test_get_cutting_job_for_unknown_id_raises(db_session):
     with pytest.raises(CuttingJobNotFoundError):
         get_cutting_job(db_session, cutting_job_id=999999)
+
+
+# --- CUTTING_STARTED audit event (ticket #99) ---
+
+
+def test_create_cutting_job_writes_cutting_started_in_the_same_commit(
+    db_session, s3_client, media_prober, tmp_path
+):
+    """Written alongside the job itself, so the row exists before the
+    cutting-worker could ever claim the job (and write its own terminal
+    event)."""
+    job = create_cutting_job(
+        db_session,
+        requested_by_identity="jan.peeters@vives.be",
+        test_id="T001",
+        excel_bytes=_workbook_bytes(reference_camera="C1"),
+        uploads=[_source_video(tmp_path, camera="C1")],
+        s3=s3_client,
+        media_prober=media_prober,
+        started_by=AuditIdentity(identity="jan.peeters@vives.be", verified=True),
+    )
+
+    (row,) = db_session.scalars(select(AuditLog))
+    assert row.action == AuditAction.CUTTING_STARTED
+    assert row.target_type == AUDIT_TARGET_TYPE == "cutting_job"
+    assert row.target == str(job.id)
+    assert row.identity == "jan.peeters@vives.be"
+    assert row.identity_verified is True
+
+
+def test_create_cutting_job_writes_no_audit_row_when_rejected(
+    db_session, s3_client, media_prober, tmp_path
+):
+    with pytest.raises(ReferenceCameraMismatchError):
+        create_cutting_job(
+            db_session,
+            requested_by_identity=None,
+            test_id="T001",
+            excel_bytes=_workbook_bytes(reference_camera="C2"),
+            uploads=[_source_video(tmp_path, camera="C1")],
+            s3=s3_client,
+            media_prober=media_prober,
+        )
+
+    assert db_session.scalar(select(AuditLog)) is None
+
+
+def test_a_failed_cutting_started_write_never_fails_job_creation(
+    db_session, s3_client, media_prober, tmp_path, monkeypatch
+):
+    def _raise(*args, **kwargs):
+        raise RuntimeError("simulated audit write failure")
+
+    monkeypatch.setattr("app.services.audit_log.record_required_audit_event", _raise)
+
+    job = create_cutting_job(
+        db_session,
+        requested_by_identity=None,
+        test_id="T001",
+        excel_bytes=_workbook_bytes(reference_camera="C1"),
+        uploads=[_source_video(tmp_path, camera="C1")],
+        s3=s3_client,
+        media_prober=media_prober,
+    )
+
+    assert get_cutting_job(db_session, cutting_job_id=job.id).status == CuttingJobStatus.QUEUED
+    assert db_session.scalar(select(AuditLog)) is None

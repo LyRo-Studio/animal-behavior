@@ -357,21 +357,33 @@ def test_an_error_escaping_after_the_cut_keeps_cuts_already_committed_live(
 def _audit_rows_for(db_session, job) -> list[AuditLog]:
     return list(
         db_session.scalars(
-            select(AuditLog).where(
-                AuditLog.target_type == "cutting_job", AuditLog.target == str(job.id)
-            )
+            select(AuditLog)
+            .where(AuditLog.target_type == "cutting_job", AuditLog.target == str(job.id))
+            .order_by(AuditLog.id)
         )
     )
 
 
-def test_a_succeeded_job_writes_a_cutting_completed_audit_row(db_session, work_root, uploads_root):
+def _terminal_audit_rows_for(db_session, job) -> list[AuditLog]:
+    """Every row but the CUTTING_STARTED one `create_cutting_job` writes."""
+    return [
+        row for row in _audit_rows_for(db_session, job) if row.action != AuditAction.CUTTING_STARTED
+    ]
+
+
+def test_a_succeeded_job_writes_cutting_started_then_cutting_completed(
+    db_session, work_root, uploads_root
+):
+    """The full sequence for one job: STARTED from creation (written with
+    the job by `create_cutting_job`), then the worker's terminal event."""
     job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
 
     process_next_job(
         db_session, s3_client=FakeS3Client(), video_cutter=FakeVideoCutter(), work_root=work_root
     )
 
-    (row,) = _audit_rows_for(db_session, job)
+    started, row = _audit_rows_for(db_session, job)
+    assert started.action == AuditAction.CUTTING_STARTED
     assert row.action == AuditAction.CUTTING_COMPLETED
     # Worker-driven: the job's own attribution, never freshly verified.
     assert row.identity == "jan.peeters@vives.be"
@@ -391,9 +403,9 @@ def test_a_job_with_a_failed_phase_writes_a_cutting_failed_audit_row(
         work_root=work_root,
     )
 
-    (row,) = _audit_rows_for(db_session, job)
+    (row,) = _terminal_audit_rows_for(db_session, job)
     assert row.action == AuditAction.CUTTING_FAILED
-    assert row.failure_reason == "1 of 30 phases failed."
+    assert row.failure_reason == "1 of 30 Cuts failed."
 
 
 def test_a_whole_job_failure_writes_a_cutting_failed_audit_row(db_session, work_root, uploads_root):
@@ -406,9 +418,9 @@ def test_a_whole_job_failure_writes_a_cutting_failed_audit_row(db_session, work_
         work_root=work_root,
     )
 
-    (row,) = _audit_rows_for(db_session, job)
+    (row,) = _terminal_audit_rows_for(db_session, job)
     assert row.action == AuditAction.CUTTING_FAILED
-    assert row.failure_reason == "15 of 15 phases failed."
+    assert row.failure_reason == "15 of 15 Cuts failed."
     assert "could not read source video" not in row.failure_reason
 
 
@@ -424,9 +436,9 @@ def test_an_error_escaping_the_run_still_writes_exactly_one_cutting_failed_row(
         work_root=work_root,
     )
 
-    (row,) = _audit_rows_for(db_session, job)
+    (row,) = _terminal_audit_rows_for(db_session, job)
     assert row.action == AuditAction.CUTTING_FAILED
-    assert row.failure_reason == "1 of 15 phases failed."
+    assert row.failure_reason == "1 of 15 Cuts failed."
 
 
 def test_a_failed_audit_write_after_success_never_fails_the_job(
@@ -451,4 +463,4 @@ def test_a_failed_audit_write_after_success_never_fails_the_job(
     assert job.status == CuttingJobStatus.SUCCEEDED
     assert all(o.status == CuttingJobOutputStatus.SUCCEEDED for o in job.outputs)
     assert not Path(upload_path).parent.exists()
-    assert _audit_rows_for(db_session, job) == []
+    assert _terminal_audit_rows_for(db_session, job) == []

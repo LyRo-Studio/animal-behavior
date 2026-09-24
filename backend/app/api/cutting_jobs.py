@@ -5,7 +5,6 @@ created job just sits `queued` (mirrors ticket #45's own scoping for
 AnalysisJob).
 """
 
-import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -23,7 +22,6 @@ from app.api.deps import (
 )
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.audit_log import AuditAction
 from app.models.cutting_job import CuttingJob
 from app.schemas.cutting_jobs import (
     CuttingJobBatchEntries,
@@ -34,7 +32,7 @@ from app.schemas.cutting_jobs import (
     CuttingUploadOut,
     StartCuttingUploadRequest,
 )
-from app.services.audit_log import record_audit_event
+from app.services.audit_log import AuditIdentity
 from app.services.cutting_jobs import (
     CUTTING_JOB_VALIDATION_ERRORS,
     CutsAlreadyExistError,
@@ -77,8 +75,6 @@ from app.services.timestamp_excel import (
     MalformedTimestampCellError,
     TestRowNotFoundError,
 )
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/cutting-jobs", tags=["cutting-jobs"])
 
@@ -253,35 +249,6 @@ def _within_excel_size_limit(excel_bytes: bytes) -> bytes:
     return excel_bytes
 
 
-def _record_cutting_started(db: Session, request: Request, jobs: list[CuttingJob]) -> None:
-    """Write one CUTTING_STARTED audit row per newly created job (ticket
-    #99), attributed with the audit log's own verified identity
-    (`get_verified_identity`, like ANALYSIS_STARTED), then commit.
-
-    Best-effort, like every audit event: `record_audit_event` already
-    swallows a failed write, and the commit here is guarded too. Each job
-    was already committed by `create_cutting_job`, so a failure here can
-    never turn its creation into an error response.
-    """
-    if not jobs:
-        return
-    verified_identity, identity_verified = get_verified_identity(request)
-    for job in jobs:
-        record_audit_event(
-            db,
-            identity=verified_identity,
-            identity_verified=identity_verified,
-            action=AuditAction.CUTTING_STARTED,
-            target_type="cutting_job",
-            target=str(job.id),
-        )
-    try:
-        db.commit()
-    except Exception:
-        logger.exception("failed to commit CUTTING_STARTED audit events")
-        db.rollback()
-
-
 def _enforce_create_rate_limit(limiter: RateLimiter, identity: str | None) -> None:
     """One attempt per submission, single or batch alike (CONTEXT.md's
     ticket #97 notes): a batch is one submission, however many Tests it
@@ -327,7 +294,7 @@ async def create_cutting_job_endpoint(
     )
 
     try:
-        job = submit_cutting_job(
+        return submit_cutting_job(
             db,
             submission=CuttingJobSubmission(
                 test_id=test_id,
@@ -340,6 +307,7 @@ async def create_cutting_job_endpoint(
             upload_root=root,
             s3=s3,
             media_prober=media_prober,
+            started_by=AuditIdentity(*get_verified_identity(request)),
         )
     except CUTTING_JOB_VALIDATION_ERRORS as exc:
         rejection = _describe_rejection(exc)
@@ -347,9 +315,6 @@ async def create_cutting_job_endpoint(
         if rejection.code is not None:
             content["code"] = rejection.code
         return JSONResponse(status_code=rejection.status_code, content=content)
-
-    _record_cutting_started(db, request, [job])
-    return job
 
 
 _batch_entries_adapter = TypeAdapter(CuttingJobBatchEntries)
@@ -421,14 +386,13 @@ def create_cutting_job_batch_endpoint(
             upload_root=root,
             s3=s3,
             media_prober=media_prober,
+            started_by=AuditIdentity(*get_verified_identity(request)),
         )
     except DuplicateTestInBatchError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"{exc.test_id} appears more than once in this batch.",
         ) from None
-
-    _record_cutting_started(db, request, [result.job for result in results if result.job])
 
     return CuttingJobBatchOut(
         results=[

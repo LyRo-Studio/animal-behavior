@@ -22,7 +22,11 @@ from app.models.cutting_job import (
     CuttingJobStatus,
 )
 from app.services.audit_log import record_audit_event
-from app.services.cutting_jobs import claim_next_queued_cutting_job, finalize_cutting_job
+from app.services.cutting_jobs import (
+    AUDIT_TARGET_TYPE,
+    claim_next_queued_cutting_job,
+    finalize_cutting_job,
+)
 from app.services.s3_client import S3Client
 from sqlalchemy.orm import Session
 
@@ -198,7 +202,7 @@ def _finalize_and_audit_job(db: Session, job: CuttingJob) -> CuttingJob:
             1 for output in job.outputs if output.status == CuttingJobOutputStatus.FAILED
         )
         action = AuditAction.CUTTING_FAILED
-        failure_reason = f"{failed_count} of {len(job.outputs)} phases failed."
+        failure_reason = f"{failed_count} of {len(job.outputs)} Cuts failed."
 
     try:
         record_audit_event(
@@ -206,7 +210,7 @@ def _finalize_and_audit_job(db: Session, job: CuttingJob) -> CuttingJob:
             identity=job.requested_by_identity,
             identity_verified=False,
             action=action,
-            target_type="cutting_job",
+            target_type=AUDIT_TARGET_TYPE,
             target=str(job.id),
             failure_reason=failure_reason,
         )
