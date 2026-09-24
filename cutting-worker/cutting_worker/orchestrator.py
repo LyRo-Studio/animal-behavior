@@ -11,6 +11,7 @@ tests — never needs the real S3 bucket or `assist`'s ffmpeg/scipy stack.
 
 import logging
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 from app.models.cutting_job import (
@@ -84,26 +85,37 @@ def process_next_job(
 
 def _fail_after_unhandled_error(db: Session, job: CuttingJob) -> None:
     """Best-effort recovery from an exception that escaped `_run_claimed_job`
-    entirely — mirrors worker/orchestrator.py's `_fail_after_unhandled_error`:
-    fails *every* output (including one already marked SUCCEEDED before the
-    error hit, e.g. uploading one Cut succeeded but a later one then failed)
-    and finalizes accordingly. A CuttingJobOutput with no durable, retrievable
-    result is operationally a failure regardless of what its in-memory status
-    said a moment earlier.
+    entirely (e.g. an S3 upload failing during the post-run sweep), then
+    finalizes accordingly.
 
-    No explicit `db.rollback()` needed first — same SQLAlchemy 2.0 auto-
-    rollback-on-failed-commit reasoning as the analysis worker's version.
+    Fails only what's still `pending`. An output is only ever marked
+    SUCCEEDED by `_upload_output`, straight after its Cut's S3 upload
+    returned, so every `succeeded` output — committed live (ticket #98) or
+    still only in memory from the post-run sweep — has a durable,
+    retrievable Cut and keeps that status. (The analysis worker's version
+    fails every output instead.) No `db.rollback()` first — same SQLAlchemy
+    2.0 auto-rollback-on-failed-commit reasoning as the analysis worker's
+    version.
 
     If even this fails, the exception propagates and crashes the process;
     `restart: unless-stopped` plus `requeue_stuck_running_cutting_jobs` on
     the next startup is the correct fallback, not a second recovery layer.
     """
-    for output in job.outputs:
-        output.status = CuttingJobOutputStatus.FAILED
-        output.failure_reason = _BATCH_FAILURE_REASON
-        db.add(output)
-    db.commit()
+    _fail_pending_outputs(db, job, _BATCH_FAILURE_REASON)
     finalize_cutting_job(db, job)
+
+
+def _fail_pending_outputs(db: Session, job: CuttingJob, failure_reason: str) -> None:
+    """Mark every still-`pending` output failed and commit. An output
+    already `succeeded` was uploaded and committed, so it keeps that status
+    even though the job as a whole now fails."""
+    for output in job.outputs:
+        if output.status == CuttingJobOutputStatus.PENDING:
+            output.status = CuttingJobOutputStatus.FAILED
+            output.failure_reason = failure_reason
+            db.add(output)
+    db.commit()
+    db.refresh(job)
 
 
 def _run_claimed_job(
@@ -122,11 +134,61 @@ def _run_claimed_job(
 
     outputs_by_filename = {_expected_output_filename(job, output): output for output in job.outputs}
 
-    def on_output(local_path: Path) -> None:
-        """Live per-phase progress (ticket #98): each Cut is uploaded and
-        its CuttingJobOutput marked succeeded — and committed, so
-        `GET /cutting-jobs/{id}` sees it — as soon as the cutter reports
-        its file written, while the job is still `running`."""
+    try:
+        video_cutter.cut(
+            test_id=job.test_id,
+            reference_camera=job.reference_camera,
+            phase_timestamps=job.phase_timestamps,
+            source_paths=source_paths,
+            output_dir=output_dir,
+            on_output_written=_make_output_written_callback(
+                db, job, outputs_by_filename, s3_client=s3_client
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "cutting_job_id=%s test_id=%s video_cutter.cut failed before completing every output",
+            job.id,
+            job.test_id,
+        )
+        _fail_pending_outputs(db, job, _BATCH_FAILURE_REASON)
+        finalize_cutting_job(db, job)
+        return
+
+    # Fallback sweep of the output directory, for anything the cutter wrote
+    # without reporting it; whatever's still pending after that was never
+    # produced. Failures are only knowable here, once the cutter is done —
+    # a missing file is an absence, not an event to report.
+    for filename, output in outputs_by_filename.items():
+        local_path = output_dir / filename
+        if output.status == CuttingJobOutputStatus.PENDING and local_path.is_file():
+            _upload_output(db, job, output, local_path, s3_client=s3_client)
+    _fail_pending_outputs(db, job, _PIPELINE_FAILURE_REASON)
+
+    finalized = finalize_cutting_job(db, job)
+    if finalized.status == CuttingJobStatus.SUCCEEDED:
+        _discard_source_uploads(job)
+
+
+def _make_output_written_callback(
+    db: Session,
+    job: CuttingJob,
+    outputs_by_filename: dict[str, CuttingJobOutput],
+    *,
+    s3_client: S3Client,
+) -> Callable[[Path], None]:
+    """Build the `on_output_written` callback passed into `VideoCutter.cut`
+    (ticket #98's live per-phase progress; mirrors worker/orchestrator.py's
+    `_make_progress_callback`). Each reported Cut is uploaded and its
+    CuttingJobOutput marked succeeded — and committed, so
+    `GET /cutting-jobs/{id}` sees it — while the job is still `running`.
+
+    A file no output expects is logged and ignored; a repeat report for an
+    output no longer `pending` is ignored. An upload error propagates out of
+    `cut()` (see `VideoCutter.cut`) and fails the rest of the job.
+    """
+
+    def on_output_written(local_path: Path) -> None:
         output = outputs_by_filename.get(local_path.name)
         if output is None:
             logger.warning(
@@ -138,54 +200,7 @@ def _run_claimed_job(
         _upload_output(db, job, output, local_path, s3_client=s3_client)
         db.commit()
 
-    try:
-        video_cutter.cut(
-            test_id=job.test_id,
-            reference_camera=job.reference_camera,
-            phase_timestamps=job.phase_timestamps,
-            source_paths=source_paths,
-            output_dir=output_dir,
-            on_output=on_output,
-        )
-    except Exception:
-        logger.exception(
-            "cutting_job_id=%s test_id=%s video_cutter.cut failed before completing every output",
-            job.id,
-            job.test_id,
-        )
-        # Only what's still pending: a Cut already uploaded and committed
-        # live (ticket #98) did durably succeed, even though the job as a
-        # whole now can't.
-        for output in job.outputs:
-            if output.status == CuttingJobOutputStatus.PENDING:
-                output.status = CuttingJobOutputStatus.FAILED
-                output.failure_reason = _BATCH_FAILURE_REASON
-                db.add(output)
-        db.commit()
-        db.refresh(job)
-        finalize_cutting_job(db, job)
-        return
-
-    # Fallback sweep of the output directory, for anything the cutter wrote
-    # without reporting it; whatever's still pending after that was never
-    # produced. Failures are only knowable here, once the cutter is done —
-    # a missing file is an absence, not an event to report.
-    for filename, output in outputs_by_filename.items():
-        if output.status != CuttingJobOutputStatus.PENDING:
-            continue
-        local_path = output_dir / filename
-        if local_path.is_file():
-            _upload_output(db, job, output, local_path, s3_client=s3_client)
-        else:
-            output.status = CuttingJobOutputStatus.FAILED
-            output.failure_reason = _PIPELINE_FAILURE_REASON
-            db.add(output)
-    db.commit()
-    db.refresh(job)
-
-    finalized = finalize_cutting_job(db, job)
-    if finalized.status == CuttingJobStatus.SUCCEEDED:
-        _discard_source_uploads(job)
+    return on_output_written
 
 
 def _upload_output(

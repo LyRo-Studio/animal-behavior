@@ -1,4 +1,4 @@
-"""`RealVideoCutter.cut`'s own per-phase loop (ticket #98's `on_output`),
+"""`RealVideoCutter.cut`'s own per-phase loop (ticket #98's `on_output_written`),
 with `assist`'s ffmpeg/scipy-backed modules stubbed in `sys.modules` — CI
 never installs requirements-assist.txt, and the real thing is covered by the
 opt-in test_real_assist_integration.py instead.
@@ -41,7 +41,7 @@ def _stub_heavy_assist_modules(monkeypatch):
         monkeypatch.setitem(sys.modules, name, module)
 
 
-def _cut(tmp_path: Path, on_output) -> Path:
+def _cut(tmp_path: Path, on_output_written) -> Path:
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")
     output_dir = tmp_path / "output"
@@ -51,7 +51,7 @@ def _cut(tmp_path: Path, on_output) -> Path:
         phase_timestamps={"ME_F1": 0, "ME_F2": 30, "ME_F3": 60, "ME_F4": 90},
         source_paths={"C1": source},
         output_dir=output_dir,
-        on_output=on_output,
+        on_output_written=on_output_written,
     )
     return output_dir
 
@@ -59,12 +59,12 @@ def _cut(tmp_path: Path, on_output) -> Path:
 def test_each_phase_is_reported_once_its_file_is_written(tmp_path):
     reported: list[Path] = []
 
-    def on_output(path: Path) -> None:
+    def on_output_written(path: Path) -> None:
         # Already complete on disk when reported, never ahead of it.
         assert path.read_bytes() == b"cut"
         reported.append(path)
 
-    _cut(tmp_path, on_output)
+    _cut(tmp_path, on_output_written)
 
     # ME_F4 has no next timestamp to bound its end, so it's never produced.
     assert [path.name for path in reported] == [
@@ -86,8 +86,8 @@ def test_a_phase_that_fails_to_slice_is_not_reported_and_the_rest_carry_on(tmp_p
 def test_an_error_raised_by_on_output_propagates_instead_of_being_taken_as_a_slice_failure(
     tmp_path,
 ):
-    def on_output(path: Path) -> None:
+    def on_output_written(path: Path) -> None:
         raise ConnectionError("simulated upload failure")
 
     with pytest.raises(ConnectionError):
-        _cut(tmp_path, on_output)
+        _cut(tmp_path, on_output_written)

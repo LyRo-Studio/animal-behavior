@@ -2082,11 +2082,11 @@ the progress UI is ticket #101.** Each `CuttingJobOutput` now goes from
 `GET /cutting-jobs/{id}` shows that as it happens. `assist` is unchanged.
 Implementation-time judgment calls:
 
-- **Approved-by-reasoning deviation: an `on_output(path)` callback, not a
+- **Approved-by-reasoning deviation: an `on_output_written(path)` callback, not a
   directory watcher.** Issue #93 said to watch the output directory
   because `assist` has no progress callback. Since ticket #95, though, the
   per-phase loop that calls `assist`'s `Slicer` is this app's own code
-  (`RealVideoCutter.cut`). So `VideoCutter.cut` now takes `on_output`, called
+  (`RealVideoCutter.cut`). So `VideoCutter.cut` now takes `on_output_written`, called
   with each phase's file path once `Slicer.slice` has returned and the file
   exists. That still honours the reason behind the decision (no change to
   `assist`), and it avoids two problems a real watcher has:
@@ -2097,7 +2097,7 @@ Implementation-time judgment calls:
 
   The signal still means "this phase's file is now complete in the output
   directory".
-- **Succeeded means uploaded, live.** The orchestrator's `on_output` uploads
+- **Succeeded means uploaded, live.** The orchestrator's `on_output_written` uploads
   that Cut to `cuts/<Test>/`, marks its output `succeeded` and commits
   straight away, one commit per phase. That keeps `finalize_cutting_job`'s
   rule that a succeeded output is durably in S3. Uploads are now spread
@@ -2110,15 +2110,41 @@ Implementation-time judgment calls:
   scan runs as before. It still picks up any file the cutter wrote without
   reporting, and marks everything left `failed`. So the live signal is an
   optimisation; the scan remains the source of truth for what was produced.
-- **A mid-run crash now fails only what's still pending.** If `cut()` raises
-  partway (for example an S3 upload inside `on_output` fails; it propagates
-  rather than being taken for that phase's own slicing failure), outputs
-  already uploaded and committed stay `succeeded`, and the job still ends
-  `failed`. Before this ticket nothing was uploaded until `cut()` returned,
-  so "fail everything" was accurate. `_fail_after_unhandled_error` (an error
-  escaping entirely) still fails every output, as its docstring explains.
-  Crash recovery (`requeue_stuck_running_cutting_jobs`) already resets
-  outputs to `pending`, and a rerun overwrites the same keys.
+- **A mid-run failure now fails only what's still pending**
+  (`_fail_pending_outputs`, used on both failure paths). This covers two
+  cases:
+  - `cut()` raising partway, for example an S3 upload inside
+    `on_output_written` failing. That error propagates rather than being
+    taken for the phase's own slicing failure, and it stops the rest of the
+    slicing, which suits a real S3 outage.
+  - An error escaping `_run_claimed_job` entirely
+    (`_fail_after_unhandled_error`), such as an upload failing during the
+    post-run sweep.
+
+  In both cases `succeeded` outputs keep that status and the job still ends
+  `failed`. That's safe because an output is only ever marked `succeeded`
+  by `_upload_output`, straight after its upload returned, whether that was
+  committed live or is still only in memory from the sweep. Before this
+  ticket nothing was uploaded until `cut()` returned, so "fail everything"
+  was accurate; the analysis worker still fails every output. Caught in
+  review: the escape path first failed every output, including Cuts already
+  committed live. A rollback-first fix was rejected, since the status is
+  already trustworthy without one. It also can't run under the per-test
+  outer-transaction fixture, where `Session.rollback()` undoes the whole
+  test transaction.
+
+  Consequence for a re-cut (#96): a job that fails partway can leave
+  `cuts/<Test>/` holding a mix of new and earlier Cuts. That was already
+  true before this ticket whenever a single phase failed. Retrying the job
+  overwrites the same keys. Crash recovery
+  (`requeue_stuck_running_cutting_jobs`) already resets outputs to
+  `pending`.
+- **Testing "committed live" without a second connection:** every test runs
+  inside one rolled-back transaction, so no separate connection can see
+  even committed rows. `test_outputs_succeed_one_by_one_while_the_job_is_still_running`
+  instead reads with autoflush off, so a change held only in memory stays
+  invisible, and counts real `commit()` calls per phase. It was checked to
+  fail with the commit removed or replaced by a flush.
 - **`RealVideoCutter`'s loop is now unit-tested** (`test_video_cutter.py`),
   with `assist`'s ffmpeg/scipy-backed modules stubbed in `sys.modules`,
   since CI never installs `requirements-assist.txt`. The opt-in real test

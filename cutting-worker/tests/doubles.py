@@ -80,15 +80,17 @@ class FakeVideoCutter:
     set, is raised before anything is written, simulating a whole-job
     failure (e.g. audio cross-correlation failing outright).
 
-    Each file is written one at a time and reported through `on_output`
-    (ticket #98), unless `report_outputs` is False (a cutter that writes but
-    never reports). `after_each_output`, if set, is called with each file's
-    path right after it's reported — a test's window into the job mid-run.
+    Each file is written one at a time and reported through
+    `on_output_written` (ticket #98), except the (camera, phase key) pairs in
+    `unreported_outputs`: written, never reported, left for the
+    orchestrator's post-run directory scan. `after_each_output`, if set, is
+    called with each file's path right after it's written (and reported) —
+    a test's window into the job mid-run.
     """
 
     missing_outputs: frozenset[tuple[str, str]] = field(default_factory=frozenset)
     raises: Exception | None = None
-    report_outputs: bool = True
+    unreported_outputs: frozenset[tuple[str, str]] = field(default_factory=frozenset)
     after_each_output: Callable[[Path], None] | None = None
     calls: list[dict] = field(default_factory=list)
 
@@ -100,7 +102,7 @@ class FakeVideoCutter:
         phase_timestamps: dict[str, int],
         source_paths: dict[str, Path],
         output_dir: Path,
-        on_output: Callable[[Path], None],
+        on_output_written: Callable[[Path], None],
     ) -> None:
         self.calls.append(
             {
@@ -124,8 +126,8 @@ class FakeVideoCutter:
                     continue
                 output_file = output_dir / f"{test_id}_{camera}_{phase_name}.mp4"
                 output_file.write_bytes(b"fake-cut-bytes")
-                if self.report_outputs:
-                    on_output(output_file)
+                if (camera, phase_name) not in self.unreported_outputs:
+                    on_output_written(output_file)
                 if self.after_each_output is not None:
                     self.after_each_output(output_file)
 

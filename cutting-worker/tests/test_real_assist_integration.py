@@ -75,7 +75,7 @@ def test_real_video_cutter_slices_a_real_source_pair_with_ffmpeg(tmp_path: Path)
         phase_timestamps={"ME_F1": 0, "ME_F2": 30},
         source_paths={"C1": c1_path, "C2": c2_path},
         output_dir=output_dir,
-        on_output=reported.append,
+        on_output_written=reported.append,
     )
 
     assert (output_dir / "T001_C1_ME_F1.mp4").is_file()
