@@ -41,6 +41,16 @@ function job(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function video(overrides: Record<string, unknown> = {}) {
+  return {
+    cutKey: 'cuts/T001/T001_C2_ME_F1.mp4',
+    position: 0,
+    status: 'succeeded',
+    failureReason: null,
+    ...overrides,
+  }
+}
+
 async function mountView() {
   const router = createTestRouter()
   router.push('/analyses')
@@ -108,5 +118,38 @@ describe('AnalysesHistoryView', () => {
     const wrapper = await mountView()
 
     expect(wrapper.text()).toContain('Failed to load analyses.')
+  })
+
+  // Issue #92: "T041: 8/8, T002: 6/7" — succeeded/total per Test, only for
+  // a job spanning more than one Test.
+  it('shows succeeded/total per Test for a multi-Test job only', async () => {
+    listAnalysesMock.mockResolvedValue([
+      job({
+        id: 42,
+        testIds: ['T041', 'T002'],
+        status: 'completed_with_errors',
+        videos: [
+          video({ cutKey: 'cuts/T041/T041_C2_ME_F1.mp4', position: 0 }),
+          video({ cutKey: 'cuts/T041/T041_C2_ME_F2.mp4', position: 1 }),
+          video({ cutKey: 'cuts/T002/T002_C2_ME_F1.mp4', position: 2 }),
+          video({
+            cutKey: 'cuts/T002/T002_C2_ME_F2.mp4',
+            position: 3,
+            status: 'failed',
+            failureReason: 'The analysis did not produce a result for this video.',
+          }),
+        ],
+      }),
+      job({
+        id: 41,
+        testIds: ['T001'],
+        videos: [video()],
+      }),
+    ])
+
+    const wrapper = await mountView()
+
+    const breakdowns = wrapper.findAll('[data-testid="analysis-history-breakdown"]')
+    expect(breakdowns.map((b) => b.text())).toEqual(['T041: 2/2, T002: 1/2'])
   })
 })
