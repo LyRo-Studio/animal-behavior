@@ -5,11 +5,14 @@ tests can inject a fake implementation of `DogTraceRunner` (see
 `dogtrace` package.
 """
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
 from app.services.media_browser import _TEST_ID_RE
+
+logger = logging.getLogger(__name__)
 
 # Called by `dogtrace.runner.run_reporting` (as of dogtrace 1.1.1, ticket
 # #48) once before and once after each video: `progress(video_path,
@@ -106,7 +109,12 @@ class RealDogTraceRunner:
         for test_id, test_rows in rows.groupby("info_test_id", sort=True):
             # Only ever a real Test id becomes a directory name — the value
             # comes from a file, not from anything this worker validated.
-            if not isinstance(test_id, str) or not _TEST_ID_RE.match(test_id):
+            if not isinstance(test_id, str) or not _TEST_ID_RE.fullmatch(test_id):
+                logger.warning(
+                    "skipping %d combined-report row(s) with unexpected info_test_id %r",
+                    len(test_rows),
+                    test_id,
+                )
                 continue
             test_dir = output_dir / test_id
             test_dir.mkdir(exist_ok=True)

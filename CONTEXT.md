@@ -1597,7 +1597,8 @@ S3 prefix and a per-Test report split for jobs spanning more than one Test.
   (index=False)`), importing pandas lazily like `dogtrace` itself, since
   it's only present in the worker image. A group whose `info_test_id`
   doesn't match the Test id pattern (`media_browser._TEST_ID_RE`) is
-  skipped, never turned into a directory name — the value comes from a file.
+  skipped with a warning, never turned into a directory name — the value
+  comes from a file.
   `video_paths` is accepted per the Protocol but unused by the real
   implementation; only `FakeDogTraceRunner` derives Test ids from it.
 - **Verified against real dogtrace output:** the opt-in `real_gpu` test

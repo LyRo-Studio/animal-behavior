@@ -111,11 +111,7 @@ def test_real_dogtrace_runner_processes_a_real_c2_cut_on_a_real_gpu(tmp_path: Pa
     client = _real_s3_client()
     cut_key = _any_real_c2_cut_key(client)
 
-    input_dir = tmp_path / "input"
-    input_dir.mkdir()
-    local_path = input_dir / Path(cut_key).name
-    client.download_file(cut_key, local_path)
-
+    local_path = _download_to(client, cut_key, tmp_path / "input")
     output_dir = tmp_path / "output"
     events: list[tuple[str, str]] = []
 

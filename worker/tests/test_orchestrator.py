@@ -46,8 +46,13 @@ def _create_multi_test_job(db_session, s3_client: FakeS3Client, cuts_by_test) ->
     )
 
 
-def _report_keys(s3_client: FakeS3Client) -> set[str]:
-    return {key for key in s3_client.objects if key.startswith("reports/")}
+def _uploaded_reports(s3_client: FakeS3Client) -> set[str]:
+    """Every combined or per-Test `casiop_report.xlsx` uploaded so far."""
+    return {
+        key
+        for key in s3_client.objects
+        if key.startswith("reports/") and key.endswith("/casiop_report.xlsx")
+    }
 
 
 def _audit_rows_for(db_session, job: AnalysisJob) -> list[AuditLog]:
@@ -97,8 +102,7 @@ def test_process_next_job_all_videos_succeed_completes_and_uploads_report(db_ses
 
     # Ticket #91: the analysis-id-first prefix applies to single-Test jobs
     # too, but only the combined report is produced — no per-Test split.
-    reports = {key for key in _report_keys(s3_client) if key.endswith("casiop_report.xlsx")}
-    assert reports == {f"reports/{job.id}/casiop_report.xlsx"}
+    assert _uploaded_reports(s3_client) == {f"reports/{job.id}/casiop_report.xlsx"}
     assert dogtrace_runner.split_calls == []
     assert not (work_root / str(job.id)).exists()
 
@@ -556,8 +560,7 @@ def test_process_next_job_multi_test_job_uploads_combined_and_per_test_reports(
     db_session.refresh(job)
     assert job.status == AnalysisJobStatus.COMPLETED
     assert job.report_s3_prefix == f"reports/{job.id}/"
-    reports = {key for key in _report_keys(s3_client) if key.endswith("casiop_report.xlsx")}
-    assert reports == {
+    assert _uploaded_reports(s3_client) == {
         f"reports/{job.id}/casiop_report.xlsx",
         f"reports/{job.id}/T001/casiop_report.xlsx",
         f"reports/{job.id}/T002/casiop_report.xlsx",
@@ -595,5 +598,4 @@ def test_process_next_job_failed_per_test_split_keeps_the_combined_report(db_ses
     assert job.status == AnalysisJobStatus.COMPLETED
     assert all(video.status == AnalysisJobVideoStatus.SUCCEEDED for video in job.videos)
     assert job.report_s3_prefix == f"reports/{job.id}/"
-    reports = {key for key in _report_keys(s3_client) if key.endswith("casiop_report.xlsx")}
-    assert reports == {f"reports/{job.id}/casiop_report.xlsx"}
+    assert _uploaded_reports(s3_client) == {f"reports/{job.id}/casiop_report.xlsx"}
