@@ -13,6 +13,7 @@ from io import BytesIO
 from openpyxl import Workbook
 
 from app.core.config import settings
+from app.models.cutting_job import CuttingJob
 from tests.helpers import identity_headers
 
 _CONDITIONS = ("ME", "ZE")
@@ -338,6 +339,73 @@ def test_create_cutting_job_rejects_an_s3_filename_collision(client, s3_client):
     )
 
     assert response.status_code == 409
+
+
+def test_create_cutting_job_asks_for_confirmation_before_recutting_a_test_with_cuts(
+    client, s3_client, db_session
+):
+    """Ticket #96: a distinct 409 (machine-readable `code`, still a plain
+    `detail` string) — not the source-collision 409 above, and not a job."""
+    upload = _start_upload(client, size=4)
+    _upload_all_bytes(client, upload["upload_id"], b"data")
+    s3_client.objects["cuts/T001/T001_C1_ME_F1.mp4"] = b"an earlier cut"
+    excel = _excel_bytes(reference_camera="C1")
+
+    response = client.post(
+        "/api/cutting-jobs",
+        data={"test_id": "T001", "c1_upload_id": upload["upload_id"]},
+        files={"excel": ("timestamps.xlsx", excel, "application/octet-stream")},
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "cuts_already_exist"
+    assert isinstance(body["detail"], str)
+    assert db_session.query(CuttingJob).count() == 0
+
+
+def test_create_cutting_job_recuts_once_overwrite_is_confirmed(client, s3_client):
+    """The confirmed follow-up reuses the very same upload — the blocked
+    first request consumed nothing."""
+    upload = _start_upload(client, size=4)
+    _upload_all_bytes(client, upload["upload_id"], b"data")
+    s3_client.objects["cuts/T001/T001_C1_ME_F1.mp4"] = b"an earlier cut"
+    excel = _excel_bytes(reference_camera="C1")
+    request = {
+        "data": {"test_id": "T001", "c1_upload_id": upload["upload_id"]},
+        "files": {"excel": ("timestamps.xlsx", excel, "application/octet-stream")},
+    }
+    blocked = client.post("/api/cutting-jobs", **request)
+    assert blocked.status_code == 409
+
+    confirmed = client.post(
+        "/api/cutting-jobs",
+        data={**request["data"], "confirm_overwrite": "true"},
+        files=request["files"],
+    )
+
+    assert confirmed.status_code == 201, confirmed.text
+    assert confirmed.json()["status"] == "queued"
+
+
+def test_source_collision_conflict_is_distinguishable_from_the_recut_confirmation(
+    client, s3_client
+):
+    """The upload-time collision is never overridable — `confirm_overwrite`
+    doesn't bypass it, and its 409 carries no confirmation `code`."""
+    upload = _start_upload(client, size=4, filename="T001_C1_source.mp4")
+    _upload_all_bytes(client, upload["upload_id"], b"data")
+    s3_client.objects["source/T001/T001_C1_source.mp4"] = b"already there"
+    excel = _excel_bytes(reference_camera="C1")
+
+    response = client.post(
+        "/api/cutting-jobs",
+        data={"test_id": "T001", "c1_upload_id": upload["upload_id"], "confirm_overwrite": "true"},
+        files={"excel": ("timestamps.xlsx", excel, "application/octet-stream")},
+    )
+
+    assert response.status_code == 409
+    assert "code" not in response.json()
 
 
 def test_create_cutting_job_records_who_requested_it(client):

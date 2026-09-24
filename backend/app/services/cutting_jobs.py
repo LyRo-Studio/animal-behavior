@@ -19,6 +19,7 @@ from app.models.cutting_job import (
     CuttingJobStatus,
 )
 from app.services.cutting_uploads import source_filename_matches_camera
+from app.services.media_browser import CUTS_PREFIX
 from app.services.media_prober import MediaProbeError, MediaProber
 from app.services.s3_client import S3Client, S3ObjectNotFoundError
 from app.services.timestamp_excel import find_test_row, normalize_test_id, parse_timestamp_workbook
@@ -104,6 +105,18 @@ class SourceVideoCollisionError(Exception):
         super().__init__(key)
 
 
+class CutsAlreadyExistError(Exception):
+    """`test_id` already has Cuts under `cuts/<test_id>/` and the caller
+    didn't pass `confirm_overwrite` (ticket #96; CONTEXT.md's Feature C "S3
+    collisions" decision: re-cutting is allowed, but only once explicitly
+    confirmed — unlike `SourceVideoCollisionError`, which is never
+    overridable)."""
+
+    def __init__(self, test_id: str) -> None:
+        self.test_id = test_id
+        super().__init__(test_id)
+
+
 class CuttingJobNotFoundError(Exception):
     """Raised for a nonexistent CuttingJob id."""
 
@@ -124,6 +137,16 @@ def _derive_source_collision_key(test_id: str, filename: str) -> str:
     return f"source/{test_id}/{filename}"
 
 
+def _test_has_cuts(s3: S3Client, test_id: str) -> bool:
+    """Whether any object exists directly under `cuts/<test_id>/` — the
+    same prefix the cutting-worker uploads produced Cuts to. Stops at the
+    first object found rather than listing the whole Test."""
+    return (
+        next(iter(s3.list_objects_info(f"{CUTS_PREFIX}{test_id}/", recursive=False)), None)
+        is not None
+    )
+
+
 def create_cutting_job(
     db: Session,
     *,
@@ -133,6 +156,7 @@ def create_cutting_job(
     uploads: list[SourceVideoUpload],
     s3: S3Client,
     media_prober: MediaProber,
+    confirm_overwrite: bool = False,
 ) -> CuttingJob:
     """Create a `queued` CuttingJob for `test_id`, attributed to
     `requested_by_identity`, only once every ingestion validation rule from
@@ -145,6 +169,11 @@ def create_cutting_job(
     `media_prober` (rejecting anything not decodable) and checked against
     `s3` for a derived-filename collision before the job (and its expected
     `CuttingJobOutput` rows) is created.
+
+    If `test_id` already has Cuts in S3, raises `CutsAlreadyExistError`
+    unless `confirm_overwrite` is set (ticket #96). Checked last, after
+    every other rule, so a confirmed follow-up request never fails on
+    something the first request could already have reported.
     """
     if not uploads:
         raise NoSourceVideoUploadedError
@@ -183,6 +212,9 @@ def create_cutting_job(
             pass
         else:
             raise SourceVideoCollisionError(key)
+
+    if not confirm_overwrite and _test_has_cuts(s3, row.test_id):
+        raise CutsAlreadyExistError(row.test_id)
 
     job = CuttingJob(
         test_id=row.test_id,

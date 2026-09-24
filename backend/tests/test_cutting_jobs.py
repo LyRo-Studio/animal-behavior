@@ -13,6 +13,7 @@ from openpyxl import Workbook
 
 from app.models.cutting_job import CuttingJob, CuttingJobOutputStatus, CuttingJobStatus
 from app.services.cutting_jobs import (
+    CutsAlreadyExistError,
     CuttingJobNotFoundError,
     DuplicateCameraUploadError,
     InvalidSourceFilenameError,
@@ -310,6 +311,99 @@ def test_create_cutting_job_rejects_a_filename_colliding_with_an_existing_s3_obj
             media_prober=media_prober,
         )
     assert db_session.query(CuttingJob).count() == 0
+
+
+def test_create_cutting_job_blocks_a_recut_of_a_test_that_already_has_cuts(
+    db_session, s3_client, media_prober, tmp_path
+):
+    """Ticket #96: re-cutting a Test with Cuts already under cuts/<Test>/
+    needs explicit confirmation — without it, no job is created (so nothing
+    is ever queued for the cutting-worker)."""
+    excel = _workbook_bytes(reference_camera="C1")
+    upload = _source_video(tmp_path, camera="C1")
+    s3_client.objects["cuts/T001/T001_C1_ME_F1.mp4"] = b"an earlier cut"
+
+    with pytest.raises(CutsAlreadyExistError) as exc_info:
+        create_cutting_job(
+            db_session,
+            requested_by_identity=None,
+            test_id="T001",
+            excel_bytes=excel,
+            uploads=[upload],
+            s3=s3_client,
+            media_prober=media_prober,
+        )
+    assert exc_info.value.test_id == "T001"
+    assert db_session.query(CuttingJob).count() == 0
+    # Nothing touched in S3 either — the existing Cut is left exactly as-is.
+    assert s3_client.objects == {"cuts/T001/T001_C1_ME_F1.mp4": b"an earlier cut"}
+
+
+def test_create_cutting_job_with_confirm_overwrite_recuts_a_test_that_already_has_cuts(
+    db_session, s3_client, media_prober, tmp_path
+):
+    excel = _workbook_bytes(reference_camera="C1")
+    upload = _source_video(tmp_path, camera="C1")
+    s3_client.objects["cuts/T001/T001_C1_ME_F1.mp4"] = b"an earlier cut"
+
+    job = create_cutting_job(
+        db_session,
+        requested_by_identity=None,
+        test_id="T001",
+        excel_bytes=excel,
+        uploads=[upload],
+        s3=s3_client,
+        media_prober=media_prober,
+        confirm_overwrite=True,
+    )
+
+    assert job.status == CuttingJobStatus.QUEUED
+    assert len(job.outputs) == 15
+
+
+def test_create_cutting_job_ignores_cuts_belonging_to_a_different_test(
+    db_session, s3_client, media_prober, tmp_path
+):
+    """Only this Test's own prefix counts — "cuts/T0010/" is not
+    "cuts/T001/", despite sharing a string prefix."""
+    excel = _workbook_bytes(reference_camera="C1")
+    upload = _source_video(tmp_path, camera="C1")
+    s3_client.objects["cuts/T0010/T0010_C1_ME_F1.mp4"] = b"another test's cut"
+
+    job = create_cutting_job(
+        db_session,
+        requested_by_identity=None,
+        test_id="T001",
+        excel_bytes=excel,
+        uploads=[upload],
+        s3=s3_client,
+        media_prober=media_prober,
+    )
+
+    assert job.status == CuttingJobStatus.QUEUED
+
+
+def test_create_cutting_job_reports_other_validation_errors_before_asking_to_confirm_a_recut(
+    db_session, s3_client, media_prober, tmp_path
+):
+    """The re-cut confirmation is the last gate, not the first — a researcher
+    who confirms should never then hit an error that was already knowable
+    (here: an undecodable video) on the follow-up request."""
+    media_prober.error = MediaProbeError("ffprobe failed")
+    excel = _workbook_bytes(reference_camera="C1")
+    upload = _source_video(tmp_path, camera="C1")
+    s3_client.objects["cuts/T001/T001_C1_ME_F1.mp4"] = b"an earlier cut"
+
+    with pytest.raises(SourceVideoNotDecodableError):
+        create_cutting_job(
+            db_session,
+            requested_by_identity=None,
+            test_id="T001",
+            excel_bytes=excel,
+            uploads=[upload],
+            s3=s3_client,
+            media_prober=media_prober,
+        )
 
 
 def test_get_cutting_job_returns_the_created_job(db_session, s3_client, media_prober, tmp_path):

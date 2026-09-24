@@ -7,13 +7,13 @@ each other unpredictably. Mirrors worker/tests/doubles.py's own reasoning.
 """
 
 from dataclasses import dataclass, field
-from datetime import time
+from datetime import UTC, datetime, time
 from io import BytesIO
 from pathlib import Path
 
 from app.services.cutting_jobs import SourceVideoUpload, create_cutting_job
 from app.services.media_prober import ProbedMediaInfo
-from app.services.s3_client import S3ObjectNotFoundError
+from app.services.s3_client import S3ObjectInfo, S3ObjectNotFoundError
 from openpyxl import Workbook
 
 from cutting_worker.video_cutter import PHASE_ORDER
@@ -24,8 +24,9 @@ _HEADERS = ["Test ID", "Dog ID", "C1/C2", *PHASE_ORDER]
 @dataclass
 class FakeS3Client:
     """Minimal in-memory double covering only what orchestrator.py actually
-    calls (`upload_file`) plus `head_object` (needed by `create_cutting_job`
-    itself, for its own S3-collision check) — see
+    calls (`upload_file`) plus `head_object`/`list_objects_info` (needed by
+    `create_cutting_job` itself, for its source-collision and ticket #96
+    existing-Cuts checks) — see
     app/services/s3_client.py's S3Client Protocol. Mirrors
     worker/tests/doubles.py's own minimal FakeS3Client.
     """
@@ -36,6 +37,12 @@ class FakeS3Client:
         if key not in self.objects:
             raise S3ObjectNotFoundError(key)
         raise AssertionError(f"unexpected collision: {key!r} already exists in FakeS3Client")
+
+    def list_objects_info(self, prefix: str = "", *, recursive: bool = True):
+        for key, data in self.objects.items():
+            rest = key[len(prefix) :]
+            if key.startswith(prefix) and (recursive or "/" not in rest):
+                yield S3ObjectInfo(key=key, size=len(data), last_modified=datetime.now(UTC))
 
     def upload_file(self, local_path: Path, key: str) -> None:
         self.objects[key] = Path(local_path).read_bytes()

@@ -1942,6 +1942,44 @@ implementation-time judgment calls:
   during this ticket to run it against for real; it's wired up and ready,
   not yet exercised.
 
+**Re-cut collision confirmation (ticket #96) — shipped, backend only; the
+confirmation dialog itself is ticket #101.** `create_cutting_job` takes a
+`confirm_overwrite` flag (`POST /cutting-jobs` form field, default false);
+without it, a Test that already has Cuts raises `CutsAlreadyExistError` and
+no job is created. Implementation-time judgment calls:
+
+- **"Already has Cuts" means any object directly under `cuts/<Test>/`**
+  (non-recursive, stopping at the first object found): the same prefix the
+  cutting-worker uploads to, and the same "a Test exists iff it has a Cut"
+  rule `media_browser.py` already uses. It's checked against the Excel row's
+  validated Test ID, never the raw request value.
+- **Checked last, after every other ingestion rule** (filenames, Excel,
+  reference camera, ffprobe, source collision). So a researcher who confirms
+  never hits an error on the follow-up that the first request could already
+  have reported.
+- **Response shape: 409 with a plain-string `detail` *plus* a top-level
+  `"code": "cuts_already_exist"`.** It returns a `JSONResponse` rather than
+  an `HTTPException`, because `HTTPException` can't add fields beside
+  `detail`. The source-collision 409 has no `code`, so a client can tell the
+  two apart without matching on message text. `detail` stays a string so
+  `frontend/src/services/apiBase.ts` still shows it as-is. Rejected
+  alternatives: a response header (cross-origin it would need CORS
+  `expose_headers`); a different status such as 428 (that means a missing
+  `If-Match`-style precondition, not a user confirmation).
+- **`confirm_overwrite` never bypasses the source-video collision:** that
+  one stays a hard reject, per the two-policy decision above.
+- **The blocked request consumes nothing:** uploads stay on disk and the
+  follow-up reuses the same upload ids. The blocked attempt still counts
+  against `create-cutting-job`'s per-identity rate limit (10 per 5 min), so
+  one block-and-confirm round trip costs two attempts. That's accepted
+  rather than special-cased.
+- **A confirmed re-cut overwrites, it doesn't clear.** The cutting-worker
+  uploads each produced Cut to its own key, replacing a same-named earlier
+  Cut. An earlier Cut the new run doesn't produce stays in S3 untouched:
+  for example a phase now marked skipped, or a legacy `ZE_F8`. Deleting
+  those was never asked for (issue #93: "confirm on re-cut", not "replace
+  the Test's Cuts"). Revisit if stale leftovers turn out to confuse people.
+
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
 (`consolidatie.py`, `observer_import.py`) is pre-existing Observer XT
