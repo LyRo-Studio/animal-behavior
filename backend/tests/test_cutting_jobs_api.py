@@ -12,8 +12,10 @@ from datetime import time
 from io import BytesIO
 
 from openpyxl import Workbook
+from sqlalchemy import select
 
 from app.core.config import settings
+from app.models.audit_log import AuditAction, AuditLog
 from app.models.cutting_job import CuttingJob, CuttingJobOutputStatus, CuttingJobStatus
 from tests.helpers import identity_headers
 
@@ -634,6 +636,97 @@ def test_batch_costs_one_rate_limit_attempt_however_many_tests_it_names(client, 
 
     assert throttled.status_code == 429
     assert "Retry-After" in throttled.headers
+
+
+# --- CUTTING_STARTED audit events (ticket #99) ---
+
+
+def _cutting_audit_rows(db_session) -> list[AuditLog]:
+    return list(
+        db_session.scalars(
+            select(AuditLog).where(AuditLog.target_type == "cutting_job").order_by(AuditLog.id)
+        )
+    )
+
+
+def test_create_cutting_job_writes_a_cutting_started_audit_row(client, db_session):
+    """Attributed via `get_verified_identity`, like ANALYSIS_STARTED: no JWT
+    sent here, so the plain `X-authentik-email` value is recorded
+    unverified."""
+    upload_id = _completed_upload_id(client, test_id="T001")
+
+    response = client.post(
+        "/api/cutting-jobs",
+        data={"test_id": "T001", "c1_upload_id": upload_id},
+        files={"excel": ("timestamps.xlsx", _excel_bytes(), "application/octet-stream")},
+        headers={"X-authentik-email": "jan.peeters@vives.be"},
+    )
+    assert response.status_code == 201, response.text
+
+    (row,) = _cutting_audit_rows(db_session)
+    assert row.action == AuditAction.CUTTING_STARTED
+    assert row.target == str(response.json()["id"])
+    assert row.identity == "jan.peeters@vives.be"
+    assert row.identity_verified is False
+    assert row.failure_reason is None
+
+
+def test_create_cutting_job_writes_no_audit_row_when_nothing_is_created(
+    client, db_session, s3_client
+):
+    """#96's confirmation block creates no job, so there's nothing started."""
+    upload_id = _completed_upload_id(client, test_id="T001")
+    s3_client.objects["cuts/T001/T001_C1_ME_F1.mp4"] = b"an earlier cut"
+
+    response = client.post(
+        "/api/cutting-jobs",
+        data={"test_id": "T001", "c1_upload_id": upload_id},
+        files={"excel": ("timestamps.xlsx", _excel_bytes(), "application/octet-stream")},
+    )
+
+    assert response.status_code == 409
+    assert _cutting_audit_rows(db_session) == []
+
+
+def test_batch_writes_one_cutting_started_row_per_created_job(client, db_session):
+    entries = [
+        {"test_id": "T001", "c1_upload_id": _completed_upload_id(client, test_id="T001")},
+        {"test_id": "T002", "c1_upload_id": "0" * 32},
+        {"test_id": "T003", "c1_upload_id": _completed_upload_id(client, test_id="T003")},
+    ]
+
+    results = _post_batch(client, entries).json()["results"]
+
+    created_ids = [str(r["job"]["id"]) for r in results if r["job"] is not None]
+    assert len(created_ids) == 2
+    rows = _cutting_audit_rows(db_session)
+    assert [row.action for row in rows] == [AuditAction.CUTTING_STARTED] * 2
+    assert [row.target for row in rows] == created_ids
+
+
+def test_a_failed_audit_write_never_fails_job_creation(client, db_session, monkeypatch):
+    """Best-effort, like every other audit event: `record_audit_event`
+    swallows the failure, the job is still created and returned."""
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("simulated audit write failure")
+
+    monkeypatch.setattr("app.services.audit_log.record_required_audit_event", _raise)
+    upload_id = _completed_upload_id(client, test_id="T001")
+
+    single = client.post(
+        "/api/cutting-jobs",
+        data={"test_id": "T001", "c1_upload_id": upload_id},
+        files={"excel": ("timestamps.xlsx", _excel_bytes(), "application/octet-stream")},
+    )
+    batch = _post_batch(
+        client, [{"test_id": "T002", "c1_upload_id": _completed_upload_id(client, test_id="T002")}]
+    )
+
+    assert single.status_code == 201, single.text
+    assert batch.json()["results"][0]["job"] is not None
+    assert db_session.query(CuttingJob).count() == 2
+    assert _cutting_audit_rows(db_session) == []
 
 
 # --- GET /cutting-jobs/{id} ---

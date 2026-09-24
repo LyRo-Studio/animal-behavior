@@ -12,12 +12,14 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.audit_log import AuditAction
 from app.models.cutting_job import (
     CuttingJob,
     CuttingJobOutput,
     CuttingJobOutputStatus,
     CuttingJobStatus,
 )
+from app.services.audit_log import AuditIdentity, record_audit_event
 from app.services.cutting_uploads import (
     UploadNotFoundError,
     get_upload_status,
@@ -203,6 +205,10 @@ CUTTING_JOB_VALIDATION_ERRORS: tuple[type[Exception], ...] = (
 # Issue #93's Feature C "Batch submission" decision.
 MAX_TESTS_PER_BATCH = 5
 
+# `audit_log.target_type` for every CUTTING_* event (ticket #99) — shared
+# with the cutting-worker, which writes the terminal ones.
+AUDIT_TARGET_TYPE = "cutting_job"
+
 
 def _derive_source_collision_key(test_id: str, filename: str) -> str:
     """The S3-style key an uploaded source video's own filename is checked
@@ -230,6 +236,7 @@ def create_cutting_job(
     s3: S3Client,
     media_prober: MediaProber,
     confirm_overwrite: bool = False,
+    started_by: AuditIdentity = AuditIdentity(),
 ) -> CuttingJob:
     """Create a `queued` CuttingJob for `test_id`, attributed to
     `requested_by_identity`, only once every ingestion validation rule from
@@ -247,6 +254,12 @@ def create_cutting_job(
     unless `confirm_overwrite` is set (ticket #96). Checked last, after
     every other rule, so a confirmed follow-up request never fails on
     something the first request could already have reported.
+
+    Writes the job's CUTTING_STARTED audit row (ticket #99), attributed to
+    `started_by`, in the same commit as the job itself — so it exists
+    before the cutting-worker could claim the job and write its terminal
+    event. Best-effort like every audit write: a failed one drops only the
+    audit row, never the job.
     """
     if not uploads:
         raise NoSourceVideoUploadedError
@@ -313,6 +326,15 @@ def create_cutting_job(
     ]
 
     db.add(job)
+    db.flush()
+    record_audit_event(
+        db,
+        identity=started_by.identity,
+        identity_verified=started_by.verified,
+        action=AuditAction.CUTTING_STARTED,
+        target_type=AUDIT_TARGET_TYPE,
+        target=str(job.id),
+    )
     db.commit()
     db.refresh(job)
     return job
@@ -369,6 +391,7 @@ def submit_cutting_job(
     upload_root: Path,
     s3: S3Client,
     media_prober: MediaProber,
+    started_by: AuditIdentity = AuditIdentity(),
 ) -> CuttingJob:
     """Resolve `submission`'s upload ids, then `create_cutting_job` — one
     Test, as `POST /cutting-jobs` and each entry of a batch both need."""
@@ -390,6 +413,7 @@ def submit_cutting_job(
         s3=s3,
         media_prober=media_prober,
         confirm_overwrite=submission.confirm_overwrite,
+        started_by=started_by,
     )
 
 
@@ -402,6 +426,7 @@ def submit_cutting_job_batch(
     upload_root: Path,
     s3: S3Client,
     media_prober: MediaProber,
+    started_by: AuditIdentity = AuditIdentity(),
 ) -> list[CuttingJobSubmissionResult]:
     """Submit up to `MAX_TESTS_PER_BATCH` Tests at once, all read from the
     same timestamp workbook, each becoming its own independent CuttingJob
@@ -435,6 +460,7 @@ def submit_cutting_job_batch(
                 upload_root=upload_root,
                 s3=s3,
                 media_prober=media_prober,
+                started_by=started_by,
             )
         except CUTTING_JOB_VALIDATION_ERRORS as exc:
             results.append(CuttingJobSubmissionResult(test_id=test_id, error=exc))

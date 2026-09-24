@@ -14,7 +14,12 @@ from fastapi.responses import JSONResponse
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_identity, identity_rate_limit_key, raise_if_throttled
+from app.api.deps import (
+    get_identity,
+    get_verified_identity,
+    identity_rate_limit_key,
+    raise_if_throttled,
+)
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.cutting_job import CuttingJob
@@ -27,6 +32,7 @@ from app.schemas.cutting_jobs import (
     CuttingUploadOut,
     StartCuttingUploadRequest,
 )
+from app.services.audit_log import AuditIdentity
 from app.services.cutting_jobs import (
     CUTTING_JOB_VALIDATION_ERRORS,
     CutsAlreadyExistError,
@@ -257,6 +263,7 @@ def _enforce_create_rate_limit(limiter: RateLimiter, identity: str | None) -> No
 
 @router.post("", response_model=CuttingJobOut, status_code=status.HTTP_201_CREATED)
 async def create_cutting_job_endpoint(
+    request: Request,
     test_id: str = Form(..., min_length=1, max_length=50),
     excel: UploadFile = File(...),
     c1_upload_id: str | None = Form(None),
@@ -300,6 +307,7 @@ async def create_cutting_job_endpoint(
             upload_root=root,
             s3=s3,
             media_prober=media_prober,
+            started_by=AuditIdentity(*get_verified_identity(request)),
         )
     except CUTTING_JOB_VALIDATION_ERRORS as exc:
         rejection = _describe_rejection(exc)
@@ -318,6 +326,7 @@ _BATCH_TESTS_FIELD_MAX_LENGTH = 4096
 
 @router.post("/batch", response_model=CuttingJobBatchOut)
 def create_cutting_job_batch_endpoint(
+    request: Request,
     tests: str = Form(..., max_length=_BATCH_TESTS_FIELD_MAX_LENGTH),
     excel: UploadFile = File(...),
     identity: str | None = Depends(get_identity),
@@ -377,6 +386,7 @@ def create_cutting_job_batch_endpoint(
             upload_root=root,
             s3=s3,
             media_prober=media_prober,
+            started_by=AuditIdentity(*get_verified_identity(request)),
         )
     except DuplicateTestInBatchError as exc:
         raise HTTPException(
