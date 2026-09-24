@@ -442,8 +442,6 @@ def test_media_token_type_claim_rejects_a_forged_access_typed_media_token(monkey
     HTTP layer above."""
     import jwt as pyjwt
 
-    from app.core.security import decode_media_token
-
     forged = pyjwt.encode(
         {"cut_key": _CUT_KEY, "action": "play", "type": "access"},
         settings.media_token_secret_key.get_secret_value(),

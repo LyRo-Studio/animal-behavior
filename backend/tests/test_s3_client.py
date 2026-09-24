@@ -347,12 +347,18 @@ def test_get_s3_client_raises_when_not_configured(monkeypatch):
         get_s3_client()
 
 
-@patch.object(s3_client_module, "_s3_client", None)
-def test_get_s3_client_returns_the_same_instance_across_calls(monkeypatch):
+def _configure_s3(monkeypatch) -> None:
+    """A fully configured S3 setup; the credentials are SecretStr, as in
+    real Settings since ticket #128."""
     monkeypatch.setattr(s3_client_module.settings, "s3_bucket", "test-bucket")
     monkeypatch.setattr(s3_client_module.settings, "s3_endpoint", "https://s3.example.com")
     monkeypatch.setattr(s3_client_module.settings, "aws_access_key_id", SecretStr("key"))
     monkeypatch.setattr(s3_client_module.settings, "aws_secret_access_key", SecretStr("secret"))
+
+
+@patch.object(s3_client_module, "_s3_client", None)
+def test_get_s3_client_returns_the_same_instance_across_calls(monkeypatch):
+    _configure_s3(monkeypatch)
 
     with patch("app.services.s3_client.boto3.client"):
         first = get_s3_client()
@@ -365,10 +371,7 @@ def test_get_s3_client_returns_the_same_instance_across_calls(monkeypatch):
 def test_get_s3_client_hands_boto3_the_unwrapped_credentials(monkeypatch):
     # Ticket #128: the credentials are SecretStr in Settings (so they never
     # show in its repr) — boto3 itself must still get the plain values.
-    monkeypatch.setattr(s3_client_module.settings, "s3_bucket", "test-bucket")
-    monkeypatch.setattr(s3_client_module.settings, "s3_endpoint", "https://s3.example.com")
-    monkeypatch.setattr(s3_client_module.settings, "aws_access_key_id", SecretStr("key"))
-    monkeypatch.setattr(s3_client_module.settings, "aws_secret_access_key", SecretStr("secret"))
+    _configure_s3(monkeypatch)
 
     with patch("app.services.s3_client.boto3.client") as boto_client:
         get_s3_client()
