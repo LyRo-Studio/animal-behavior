@@ -512,8 +512,10 @@ boundary).
   own per-video timestamp subfolder means the retry's output tree won't
   exactly overwrite the first attempt's, so stray files can accumulate
   under that job's `reports/<test_id>/<analysis_id>/` prefix. `S3Client`
-  has no delete capability today; adding one just for this is deferred
-  until it's an actual problem, not speculatively built into this ticket.
+  had no delete capability at the time; adding one just for this was
+  deferred until it's an actual problem, not speculatively built into this
+  ticket. _Amended: `S3Client.delete_object` has since been added (ticket
+  #118), removing that blocker — tracked as issue #132._
 
 **Analysis report download (ticket #49):** `GET /analyses/{id}/report`
 serves `<report_s3_prefix>casiop_report.xlsx` — the only artifact of
@@ -1475,9 +1477,9 @@ single-Test flow byte-for-byte unchanged.
   already produced and uploaded to S3 for every analysis today, single-
   Test included, just never exposed as a download, per ticket #49's
   original v1 scoping). Raised during this session but split into its own
-  future ticket: it applies equally to today's single-Test analyses, so
-  bundling it here would mix two unrelated concerns into one set of
-  tickets.
+  future ticket (issue #133): it applies equally to today's single-Test
+  analyses, so bundling it here would mix two unrelated concerns into one
+  set of tickets.
 
 **Multi-test analysis — foundation (ticket #89):** shipped the schema/API
 half of Feature B above (`CreateAnalysisRequest`, wholesale derivation, the
