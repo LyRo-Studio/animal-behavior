@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 
 import { listAnalyses, type AnalysisJob } from '@/services/analyses'
 import { formatDate } from '@/utils/date'
+import { breakdownByTest, hasTestBreakdown } from '@/utils/testBreakdown'
 
 const analyses = ref<AnalysisJob[]>([])
 const isLoading = ref(true)
@@ -20,6 +21,13 @@ async function loadAnalyses() {
   } finally {
     isLoading.value = false
   }
+}
+
+// Issue #92's compact form, e.g. "T041: 8/8, T002: 6/7" (succeeded/total).
+function breakdownSummary(job: AnalysisJob): string {
+  return breakdownByTest(job)
+    .map((entry) => `${entry.testId}: ${entry.succeeded}/${entry.total}`)
+    .join(', ')
 }
 
 onMounted(loadAnalyses)
@@ -44,13 +52,22 @@ onMounted(loadAnalyses)
           :key="job.id"
           class="flex items-center justify-between px-4 py-3 text-sm"
         >
-          <RouterLink
-            :to="{ name: 'analysis-detail', params: { id: job.id } }"
-            data-testid="analysis-history-link"
-            class="font-medium text-primary hover:underline"
-          >
-            Test {{ job.testIds.join(', ') }}
-          </RouterLink>
+          <div>
+            <RouterLink
+              :to="{ name: 'analysis-detail', params: { id: job.id } }"
+              data-testid="analysis-history-link"
+              class="font-medium text-primary hover:underline"
+            >
+              Test {{ job.testIds.join(', ') }}
+            </RouterLink>
+            <p
+              v-if="hasTestBreakdown(job)"
+              data-testid="analysis-history-breakdown"
+              class="mt-1 text-muted"
+            >
+              {{ breakdownSummary(job) }}
+            </p>
+          </div>
           <span class="text-muted">
             <span data-testid="analysis-history-status">
               {{ job.status }} · {{ formatDate(job.createdAt) }}

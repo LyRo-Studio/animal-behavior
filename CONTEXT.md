@@ -1373,8 +1373,8 @@ resolved design, not a proposal.
 
 **Multi-test analysis (Feature B) — foundation implemented by ticket #89,
 frontend selection/submission by ticket #90, worker/report generation (the
-analysis-id-first S3 prefix, per-Test report splitting) by ticket #91; the
-per-Test breakdown display (ticket #92) is still not built.** an
+analysis-id-first S3 prefix, per-Test report splitting) by ticket #91, and
+the per-Test breakdown display by ticket #92.** an
 `AnalysisJob` currently belongs to exactly one Test (`test_id`, a single
 required column). This lets one job span up to 10 Tests at once, submitted
 from a single "Analyze selected Tests" action, while keeping today's
@@ -1608,6 +1608,29 @@ S3 prefix and a per-Test report split for jobs spanning more than one Test.
   each per-Test file holds only its own Test's row, with the combined
   report's columns. Run on 2026-09-24 inside `lynndelaere/dogtrace:1.1.1`
   on the development GPU box: passed.
+
+**Multi-test analysis — per-Test breakdown display (ticket #92):** the
+"T041: 8/8, T002: 6/7" display from Feature B's "No new job status"
+decision above.
+
+- **Computed client-side from the job's existing video rows**, grouped by
+  the Test segment of each `cut_key` (`cuts/<Test>/<file>`) —
+  `breakdownByTest` in `frontend/src/utils/testBreakdown.ts`. No backend or
+  schema change: `AnalysisJobOut` already carries every video, in the
+  history listing too. One entry per Test in the job's submission order,
+  including a Test that contributed no videos.
+- **Shown only for a job spanning more than one Test, and never for a
+  cancelled one** (`hasTestBreakdown`, shared by both views). A single-Test
+  job's display is unchanged; a cancelled job ran nothing, the same reason
+  `AnalysisView` already hides its job-level summary.
+- **`AnalysisView` shows a Test / Succeeded / Failed / Total table**, live
+  while the job is queued/running as well as once it's terminal (the ticket
+  is "progress/result"), alongside the unchanged job-level status and
+  summary. **The history list shows the compact succeeded/total line**
+  under each multi-Test row.
+- **In `src/utils/`, not `src/services/analyses.ts`:** it's a pure
+  aggregation, not backend communication, and the view specs mock the whole
+  services module — a helper there would vanish under test.
 
 **Video cutting + S3 ingestion (Feature C) — design finalized, not yet built:**
 lets a researcher upload a Test's source video(s) and have them sliced into

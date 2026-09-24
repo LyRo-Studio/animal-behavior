@@ -10,6 +10,7 @@ import {
   type AnalysisJob,
 } from '@/services/analyses'
 import { triggerBrowserDownload } from '@/utils/download'
+import { breakdownByTest, hasTestBreakdown } from '@/utils/testBreakdown'
 
 const route = useRoute()
 const analysisId = Number(route.params.id)
@@ -105,6 +106,11 @@ const succeededCount = computed(
 )
 const failedVideos = computed(
   () => job.value?.videos.filter((video) => video.status === 'failed') ?? [],
+)
+
+// Issue #92 — see hasTestBreakdown for when it's shown at all.
+const testBreakdown = computed(() =>
+  job.value && hasTestBreakdown(job.value) ? breakdownByTest(job.value) : [],
 )
 
 function filename(cutKey: string): string {
@@ -214,6 +220,41 @@ async function downloadReport() {
             </li>
           </ul>
         </div>
+
+        <table
+          v-if="testBreakdown.length > 0"
+          data-testid="test-breakdown"
+          class="mt-6 w-full text-left text-sm"
+        >
+          <caption class="sr-only">
+            Videos per Test
+          </caption>
+          <thead>
+            <tr class="border-b border-border text-muted">
+              <th scope="col" class="py-2 pr-4 font-medium">Test</th>
+              <th scope="col" class="py-2 pr-4 font-medium">Succeeded</th>
+              <th scope="col" class="py-2 pr-4 font-medium">Failed</th>
+              <th scope="col" class="py-2 font-medium">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="entry in testBreakdown"
+              :key="entry.testId"
+              data-testid="test-breakdown-row"
+              class="border-b border-border"
+            >
+              <th scope="row" class="py-2 pr-4 font-medium text-foreground">
+                {{ entry.testId }}
+              </th>
+              <td class="py-2 pr-4">{{ entry.succeeded }}</td>
+              <td class="py-2 pr-4" :class="entry.failed > 0 ? 'text-danger' : ''">
+                {{ entry.failed }}
+              </td>
+              <td class="py-2">{{ entry.total }}</td>
+            </tr>
+          </tbody>
+        </table>
 
         <div class="mt-6 flex items-center gap-3">
           <button

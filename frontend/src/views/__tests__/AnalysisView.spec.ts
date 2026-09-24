@@ -332,4 +332,104 @@ describe('AnalysisView', () => {
     expect(wrapper.text()).toContain('Only a queued analysis can be cancelled.')
     expect(wrapper.find('[data-testid="status"]').text()).toBe('queued')
   })
+
+  // Issue #92 (Feature B): a job spanning more than one Test also shows how
+  // each Test fared, grouped from the per-video rows by the Test in each
+  // Cut key — a display aggregation only, never a stored status.
+  function breakdownRows(wrapper: Awaited<ReturnType<typeof mountView>>) {
+    return wrapper
+      .findAll('[data-testid="test-breakdown-row"]')
+      .map((row) => row.findAll('td, th').map((cell) => cell.text()))
+  }
+
+  it('breaks a finished multi-Test job down per Test, in submission order', async () => {
+    getAnalysisMock.mockResolvedValue(
+      job({
+        testIds: ['T041', 'T002'],
+        status: 'completed_with_errors',
+        reportAvailable: true,
+        videos: [
+          video({ cutKey: 'cuts/T041/T041_C2_ME_F1.mp4', status: 'succeeded' }),
+          video({ cutKey: 'cuts/T041/T041_C2_ME_F2.mp4', status: 'succeeded' }),
+          video({ cutKey: 'cuts/T002/T002_C2_ME_F1.mp4', status: 'succeeded' }),
+          video({
+            cutKey: 'cuts/T002/T002_C2_ME_F2.mp4',
+            status: 'failed',
+            failureReason: 'The analysis did not produce a result for this video.',
+          }),
+        ],
+      }),
+    )
+
+    const wrapper = await mountView()
+
+    // Test, succeeded, failed, total.
+    expect(breakdownRows(wrapper)).toEqual([
+      ['T041', '2', '0', '2'],
+      ['T002', '1', '1', '2'],
+    ])
+    // The job-level summary and status are untouched by the breakdown.
+    expect(wrapper.find('[data-testid="status"]').text()).toBe('completed_with_errors')
+    expect(wrapper.find('[data-testid="terminal-summary"]').text()).toContain(
+      '3 succeeded, 1 failed',
+    )
+  })
+
+  it('shows no per-Test breakdown for a single-Test job', async () => {
+    getAnalysisMock.mockResolvedValue(
+      job({
+        status: 'completed_with_errors',
+        videos: [
+          video({ status: 'succeeded' }),
+          video({ cutKey: 'cuts/T001/T001_C2_ME_F2.mp4', status: 'failed', failureReason: 'x' }),
+        ],
+      }),
+    )
+
+    const wrapper = await mountView()
+
+    expect(wrapper.find('[data-testid="test-breakdown"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="terminal-summary"]').text()).toContain(
+      '1 succeeded, 1 failed',
+    )
+  })
+
+  it('updates the per-Test breakdown live while a multi-Test job runs', async () => {
+    getAnalysisMock.mockResolvedValue(
+      job({
+        testIds: ['T041', 'T002'],
+        status: 'running',
+        videos: [
+          video({ cutKey: 'cuts/T041/T041_C2_ME_F1.mp4', status: 'succeeded' }),
+          video({ cutKey: 'cuts/T041/T041_C2_ME_F2.mp4', status: 'processing' }),
+          video({ cutKey: 'cuts/T002/T002_C2_ME_F1.mp4', status: 'pending' }),
+        ],
+      }),
+    )
+
+    const wrapper = await mountView()
+
+    expect(breakdownRows(wrapper)).toEqual([
+      ['T041', '1', '0', '2'],
+      ['T002', '0', '0', '1'],
+    ])
+    expect(wrapper.find('[data-testid="progress-summary"]').text()).toContain('2/3 videos')
+  })
+
+  it('hides the per-Test breakdown for a cancelled multi-Test job', async () => {
+    getAnalysisMock.mockResolvedValue(
+      job({
+        testIds: ['T041', 'T002'],
+        status: 'cancelled',
+        videos: [
+          video({ cutKey: 'cuts/T041/T041_C2_ME_F1.mp4' }),
+          video({ cutKey: 'cuts/T002/T002_C2_ME_F1.mp4' }),
+        ],
+      }),
+    )
+
+    const wrapper = await mountView()
+
+    expect(wrapper.find('[data-testid="test-breakdown"]').exists()).toBe(false)
+  })
 })

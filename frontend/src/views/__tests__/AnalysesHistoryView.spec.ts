@@ -109,4 +109,32 @@ describe('AnalysesHistoryView', () => {
 
     expect(wrapper.text()).toContain('Failed to load analyses.')
   })
+
+  // Issue #92: "T041: 8/8, T002: 6/7" — succeeded/total per Test, only for
+  // a job spanning more than one Test.
+  it('shows succeeded/total per Test for a multi-Test job only', async () => {
+    listAnalysesMock.mockResolvedValue([
+      job({
+        id: 42,
+        testIds: ['T041', 'T002'],
+        status: 'completed_with_errors',
+        videos: [
+          { cutKey: 'cuts/T041/T041_C2_ME_F1.mp4', position: 0, status: 'succeeded' },
+          { cutKey: 'cuts/T041/T041_C2_ME_F2.mp4', position: 1, status: 'succeeded' },
+          { cutKey: 'cuts/T002/T002_C2_ME_F1.mp4', position: 2, status: 'succeeded' },
+          { cutKey: 'cuts/T002/T002_C2_ME_F2.mp4', position: 3, status: 'failed' },
+        ],
+      }),
+      job({
+        id: 41,
+        testIds: ['T001'],
+        videos: [{ cutKey: 'cuts/T001/T001_C2_ME_F1.mp4', position: 0, status: 'succeeded' }],
+      }),
+    ])
+
+    const wrapper = await mountView()
+
+    const breakdowns = wrapper.findAll('[data-testid="analysis-history-breakdown"]')
+    expect(breakdowns.map((b) => b.text())).toEqual(['T041: 2/2, T002: 1/2'])
+  })
 })
