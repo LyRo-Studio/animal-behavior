@@ -66,8 +66,8 @@ def _real_s3_client() -> BotoS3Client:
     return BotoS3Client(
         bucket_name=settings.s3_bucket,
         endpoint_url=settings.s3_endpoint,
-        access_key_id=settings.aws_access_key_id,
-        secret_access_key=settings.aws_secret_access_key,
+        access_key_id=settings.aws_access_key_id.get_secret_value(),
+        secret_access_key=settings.aws_secret_access_key.get_secret_value(),
         addressing_style=settings.s3_addressing_style,
     )
 

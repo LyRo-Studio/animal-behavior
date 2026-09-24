@@ -36,12 +36,16 @@ def create_media_token(cut_key: str, action: str) -> str:
         "iat": now,
         "exp": now + timedelta(minutes=settings.media_token_expire_minutes),
     }
-    return jwt.encode(payload, settings.media_token_secret_key, algorithm=_JWT_ALGORITHM)
+    return jwt.encode(
+        payload, settings.media_token_secret_key.get_secret_value(), algorithm=_JWT_ALGORITHM
+    )
 
 
 def decode_media_token(token: str) -> dict[str, Any]:
     """Decode and verify a media token. Raises jwt.PyJWTError if invalid/expired."""
-    payload = jwt.decode(token, settings.media_token_secret_key, algorithms=[_JWT_ALGORITHM])
+    payload = jwt.decode(
+        token, settings.media_token_secret_key.get_secret_value(), algorithms=[_JWT_ALGORITHM]
+    )
     if payload.get("type") != _MEDIA_TOKEN_TYPE:
         raise jwt.InvalidTokenError("Not a media token")
     return payload

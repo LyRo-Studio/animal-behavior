@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.core.security import create_media_token
+from app.core.security import create_media_token, decode_media_token
 from app.models.audit_log import AuditAction, AuditLog
 from tests.helpers import identity_headers
 
@@ -381,7 +381,7 @@ def test_stream_rejects_a_correctly_signed_token_of_another_type(client, s3_clie
             "action": "play",
             "exp": datetime.now(UTC) + timedelta(minutes=5),
         },
-        settings.media_token_secret_key,
+        settings.media_token_secret_key.get_secret_value(),
         algorithm="HS256",
     )
 
@@ -442,13 +442,34 @@ def test_media_token_type_claim_rejects_a_forged_access_typed_media_token(monkey
     HTTP layer above."""
     import jwt as pyjwt
 
-    from app.core.security import decode_media_token
-
     forged = pyjwt.encode(
         {"cut_key": _CUT_KEY, "action": "play", "type": "access"},
-        settings.media_token_secret_key,
+        settings.media_token_secret_key.get_secret_value(),
         algorithm="HS256",
     )
 
     with pytest.raises(jwt.PyJWTError):
         decode_media_token(forged)
+
+
+def test_media_tokens_are_signed_and_verified_with_the_plain_secret_value():
+    # Ticket #128: media_token_secret_key is a SecretStr in Settings, so both
+    # signing and verification must unwrap it — a token must round-trip
+    # against the plain secret in both directions, never against its
+    # masked "**********" rendering.
+    secret = settings.media_token_secret_key.get_secret_value()
+
+    issued = create_media_token(cut_key=_CUT_KEY, action="play")
+    assert jwt.decode(issued, secret, algorithms=["HS256"])["cut_key"] == _CUT_KEY
+
+    signed_elsewhere = jwt.encode(
+        {
+            "type": "media",
+            "cut_key": _CUT_KEY,
+            "action": "download",
+            "exp": datetime.now(UTC) + timedelta(minutes=5),
+        },
+        secret,
+        algorithm="HS256",
+    )
+    assert decode_media_token(signed_elsewhere)["action"] == "download"

@@ -2234,3 +2234,26 @@ private dependency.
   `assist` runs no CLI, and pins `OutputFilename`'s naming. For the same
   reason, `orchestrator.py` now asks `OutputFilename` for each expected Cut's
   filename instead of keeping its own copy of the format.
+
+**Secrets masked in `Settings` (ticket #128):** `repr(settings)` — which
+lands in exception messages (pytest's `monkeypatch.setattr` error for a
+missing attribute is how ticket #121 surfaced it), log lines and debuggers
+— no longer shows any credential (ENGINEERING-STANDARDS.md §5).
+
+- **`media_token_secret_key`, `aws_access_key_id`, `aws_secret_access_key`
+  are `SecretStr`** (the S3 two `SecretStr | None`). They're unwrapped with
+  `.get_secret_value()` only where actually used: `app/core/security.py`
+  (signing/verifying media tokens) and `get_s3_client`. The "S3
+  configured?" check needs no change, since an empty `SecretStr` is falsy.
+- **`database_url` stays a plain `str` with `Field(repr=False)`**, not
+  `SecretStr` — SQLAlchemy (`app/db/session.py`), Alembic (`alembic/env.py`)
+  and the test fixtures consume it as a string, and hiding it from the repr
+  is all this ticket needs. Note it still appears in `settings.model_dump()`;
+  nothing dumps `Settings` today.
+- **Anything new that reads one of these three secrets must call
+  `.get_secret_value()`** — boto3/PyJWT reject a `SecretStr` outright, and
+  anything that stringifies it instead gets the masked `**********`.
+- `worker/` and `cutting-worker/` reuse the backend's `Settings` and read
+  none of these secrets outside tests; only the two opt-in real-S3 tests
+  (`test_s3_client_real_bucket.py`, `test_real_gpu_inference.py`) needed the
+  unwrap too.
