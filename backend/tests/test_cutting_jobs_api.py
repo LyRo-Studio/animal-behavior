@@ -7,6 +7,7 @@ resumption, upload-id resolution, error -> status-code mapping, and rate
 limiting.
 """
 
+import json
 from datetime import time
 from io import BytesIO
 
@@ -21,14 +22,18 @@ _PHASE_HEADERS = [f"{condition}_F{n}" for condition in _CONDITIONS for n in rang
 _HEADERS = ["Test ID", "Dog ID", "C1/C2", *_PHASE_HEADERS]
 
 
-def _excel_bytes(test_id="T001", *, reference_camera="C1", phases=("ME_F1", "ME_F2")) -> bytes:
+def _excel_bytes(
+    test_id="T001", *, reference_camera="C1", phases=("ME_F1", "ME_F2"), extra_test_ids=()
+) -> bytes:
+    """One identical row per Test: `test_id`, then each of `extra_test_ids`."""
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(_HEADERS)
-    row = [test_id, "Rex", reference_camera]
-    for index, header in enumerate(_PHASE_HEADERS):
-        row.append(time(index + 1, 0, 0) if header in phases else None)
-    sheet.append(row)
+    for row_test_id in (test_id, *extra_test_ids):
+        row = [row_test_id, "Rex", reference_camera]
+        for index, header in enumerate(_PHASE_HEADERS):
+            row.append(time(index + 1, 0, 0) if header in phases else None)
+        sheet.append(row)
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
@@ -463,6 +468,172 @@ def test_create_cutting_job_needs_no_login(client):
 
     assert response.status_code == 201
     assert response.json()["requested_by_identity"] is None
+
+
+# --- POST /cutting-jobs/batch (ticket #97) ---
+
+
+def _completed_upload_id(client, *, test_id, camera="C1"):
+    upload = _start_upload(client, test_id=test_id, camera=camera, size=4)
+    _upload_all_bytes(client, upload["upload_id"], b"data")
+    return upload["upload_id"]
+
+
+def _post_batch(client, entries, *, excel=None, headers=None):
+    excel = excel or _excel_bytes(extra_test_ids=("T002", "T003", "T004", "T005", "T006"))
+    return client.post(
+        "/api/cutting-jobs/batch",
+        data={"tests": json.dumps(entries)},
+        files={"excel": ("timestamps.xlsx", excel, "application/octet-stream")},
+        headers=headers,
+    )
+
+
+def test_batch_creates_one_independently_visible_job_per_test(client):
+    entries = [
+        {"test_id": test_id, "c1_upload_id": _completed_upload_id(client, test_id=test_id)}
+        for test_id in ("T001", "T002")
+    ]
+
+    response = _post_batch(client, entries)
+
+    assert response.status_code == 200, response.text
+    results = response.json()["results"]
+    assert [result["test_id"] for result in results] == ["T001", "T002"]
+    assert all(result["error"] is None for result in results)
+    for result in results:
+        fetched = client.get(f"/api/cutting-jobs/{result['job']['id']}")
+        assert fetched.status_code == 200
+        assert fetched.json()["test_id"] == result["test_id"]
+        assert fetched.json()["status"] == "queued"
+
+
+def test_batch_over_five_tests_is_rejected_with_no_jobs_created(client, db_session):
+    entries = [
+        {"test_id": test_id, "c1_upload_id": _completed_upload_id(client, test_id=test_id)}
+        for test_id in ("T001", "T002", "T003", "T004", "T005", "T006")
+    ]
+
+    response = _post_batch(client, entries)
+
+    # A schema-level bound, like POST /analyses' 1-10 Tests (422, not 400).
+    assert response.status_code == 422
+    assert db_session.query(CuttingJob).count() == 0
+
+
+def test_batch_rejects_an_empty_tests_list(client):
+    assert _post_batch(client, []).status_code == 422
+
+
+def test_batch_rejects_the_same_test_twice(client, db_session):
+    upload_id = _completed_upload_id(client, test_id="T001")
+
+    response = _post_batch(
+        client, [{"test_id": "T001", "c1_upload_id": upload_id}, {"test_id": "001"}]
+    )
+
+    assert response.status_code == 400
+    assert db_session.query(CuttingJob).count() == 0
+
+
+def test_batch_reports_each_tests_own_failure_without_blocking_the_rest(client, s3_client):
+    """T002 names an unknown upload (400) and T003 already has Cuts (#96's
+    distinct 409) — each gets exactly the error a single submission would."""
+    s3_client.objects["cuts/T003/T003_C1_ME_F1.mp4"] = b"an earlier cut"
+    entries = [
+        {"test_id": "T001", "c1_upload_id": _completed_upload_id(client, test_id="T001")},
+        {"test_id": "T002", "c1_upload_id": "0" * 32},
+        {"test_id": "T003", "c1_upload_id": _completed_upload_id(client, test_id="T003")},
+    ]
+
+    response = _post_batch(client, entries)
+
+    assert response.status_code == 200, response.text
+    first, second, third = response.json()["results"]
+    assert first["job"]["test_id"] == "T001"
+    assert second["job"] is None
+    assert second["error"] == {
+        "status_code": 400,
+        "detail": "Unknown upload for C1.",
+        "code": None,
+    }
+    assert third["job"] is None
+    assert third["error"]["status_code"] == 409
+    assert third["error"]["code"] == "cuts_already_exist"
+
+
+def test_batch_recut_proceeds_once_that_test_is_confirmed(client, s3_client):
+    s3_client.objects["cuts/T001/T001_C1_ME_F1.mp4"] = b"an earlier cut"
+    upload_id = _completed_upload_id(client, test_id="T001")
+    blocked = _post_batch(client, [{"test_id": "T001", "c1_upload_id": upload_id}])
+    assert blocked.json()["results"][0]["error"]["code"] == "cuts_already_exist"
+
+    confirmed = _post_batch(
+        client, [{"test_id": "T001", "c1_upload_id": upload_id, "confirm_overwrite": True}]
+    )
+
+    assert confirmed.json()["results"][0]["job"]["status"] == "queued"
+
+
+def test_batch_rejects_a_malformed_tests_field(client):
+    """FastAPI's own structured validation-error list, like every other 422."""
+    for tests in (
+        "not json",
+        json.dumps({"test_id": "T001"}),
+        json.dumps([{"test": "T001"}]),
+        json.dumps([{"test_id": "T001", "confirmOverwrite": True}]),
+        " " * 5000,
+    ):
+        response = client.post(
+            "/api/cutting-jobs/batch",
+            data={"tests": tests},
+            files={"excel": ("timestamps.xlsx", _excel_bytes(), "application/octet-stream")},
+        )
+
+        assert response.status_code == 422, tests
+        assert isinstance(response.json()["detail"], list), tests
+
+
+def test_batch_rejects_an_oversized_timestamp_excel(client, db_session, monkeypatch):
+    monkeypatch.setattr(settings, "cutting_job_excel_max_file_size_bytes", 100)
+    upload_id = _completed_upload_id(client, test_id="T001")
+
+    response = _post_batch(client, [{"test_id": "T001", "c1_upload_id": upload_id}])
+
+    assert response.status_code == 400
+    assert db_session.query(CuttingJob).count() == 0
+
+
+def test_create_cutting_job_rejects_an_oversized_timestamp_excel(client, db_session, monkeypatch):
+    monkeypatch.setattr(settings, "cutting_job_excel_max_file_size_bytes", 100)
+    upload_id = _completed_upload_id(client, test_id="T001")
+
+    response = client.post(
+        "/api/cutting-jobs",
+        data={"test_id": "T001", "c1_upload_id": upload_id},
+        files={"excel": ("timestamps.xlsx", _excel_bytes(), "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    assert db_session.query(CuttingJob).count() == 0
+
+
+def test_batch_costs_one_rate_limit_attempt_however_many_tests_it_names(client, monkeypatch):
+    monkeypatch.setattr(settings, "create_cutting_job_rate_limit_max_attempts_per_identity", 1)
+    headers = identity_headers("busy@vives.be")
+    entries = [
+        {"test_id": test_id, "c1_upload_id": _completed_upload_id(client, test_id=test_id)}
+        for test_id in ("T001", "T002", "T003")
+    ]
+
+    first = _post_batch(client, entries, headers=headers)
+    assert first.status_code == 200, first.text
+    assert all(result["job"] is not None for result in first.json()["results"])
+
+    throttled = _post_batch(client, [{"test_id": "T004"}], headers=headers)
+
+    assert throttled.status_code == 429
+    assert "Retry-After" in throttled.headers
 
 
 # --- GET /cutting-jobs/{id} ---

@@ -150,6 +150,11 @@ class Settings(BaseSettings):
     # endpoint is at least as expensive a thing to trigger repeatedly.
     create_cutting_job_rate_limit_max_attempts_per_identity: int = 10
     create_cutting_job_rate_limit_window_seconds: int = 300
+    # Ticket #97: the timestamp Excel sent with a cutting-job submission
+    # (ENGINEERING-STANDARDS.md §5: "limit request body and upload sizes") —
+    # a sheet of one row per Test is kilobytes, and a batch parses it once
+    # per Test, so this is far tighter than consolidation_max_file_size_bytes.
+    cutting_job_excel_max_file_size_bytes: int = 5 * 1024 * 1024  # 5 MiB
     # Starting a chunked upload is cheap on its own (a small metadata
     # write), but unbounded repetition would still clutter local disk with
     # empty upload directories independent of the byte-level cap above —
