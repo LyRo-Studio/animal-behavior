@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolved from this file's own location, not the process's working
@@ -24,8 +24,13 @@ class Settings(BaseSettings):
     # `pytest`/`ruff` work standalone with no .env present at all — never
     # used against a real database in Docker, where DATABASE_URL is always
     # supplied explicitly (see docker-compose.yml).
-    database_url: str = (
-        "postgresql+psycopg://animal_behavior:animal_behavior@localhost:5432/animal_behavior"
+    # Ticket #128: it embeds the DB password, so it's kept out of
+    # `repr(settings)` — but stays a plain `str`, not `SecretStr` like the
+    # credentials below, since SQLAlchemy (app/db/session.py) and Alembic
+    # (alembic/env.py) consume it as one.
+    database_url: str = Field(
+        default="postgresql+psycopg://animal_behavior:animal_behavior@localhost:5432/animal_behavior",
+        repr=False,
     )
     cors_origins: str = "http://localhost:5173"
 
@@ -44,8 +49,12 @@ class Settings(BaseSettings):
     # only thing left the backend signs. Same "safe placeholder for
     # standalone pytest/ruff" spirit as database_url above; docker-compose.yml
     # requires it explicitly via `:?` and never falls back to this value in a
-    # deployed environment.
-    media_token_secret_key: str = "dev-only-insecure-secret-do-not-use-in-production"
+    # deployed environment. A `SecretStr` (ticket #128) so `repr(settings)`
+    # — in an exception message, a log line, a debugger — never shows it;
+    # readers unwrap it with `.get_secret_value()` (app/core/security.py).
+    media_token_secret_key: SecretStr = SecretStr(
+        "dev-only-insecure-secret-do-not-use-in-production"
+    )
 
     # Ticket #18 (S3 access foundation, part of #17's media browser): the
     # bucket holding Tests/Cuts/Datasets — see CONTEXT.md's "Media browser"
@@ -55,11 +64,13 @@ class Settings(BaseSettings):
     # falling through to boto3's ambient credential chain against whatever
     # bucket/endpoint ends up resolved — there's no safe "log instead of"
     # fallback for object storage.
-    # docker-compose.yml requires all four explicitly via `:?`.
+    # docker-compose.yml requires all four explicitly via `:?`. The two
+    # credentials are `SecretStr` for the same reason as
+    # media_token_secret_key above, unwrapped only in `get_s3_client`.
     s3_bucket: str | None = None
     s3_endpoint: str | None = None
-    aws_access_key_id: str | None = None
-    aws_secret_access_key: str | None = None
+    aws_access_key_id: SecretStr | None = None
+    aws_secret_access_key: SecretStr | None = None
     s3_addressing_style: str = "path"
 
     # Ticket #21 (Play/download a Cut): short-lived, single-Cut-scoped,

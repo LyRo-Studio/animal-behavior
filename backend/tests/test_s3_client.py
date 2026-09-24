@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
+from pydantic import SecretStr
 
 import app.services.s3_client as s3_client_module
 from app.services.s3_client import BotoS3Client, S3ObjectInfo, S3ObjectNotFoundError, get_s3_client
@@ -350,14 +351,31 @@ def test_get_s3_client_raises_when_not_configured(monkeypatch):
 def test_get_s3_client_returns_the_same_instance_across_calls(monkeypatch):
     monkeypatch.setattr(s3_client_module.settings, "s3_bucket", "test-bucket")
     monkeypatch.setattr(s3_client_module.settings, "s3_endpoint", "https://s3.example.com")
-    monkeypatch.setattr(s3_client_module.settings, "aws_access_key_id", "key")
-    monkeypatch.setattr(s3_client_module.settings, "aws_secret_access_key", "secret")
+    monkeypatch.setattr(s3_client_module.settings, "aws_access_key_id", SecretStr("key"))
+    monkeypatch.setattr(s3_client_module.settings, "aws_secret_access_key", SecretStr("secret"))
 
     with patch("app.services.s3_client.boto3.client"):
         first = get_s3_client()
         second = get_s3_client()
 
     assert first is second
+
+
+@patch.object(s3_client_module, "_s3_client", None)
+def test_get_s3_client_hands_boto3_the_unwrapped_credentials(monkeypatch):
+    # Ticket #128: the credentials are SecretStr in Settings (so they never
+    # show in its repr) — boto3 itself must still get the plain values.
+    monkeypatch.setattr(s3_client_module.settings, "s3_bucket", "test-bucket")
+    monkeypatch.setattr(s3_client_module.settings, "s3_endpoint", "https://s3.example.com")
+    monkeypatch.setattr(s3_client_module.settings, "aws_access_key_id", SecretStr("key"))
+    monkeypatch.setattr(s3_client_module.settings, "aws_secret_access_key", SecretStr("secret"))
+
+    with patch("app.services.s3_client.boto3.client") as boto_client:
+        get_s3_client()
+
+    _, kwargs = boto_client.call_args
+    assert kwargs["aws_access_key_id"] == "key"
+    assert kwargs["aws_secret_access_key"] == "secret"
 
 
 def test_delete_object_removes_the_object():
