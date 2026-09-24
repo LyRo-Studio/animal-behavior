@@ -2208,11 +2208,12 @@ uploads through #94's chunked protocol and submits through #97's
 `POST /cutting-jobs/batch`. Backend communication lives in
 `frontend/src/services/cuttingJobs.ts`. Implementation-time judgment calls:
 
-- **One Excel picker for the batch, not one per Test.** Issue #100 says
-  "each with source video(s) and a timestamp Excel", but #97's endpoint
-  takes one shared workbook, because a researcher's sheet holds every
-  Test's row. Tests that need different workbooks go in separate
-  submissions.
+- **One timestamp Excel per batch, not one per Test (confirmed by the
+  user, 2026-09-24).** Issue #100's wording ("each with source video(s)
+  and a timestamp Excel") read as one workbook per Test. The confirmed rule
+  is one workbook uploaded per batch, which matches #97's endpoint: a
+  researcher's sheet holds every Test's row. Tests that need different
+  workbooks go in separate submissions.
 - **Resuming works at two levels:**
   - *Within one upload:* a dropped connection, or a 5xx such as a backend
     restart, is retried after 1 s, 3 s, 10 s and 30 s. Before each retry
