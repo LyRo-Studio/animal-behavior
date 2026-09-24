@@ -113,6 +113,16 @@ def _parse_cut_filename(filename: str) -> tuple[str | None, str | None, str | No
     return match["camera"], match["condition"], match["phase"]
 
 
+def has_cuts(s3: S3Client, test_id: str) -> bool:
+    """Whether `test_id` has at least one Cut — i.e. whether it exists at
+    all, by `TestNotFoundError`'s own definition — without listing all of
+    them (ticket #96: gating a re-cut). Stops at the first object found. A
+    malformed `test_id` never reaches S3, same as `list_cuts_for_test`."""
+    if not _TEST_ID_RE.match(test_id):
+        return False
+    return any(True for _ in s3.list_objects_info(f"{CUTS_PREFIX}{test_id}/", recursive=False))
+
+
 def list_cuts_for_test(s3: S3Client, test_id: str) -> list[Cut]:
     """All Cuts belonging to a Test, sorted by filename.
 

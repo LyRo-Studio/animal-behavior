@@ -8,6 +8,7 @@ AnalysisJob).
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_identity, identity_rate_limit_key, raise_if_throttled
@@ -16,6 +17,7 @@ from app.db.session import get_db
 from app.models.cutting_job import CuttingJob
 from app.schemas.cutting_jobs import CuttingJobOut, CuttingUploadOut, StartCuttingUploadRequest
 from app.services.cutting_jobs import (
+    CutsAlreadyExistError,
     CuttingJobNotFoundError,
     DuplicateCameraUploadError,
     InvalidSourceFilenameError,
@@ -54,6 +56,12 @@ from app.services.timestamp_excel import (
 )
 
 router = APIRouter(prefix="/cutting-jobs", tags=["cutting-jobs"])
+
+# Ticket #96: the machine-readable marker on the "Cuts already exist" 409, so
+# a client can tell it apart from the (never overridable) source-video
+# collision 409 and offer a confirm-and-resubmit, without matching on the
+# human-readable `detail` string.
+CUTS_ALREADY_EXIST_CODE = "cuts_already_exist"
 
 
 @router.post("/uploads", response_model=CuttingUploadOut, status_code=status.HTTP_201_CREATED)
@@ -180,17 +188,24 @@ async def create_cutting_job_endpoint(
     excel: UploadFile = File(...),
     c1_upload_id: str | None = Form(None),
     c2_upload_id: str | None = Form(None),
+    confirm_overwrite: bool = Form(False),
     identity: str | None = Depends(get_identity),
     db: Session = Depends(get_db),
     s3: S3Client = Depends(get_s3_client),
     media_prober: MediaProber = Depends(get_media_prober),
     limiter: RateLimiter = Depends(get_rate_limiter),
     root: Path = Depends(get_cutting_upload_root),
-) -> CuttingJob:
+) -> CuttingJob | JSONResponse:
     """Ticket #94: rate limited per identity (reusing rate_limit.py, same
     pattern as `POST /analyses`) — an upload-triggering endpoint is at
     least as expensive a thing to trigger repeatedly (CONTEXT.md's Feature
     C decision).
+
+    Ticket #96: re-cutting a Test that already has Cuts answers 409 with
+    `code: "cuts_already_exist"` and creates nothing; resubmitting the same
+    request with `confirm_overwrite=true` creates the job as normal. The
+    uploads aren't consumed by the blocked request, so the follow-up reuses
+    the same upload ids.
     """
     result = limiter.hit(
         identity_rate_limit_key("create-cutting-job", identity),
@@ -221,6 +236,15 @@ async def create_cutting_job_endpoint(
             uploads=uploads,
             s3=s3,
             media_prober=media_prober,
+            confirm_overwrite=confirm_overwrite,
+        )
+    except CutsAlreadyExistError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "detail": f"Cuts already exist for {exc.test_id}. Confirm to overwrite them.",
+                "code": CUTS_ALREADY_EXIST_CODE,
+            },
         )
     except NoSourceVideoUploadedError:
         raise HTTPException(
