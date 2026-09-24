@@ -277,6 +277,24 @@ def _run_claimed_job(
                     video.failure_reason = _PIPELINE_FAILURE_REASON
                     db.add(video)
 
+            # Ticket #91: a job spanning more than one Test also gets one
+            # report per Test, split out of the combined report
+            # `run_reporting` just wrote — post-processing only, never a
+            # second `run_reporting` call. A single-Test job's split would
+            # just duplicate the combined report, so it's never requested.
+            # A failed split is logged, not fatal: the combined report (the
+            # only one downloadable) is already complete, and failing every
+            # video over a missing convenience file would discard it.
+            if len(job.test_ids) > 1:
+                try:
+                    dogtrace_runner.split_report_by_test(unique_local_paths, output_dir=output_dir)
+                except Exception:
+                    logger.exception(
+                        "analysis_id=%s test_ids=%s splitting the combined report per Test failed",
+                        job.id,
+                        job.test_ids,
+                    )
+
     db.commit()
     db.refresh(job)
 
@@ -356,9 +374,12 @@ def _make_progress_callback(
 
 
 def _upload_artifacts(s3_client: S3Client, output_dir: Path, job: AnalysisJob) -> str | None:
-    """Upload every file under `output_dir` to `reports/<test_id>/<id>/`
-    (issue #44's report-persistence decision), preserving each file's path
-    relative to `output_dir` — not just `casiop_report.xlsx`.
+    """Upload every file under `output_dir` to `reports/<id>/` (issue #44's
+    report-persistence decision, made analysis-id-first by ticket #91),
+    preserving each file's path relative to `output_dir` — not just
+    `casiop_report.xlsx`. The combined report therefore always lands at
+    `reports/<id>/casiop_report.xlsx`, and a multi-Test job's per-Test
+    splits at `reports/<id>/<test_id>/casiop_report.xlsx`.
 
     Returns that prefix, or None if nothing was produced to upload (e.g.
     every video failed before any output was written, or downloading
@@ -366,20 +387,14 @@ def _upload_artifacts(s3_client: S3Client, output_dir: Path, job: AnalysisJob) -
     `AnalysisJob.report_available` must never point at an S3 prefix with
     nothing in it.
 
-    Uses `job.test_ids[0]` — the job's *first* Test in submission order —
-    to lead the prefix, same value `job.test_id` (the single-Test column
-    ticket #89 replaced) always held for the single-Test jobs this worker
-    has only ever processed so far. CONTEXT.md's Feature B design flips
-    this to an analysis-id-first prefix plus a per-Test report split once a
-    job can genuinely span more than one Test — deliberately a separate,
-    later ticket ("Worker/report generation"), not part of #89's
-    schema/API-only scope. A multi-Test job run through today's worker
-    still files its one combined report here, under only its first Test.
+    Jobs that ran before ticket #91 keep their old
+    `reports/<test_id>/<id>/` prefix: `report_s3_prefix` is stored per job,
+    so nothing already in S3 is moved or needs to be.
     """
     if not output_dir.exists():
         return None
 
-    prefix = f"reports/{job.test_ids[0]}/{job.id}/"
+    prefix = f"reports/{job.id}/"
     uploaded_anything = False
     for local_path in sorted(output_dir.rglob("*")):
         if not local_path.is_file():

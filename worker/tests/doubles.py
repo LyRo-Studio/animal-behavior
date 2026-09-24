@@ -6,10 +6,12 @@ matching backend/tests' own convention), so same-named modules in both
 would otherwise shadow each other unpredictably.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
-from app.services.s3_client import S3ObjectNotFoundError
+from app.services.s3_client import S3ObjectInfo, S3ObjectNotFoundError
 
 from worker.dogtrace_runner import ProgressCallback
 
@@ -18,12 +20,26 @@ from worker.dogtrace_runner import ProgressCallback
 class FakeS3Client:
     """Minimal in-memory double covering only what orchestrator.py actually
     calls (`download_file`, `upload_file`) — see
-    app/services/s3_client.py's S3Client Protocol. Not a full duplicate of
-    backend/tests/fakes.py's fuller FakeS3Client, which covers the
-    browsing/streaming methods this worker never uses.
+    app/services/s3_client.py's S3Client Protocol — plus
+    `list_objects_info`, which tests need only to create a wholesale
+    multi-Test job (`create_analysis_job` derives its Cuts by listing S3).
+    Not a full duplicate of backend/tests/fakes.py's fuller FakeS3Client,
+    which covers the browsing/streaming methods this worker never uses.
     """
 
     objects: dict[str, bytes] = field(default_factory=dict)
+
+    def list_objects_info(
+        self, prefix: str = "", *, recursive: bool = True
+    ) -> Iterator[S3ObjectInfo]:
+        for key in sorted(self.objects):
+            if not key.startswith(prefix):
+                continue
+            if not recursive and "/" in key[len(prefix) :]:
+                continue
+            yield S3ObjectInfo(
+                key=key, size=len(self.objects[key]), last_modified=datetime(2026, 1, 1, tzinfo=UTC)
+            )
 
     def download_file(self, key: str, local_path: Path) -> Path:
         if key not in self.objects:
@@ -60,6 +76,7 @@ class FakeDogTraceRunner:
     raises: Exception | None = None
     raises_after_videos: int = 0
     calls: list[list[Path]] = field(default_factory=list)
+    split_calls: list[list[Path]] = field(default_factory=list)
 
     def run_reporting(
         self,
@@ -98,3 +115,22 @@ class FakeDogTraceRunner:
 
         if succeeded_any:
             (output_dir / "casiop_report.xlsx").write_bytes(b"fake-combined-report")
+
+    def split_report_by_test(self, video_paths: list[Path], *, output_dir: Path) -> None:
+        """Writes a stub `<test_id>/casiop_report.xlsx` per Test, deriving
+        each Test id from the video filenames it was called with (the same
+        `T001_C2_ME_F1` shape dogtrace parses) — no pandas, no real report
+        content. Like the real split, only Tests with at least one
+        succeeded video (a row in the combined report) get a file, and
+        nothing is written when there's no combined report at all.
+        """
+        self.split_calls.append(list(video_paths))
+        if not (output_dir / "casiop_report.xlsx").exists():
+            return
+        for video_path in video_paths:
+            stem = Path(video_path).stem
+            if stem in self.failing_video_stems:
+                continue
+            test_dir = output_dir / stem.split("_", 1)[0]
+            test_dir.mkdir(exist_ok=True)
+            (test_dir / "casiop_report.xlsx").write_bytes(b"fake-per-test-report")

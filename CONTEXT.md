@@ -1370,9 +1370,9 @@ resolved design, not a proposal.
   folded in.
 
 **Multi-test analysis (Feature B) — foundation implemented by ticket #89,
-frontend selection/submission by ticket #90; worker/report generation (the
-analysis-id-first S3 prefix, per-Test report splitting) still not built,
-see that decision's amendment below.** an
+frontend selection/submission by ticket #90, worker/report generation (the
+analysis-id-first S3 prefix, per-Test report splitting) by ticket #91; the
+per-Test breakdown display (ticket #92) is still not built.** an
 `AnalysisJob` currently belongs to exactly one Test (`test_id`, a single
 required column). This lets one job span up to 10 Tests at once, submitted
 from a single "Analyze selected Tests" action, while keeping today's
@@ -1422,7 +1422,8 @@ single-Test flow byte-for-byte unchanged.
   second `run_reporting` call and not a change to `dogtrace-core`. A
   single-Test job produces only the one combined file, exactly as today —
   splitting it would just duplicate it.
-- **S3 report prefix flips to analysis-id-first:**
+- **S3 report prefix flips to analysis-id-first** (implemented by ticket
+  #91):
   `reports/<analysis_id>/casiop_report.xlsx` (combined, every job) and
   `reports/<analysis_id>/<test_id>/casiop_report.xlsx` (per-Test splits,
   multi-Test jobs only) — replaces `reports/<test_id>/<analysis_id>/`,
@@ -1512,7 +1513,8 @@ not done here.
   one is, today's worker still runs it correctly end-to-end (same combined
   `run_reporting` call, Test-oblivious) but files its one combined report
   under only that job's first Test's prefix — a known, temporary gap closed
-  by the next ticket, not a correctness bug in this one.
+  by the next ticket, not a correctness bug in this one. _Amended: closed by
+  ticket #91, see below._
 - **Rate limit budget chosen: 10 attempts / 5 minutes per identity**
   (`create_analysis_rate_limit_*` settings) — deliberately tighter than
   media-token issuance's 30/5m, since a job (up to 300 videos of real GPU
@@ -1568,6 +1570,41 @@ per-Test breakdown in `AnalysisView` is ticket #92, not this one.
   are picked). It submits through today's hand-picked request with those
   Cut keys — a convenience over the existing flow, not a single-Test
   wholesale request.
+
+**Multi-test analysis — worker/report generation (ticket #91):** the
+worker half of Feature B above, as designed there: the analysis-id-first
+S3 prefix and a per-Test report split for jobs spanning more than one Test.
+
+- **Every job, single-Test included, now uploads to `reports/<id>/`**; the
+  combined report stays at the prefix root, so `GET /analyses/{id}/report`
+  (`<report_s3_prefix>casiop_report.xlsx`) needed no change. Per-Test
+  splits are written by the runner to `output_dir/<test_id>/`, so the
+  existing "upload every file under `output_dir`" step puts them at
+  `reports/<id>/<test_id>/casiop_report.xlsx` with no upload-side special
+  case. They can't collide with dogtrace's per-video folders, which are
+  named after the full video stem (`T001_C2_ME_F1/`), never a bare Test id.
+- **The split runs only after `run_reporting` returned normally**, and only
+  when `job.test_ids` has more than one entry. A job whose `run_reporting`
+  raised partway gets no split (whatever combined report exists is still
+  uploaded, as before).
+- **A failed split is logged, not fatal.** The job keeps its real terminal
+  status and its combined report; it just has no (or only some) per-Test
+  files. Chosen over failing the job because the per-Test files aren't
+  downloadable this round and the combined report is already complete —
+  failing every video over them would discard good results.
+- **`RealDogTraceRunner.split_report_by_test` reads the combined report
+  back with pandas** (`read_excel`, `groupby("info_test_id")`, `to_excel
+  (index=False)`), importing pandas lazily like `dogtrace` itself, since
+  it's only present in the worker image. A group whose `info_test_id`
+  doesn't match the Test id pattern (`media_browser._TEST_ID_RE`) is
+  skipped, never turned into a directory name — the value comes from a file.
+  `video_paths` is accepted per the Protocol but unused by the real
+  implementation; only `FakeDogTraceRunner` derives Test ids from it.
+- **Verified against real dogtrace output:** the opt-in `real_gpu` test
+  runs real inference on one real C2 Cut from each of two Tests and checks
+  each per-Test file holds only its own Test's row, with the combined
+  report's columns. Run on 2026-09-24 inside `lynndelaere/dogtrace:1.1.1`
+  on the development GPU box: passed.
 
 **Video cutting + S3 ingestion (Feature C) — design finalized, not yet built:**
 lets a researcher upload a Test's source video(s) and have them sliced into
