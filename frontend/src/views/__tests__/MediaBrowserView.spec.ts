@@ -37,7 +37,7 @@ vi.mock('@/services/mediaBrowser', () => ({
 vi.mock('@/services/analyses', () => ({
   createAnalysis: createAnalysisMock,
   createWholesaleAnalysis: createWholesaleAnalysisMock,
-  // The real limit, not a mock — mirrors the backend's MAX_TESTS_PER_JOB.
+  // Issue #88's 10-Test limit, which the backend's MAX_TESTS_PER_JOB enforces.
   MAX_TESTS_PER_ANALYSIS: 10,
   listAnalyses: listAnalysesMock,
 }))

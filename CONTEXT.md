@@ -1370,8 +1370,9 @@ resolved design, not a proposal.
   folded in.
 
 **Multi-test analysis (Feature B) — foundation implemented by ticket #89,
-frontend selection/submission by ticket #90; worker/report generation (the analysis-id-first S3 prefix, per-Test report
-splitting) still not built, see that decision's amendment below.** an
+frontend selection/submission by ticket #90; worker/report generation (the
+analysis-id-first S3 prefix, per-Test report splitting) still not built,
+see that decision's amendment below.** an
 `AnalysisJob` currently belongs to exactly one Test (`test_id`, a single
 required column). This lets one job span up to 10 Tests at once, submitted
 from a single "Analyze selected Tests" action, while keeping today's
@@ -1547,7 +1548,10 @@ per-Test breakdown in `AnalysisView` is ticket #92, not this one.
   checked** and always submits wholesale (`cuts` omitted). With exactly one
   Test checked it stays disabled, pointing at the Cut table instead: the
   single-Test case is always today's hand-picked request (`cuts` given), so
-  there is exactly one way to analyze a single Test, not two.
+  there is exactly one way to analyze a single Test, not two. A single
+  checked Test is therefore inert on its own — hand-picking always acts on
+  the *listed* Test, which may differ from the checked one; the panel's
+  hint says so rather than tying the two together.
 - **Two service functions, not one with an optional `cuts`:**
   `createAnalysis(testId, cutKeys)` (unchanged signature) and
   `createWholesaleAnalysis(testIds)`, sharing one private POST helper — so

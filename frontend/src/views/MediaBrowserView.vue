@@ -155,8 +155,8 @@ async function analyzeSelected() {
 // searching Test after Test to check each one is the whole point. An array,
 // not a Set, so the job's Tests keep the order they were checked in.
 const selectedTestIds = ref<string[]>([])
-const isCreatingTestsAnalysis = ref(false)
-const testsAnalysisError = ref<string | null>(null)
+const isCreatingWholesaleAnalysis = ref(false)
+const wholesaleAnalysisError = ref<string | null>(null)
 
 // More than one Test checked means the job is wholesale for every one of
 // them (CONTEXT.md's "Wholesale") — per-Cut hand-picking only exists for
@@ -181,18 +181,21 @@ function toggleTestSelection(testId: string) {
   selectedTestIds.value = isTestSelected(testId)
     ? selectedTestIds.value.filter((id) => id !== testId)
     : [...selectedTestIds.value, testId]
-  testsAnalysisError.value = null
+  wholesaleAnalysisError.value = null
   // A hand-picked Cut left checked (but now disabled) would misleadingly
   // suggest only it would be analyzed — drop it, same "never leave a stale
   // selection showing" rule search() follows.
   if (isWholesaleSelection.value) selectedCutKeys.value = new Set()
 }
 
+// No stale-response token (unlike analyzeSelected's `analysisToken`): the
+// Test selection this submits isn't tied to the listed Test and survives
+// `search()`, so a response landing after a new search still belongs here.
 async function analyzeSelectedTests() {
-  if (selectedTestIds.value.length < 2 || isCreatingTestsAnalysis.value) return
+  if (!isWholesaleSelection.value || isCreatingWholesaleAnalysis.value) return
 
-  isCreatingTestsAnalysis.value = true
-  testsAnalysisError.value = null
+  isCreatingWholesaleAnalysis.value = true
+  wholesaleAnalysisError.value = null
   try {
     const job = await createWholesaleAnalysis([...selectedTestIds.value])
     // Same reasoning as analyzeSelected's own navigation above: the job
@@ -203,9 +206,9 @@ async function analyzeSelectedTests() {
       // See above.
     }
   } catch (err) {
-    testsAnalysisError.value = err instanceof Error ? err.message : 'Failed to start analysis.'
+    wholesaleAnalysisError.value = err instanceof Error ? err.message : 'Failed to start analysis.'
   } finally {
-    isCreatingTestsAnalysis.value = false
+    isCreatingWholesaleAnalysis.value = false
   }
 }
 
@@ -606,8 +609,8 @@ onMounted(() => {
           At most {{ MAX_TESTS_PER_ANALYSIS }} Tests can be analyzed together — submit larger
           batches as separate analyses.
         </p>
-        <p v-if="testsAnalysisError" class="mt-2 text-sm text-danger" role="alert">
-          {{ testsAnalysisError }}
+        <p v-if="wholesaleAnalysisError" class="mt-2 text-sm text-danger" role="alert">
+          {{ wholesaleAnalysisError }}
         </p>
         <ul class="mt-2 flex flex-wrap gap-2">
           <li
@@ -628,17 +631,17 @@ onMounted(() => {
           </li>
         </ul>
         <p v-if="!isWholesaleSelection" class="mt-2 text-sm text-muted">
-          Select at least two Tests to analyze them together. For a single Test, pick its Cuts
-          below.
+          Check at least one more Test to analyze them together. To analyze a single Test, search it
+          and pick its Cuts instead.
         </p>
         <button
           type="button"
           data-testid="analyze-selected-tests"
           class="mt-4 rounded-md bg-primary px-4 py-2 font-medium text-white hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-          :disabled="selectedTestIds.length < 2 || isCreatingTestsAnalysis"
+          :disabled="!isWholesaleSelection || isCreatingWholesaleAnalysis"
           @click="analyzeSelectedTests"
         >
-          {{ isCreatingTestsAnalysis ? 'Starting analysis…' : 'Analyze selected Tests' }}
+          {{ isCreatingWholesaleAnalysis ? 'Starting analysis…' : 'Analyze selected Tests' }}
         </button>
       </div>
 
