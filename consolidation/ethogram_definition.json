@@ -1,0 +1,1053 @@
+{
+  "ethogram": "20241218_Printbaar ethogram.xlsx",
+  "ethogram_sha256": "e34f16a3b6546342ebdff44f647718b317195a7848dc5b1b356eeb0da4870c84",
+  "groups": [
+    {
+      "name": "General posture/locomotion of the dog",
+      "out_of_sight": "Out of sight position/locomotion",
+      "scored_phases": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "excluded": null
+    },
+    {
+      "name": "Attention of the dog",
+      "out_of_sight": "Out of sight attention",
+      "scored_phases": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "excluded": null
+    },
+    {
+      "name": "Vocalisation by the dog",
+      "out_of_sight": null,
+      "scored_phases": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "excluded": null
+    },
+    {
+      "name": "Distance of the dog to TP",
+      "out_of_sight": null,
+      "scored_phases": [
+        1,
+        3,
+        6
+      ],
+      "excluded": null
+    },
+    {
+      "name": "Distance of the dog to FP",
+      "out_of_sight": null,
+      "scored_phases": [
+        1,
+        3,
+        6
+      ],
+      "excluded": null
+    },
+    {
+      "name": "Location of the dog (inner/outer)",
+      "out_of_sight": null,
+      "scored_phases": [
+        1,
+        3,
+        6
+      ],
+      "excluded": null
+    },
+    {
+      "name": "Dog following the TP",
+      "out_of_sight": null,
+      "scored_phases": [
+        2,
+        4,
+        7
+      ],
+      "excluded": null
+    },
+    {
+      "name": "Exploratory and self-maintenance behaviours by the dog",
+      "out_of_sight": "Out of sight expl self maint beh dog",
+      "scored_phases": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "excluded": null
+    },
+    {
+      "name": "Stress-related behaviours by the dog",
+      "out_of_sight": "Out of sight stress-related",
+      "scored_phases": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "excluded": null
+    },
+    {
+      "name": "Tail position",
+      "out_of_sight": "Out of sight tail",
+      "scored_phases": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "excluded": null
+    },
+    {
+      "name": "General posture/locomotion / behavior by TP or FP",
+      "out_of_sight": null,
+      "scored_phases": null,
+      "excluded": "TP/FP protocol behaviour, not dog behaviour."
+    }
+  ],
+  "behaviours": [
+    {
+      "name": "Lying down sternally head up",
+      "code": "LSU",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Orientation dog body"
+      ],
+      "order": 1
+    },
+    {
+      "name": "Lying down sternally head down",
+      "code": "LSD",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Orientation dog body"
+      ],
+      "order": 2
+    },
+    {
+      "name": "Lying down laterally head up",
+      "code": "LLU",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Orientation dog body"
+      ],
+      "order": 3
+    },
+    {
+      "name": "Lying down laterally head down",
+      "code": "LLD",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Orientation dog body"
+      ],
+      "order": 4
+    },
+    {
+      "name": "Lying down dorsally",
+      "code": "LDD",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Orientation dog body"
+      ],
+      "order": 5
+    },
+    {
+      "name": "Sitting",
+      "code": "SIT",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Orientation dog body",
+        "Against/on empty chair"
+      ],
+      "order": 6
+    },
+    {
+      "name": "Standing",
+      "code": "STA",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Orientation dog body",
+        "Against/on empty chair"
+      ],
+      "order": 7
+    },
+    {
+      "name": "Walking around",
+      "code": "WAL",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 8
+    },
+    {
+      "name": "Running around",
+      "code": "RUN",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 9
+    },
+    {
+      "name": "Jumping up with contact",
+      "code": "JWC",
+      "group": "General posture/locomotion of the dog",
+      "kind": "Event",
+      "modifier_categories": [
+        "Contact"
+      ],
+      "order": 10
+    },
+    {
+      "name": "Jumping up without contact",
+      "code": "JNC",
+      "group": "General posture/locomotion of the dog",
+      "kind": "Event",
+      "modifier_categories": [
+        "Contact"
+      ],
+      "order": 11
+    },
+    {
+      "name": "Stretching",
+      "code": "STG",
+      "group": "General posture/locomotion of the dog",
+      "kind": "Event",
+      "modifier_categories": [
+        "Contact"
+      ],
+      "order": 12
+    },
+    {
+      "name": "Leaning onto",
+      "code": "LON",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Contact"
+      ],
+      "order": 13
+    },
+    {
+      "name": "Being on top of person active",
+      "code": "OPA",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 14
+    },
+    {
+      "name": "Being on top of person inactive",
+      "code": "OPI",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 15
+    },
+    {
+      "name": "Mounting",
+      "code": "MOU",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 16
+    },
+    {
+      "name": "Chasing tail",
+      "code": "CTA",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 17
+    },
+    {
+      "name": "Lunging",
+      "code": "LUN",
+      "group": "General posture/locomotion of the dog",
+      "kind": "Event",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 18
+    },
+    {
+      "name": "Startling",
+      "code": "STL",
+      "group": "General posture/locomotion of the dog",
+      "kind": "Event",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 19
+    },
+    {
+      "name": "Recoil",
+      "code": "REC",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 20
+    },
+    {
+      "name": "Fleeing",
+      "code": "FLE",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 21
+    },
+    {
+      "name": "Creeping",
+      "code": "CRE",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 22
+    },
+    {
+      "name": "Play bow",
+      "code": "PBO",
+      "group": "General posture/locomotion of the dog",
+      "kind": "Event",
+      "modifier_categories": [],
+      "order": 23
+    },
+    {
+      "name": "Digging",
+      "code": "DIG",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 24
+    },
+    {
+      "name": "Other",
+      "code": "OTH",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 25
+    },
+    {
+      "name": "Out of sight position/locomotion",
+      "code": "OOS",
+      "group": "General posture/locomotion of the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 26
+    },
+    {
+      "name": "Attention to FP",
+      "code": "AFP",
+      "group": "Attention of the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 27
+    },
+    {
+      "name": "Attention to TP",
+      "code": "ATP",
+      "group": "Attention of the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 28
+    },
+    {
+      "name": "Attention to camera person",
+      "code": "ACP",
+      "group": "Attention of the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 29
+    },
+    {
+      "name": "Attention other",
+      "code": "AOT",
+      "group": "Attention of the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 30
+    },
+    {
+      "name": "Out of sight attention",
+      "code": "OSA",
+      "group": "Attention of the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 31
+    },
+    {
+      "name": "Panting",
+      "code": "PAN",
+      "group": "Vocalisation by the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 32
+    },
+    {
+      "name": "Snorting",
+      "code": "SRT",
+      "group": "Vocalisation by the dog",
+      "kind": "Event",
+      "modifier_categories": [],
+      "order": 33
+    },
+    {
+      "name": "Barking",
+      "code": "BAR",
+      "group": "Vocalisation by the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 34
+    },
+    {
+      "name": "Growling",
+      "code": "GRO",
+      "group": "Vocalisation by the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 35
+    },
+    {
+      "name": "Vocalisation other",
+      "code": "VOC",
+      "group": "Vocalisation by the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 36
+    },
+    {
+      "name": "No vocalisation",
+      "code": "NVO",
+      "group": "Vocalisation by the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 37
+    },
+    {
+      "name": "Distance TP zero",
+      "code": "ATO",
+      "group": "Distance of the dog to TP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 38
+    },
+    {
+      "name": "Distance TP < 1 dog length",
+      "code": "AT1",
+      "group": "Distance of the dog to TP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 39
+    },
+    {
+      "name": "Distance TP ≥ 1 dog length",
+      "code": "AT2",
+      "group": "Distance of the dog to TP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 40
+    },
+    {
+      "name": "Distance FP zero",
+      "code": "AFO",
+      "group": "Distance of the dog to FP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 41
+    },
+    {
+      "name": "Distance FP < 1 dog length",
+      "code": "AF1",
+      "group": "Distance of the dog to FP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 42
+    },
+    {
+      "name": "Distance FP ≥ 1 dog length",
+      "code": "AF2",
+      "group": "Distance of the dog to FP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 43
+    },
+    {
+      "name": "Inner square",
+      "code": "IQA",
+      "group": "Location of the dog (inner/outer)",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 44
+    },
+    {
+      "name": "Outer square",
+      "code": "OQA",
+      "group": "Location of the dog (inner/outer)",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 45
+    },
+    {
+      "name": "Square zero",
+      "code": "AQA",
+      "group": "Location of the dog (inner/outer)",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 46
+    },
+    {
+      "name": "Following TP less than or equal to 1 dog length",
+      "code": "FTC",
+      "group": "Dog following the TP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 47
+    },
+    {
+      "name": "Following TP greater than 1 dog length",
+      "code": "FTF",
+      "group": "Dog following the TP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 48
+    },
+    {
+      "name": "Not following TP",
+      "code": "NFT",
+      "group": "Dog following the TP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 49
+    },
+    {
+      "name": "Following TP zero",
+      "code": "FTO",
+      "group": "Dog following the TP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 50
+    },
+    {
+      "name": "First contact with TP",
+      "code": "FCT",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "Event",
+      "modifier_categories": [],
+      "order": 51
+    },
+    {
+      "name": "Pushing snout",
+      "code": "PUN",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "Event",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 52
+    },
+    {
+      "name": "Pawing",
+      "code": "PAW",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 53
+    },
+    {
+      "name": "Leaning back",
+      "code": "LEB",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 54
+    },
+    {
+      "name": "Exploring person",
+      "code": "XPE",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 55
+    },
+    {
+      "name": "Exploring hands",
+      "code": "XHA",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 56
+    },
+    {
+      "name": "Exploring face",
+      "code": "XFA",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 57
+    },
+    {
+      "name": "Exploring empty chair",
+      "code": "XCH",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 58
+    },
+    {
+      "name": "Exploring object(s)",
+      "code": "XOB",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 59
+    },
+    {
+      "name": "Biting face",
+      "code": "BFA",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 60
+    },
+    {
+      "name": "Biting hands",
+      "code": "BHA",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 61
+    },
+    {
+      "name": "Biting clothing, shoe (laces)",
+      "code": "BCL",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 62
+    },
+    {
+      "name": "Biting object(s)",
+      "code": "BOB",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 63
+    },
+    {
+      "name": "Scratching object(s)",
+      "code": "SCO",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 64
+    },
+    {
+      "name": "Self maintenance",
+      "code": "SMA",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 65
+    },
+    {
+      "name": "Scratching self",
+      "code": "SCR",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 66
+    },
+    {
+      "name": "Shaking",
+      "code": "SHA",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "Event",
+      "modifier_categories": [],
+      "order": 67
+    },
+    {
+      "name": "Stiffening up",
+      "code": "SUP",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 68
+    },
+    {
+      "name": "Other expl self-maint beh dog",
+      "code": "OTE",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 69
+    },
+    {
+      "name": "Out of sight expl self maint beh dog",
+      "code": "OSE",
+      "group": "Exploratory and self-maintenance behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 70
+    },
+    {
+      "name": "Yawning",
+      "code": "YAW",
+      "group": "Stress-related behaviours by the dog",
+      "kind": "Event",
+      "modifier_categories": [],
+      "order": 71
+    },
+    {
+      "name": "Lip licking",
+      "code": "LLI",
+      "group": "Stress-related behaviours by the dog",
+      "kind": "Event",
+      "modifier_categories": [],
+      "order": 72
+    },
+    {
+      "name": "Turning head away",
+      "code": "THA",
+      "group": "Stress-related behaviours by the dog",
+      "kind": "Event",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 73
+    },
+    {
+      "name": "Lifting paw",
+      "code": "LPA",
+      "group": "Stress-related behaviours by the dog",
+      "kind": "Event",
+      "modifier_categories": [],
+      "order": 74
+    },
+    {
+      "name": "Staring",
+      "code": "STR",
+      "group": "Stress-related behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [
+        "Type of person / stimulus"
+      ],
+      "order": 75
+    },
+    {
+      "name": "Urinating",
+      "code": "URI",
+      "group": "Stress-related behaviours by the dog",
+      "kind": "Event",
+      "modifier_categories": [],
+      "order": 76
+    },
+    {
+      "name": "Defecating",
+      "code": "DEF",
+      "group": "Stress-related behaviours by the dog",
+      "kind": "Event",
+      "modifier_categories": [],
+      "order": 77
+    },
+    {
+      "name": "Obstructing TP",
+      "code": "OBT",
+      "group": "Stress-related behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 78
+    },
+    {
+      "name": "Other stress-rel beh dog",
+      "code": "IDS",
+      "group": "Stress-related behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 79
+    },
+    {
+      "name": "Out of sight stress-related",
+      "code": "OSS",
+      "group": "Stress-related behaviours by the dog",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 80
+    },
+    {
+      "name": "Tail tucked",
+      "code": "TTD",
+      "group": "Tail position",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 81
+    },
+    {
+      "name": "Tail not tucked",
+      "code": "TND",
+      "group": "Tail position",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 82
+    },
+    {
+      "name": "Tail hanging down",
+      "code": "THG",
+      "group": "Tail position",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 83
+    },
+    {
+      "name": "Other tail",
+      "code": "TTO",
+      "group": "Tail position",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 84
+    },
+    {
+      "name": "Out of sight tail",
+      "code": "OST",
+      "group": "Tail position",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 85
+    },
+    {
+      "name": "Standing by TP",
+      "code": "STP",
+      "group": "General posture/locomotion / behavior by TP or FP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 86
+    },
+    {
+      "name": "Sitting (by TP or VP)",
+      "code": "IPS",
+      "group": "General posture/locomotion / behavior by TP or FP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 87
+    },
+    {
+      "name": "Walking by TP",
+      "code": "WTP",
+      "group": "General posture/locomotion / behavior by TP or FP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 88
+    },
+    {
+      "name": "Approaching the dog by TP",
+      "code": "ADT",
+      "group": "General posture/locomotion / behavior by TP or FP",
+      "kind": "Event",
+      "modifier_categories": [],
+      "order": 89
+    },
+    {
+      "name": "Extending hand to dog by TP",
+      "code": "ETP",
+      "group": "General posture/locomotion / behavior by TP or FP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 90
+    },
+    {
+      "name": "Petting dog by TP",
+      "code": "PET",
+      "group": "General posture/locomotion / behavior by TP or FP",
+      "kind": "Event",
+      "modifier_categories": [],
+      "order": 91
+    },
+    {
+      "name": "Coughing by TP",
+      "code": "COT",
+      "group": "General posture/locomotion / behavior by TP or FP",
+      "kind": "Event",
+      "modifier_categories": [],
+      "order": 92
+    },
+    {
+      "name": "Running hand through hair by TP",
+      "code": "RHT",
+      "group": "General posture/locomotion / behavior by TP or FP",
+      "kind": "Event",
+      "modifier_categories": [],
+      "order": 93
+    },
+    {
+      "name": "Crossing legs by TP",
+      "code": "CLT",
+      "group": "General posture/locomotion / behavior by TP or FP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 94
+    },
+    {
+      "name": "Arrival FP with dog",
+      "code": "AFA",
+      "group": "General posture/locomotion / behavior by TP or FP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 95
+    },
+    {
+      "name": "Departure FP",
+      "code": "DFA",
+      "group": "General posture/locomotion / behavior by TP or FP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 96
+    },
+    {
+      "name": "FP zero",
+      "code": "FAO",
+      "group": "General posture/locomotion / behavior by TP or FP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 97
+    },
+    {
+      "name": "End of test FP",
+      "code": "ETF",
+      "group": "General posture/locomotion / behavior by TP or FP",
+      "kind": "State",
+      "modifier_categories": [],
+      "order": 98
+    }
+  ],
+  "modifier_categories": {
+    "Orientation dog body": [
+      "Orientation body dog to test person",
+      "Orientation body dog to familiar person",
+      "Orientation body dog to camera person",
+      "Orientation body dog to direction in which FP left",
+      "Other orientation"
+    ],
+    "Contact": [
+      "Test person",
+      "Familiar person",
+      "Gate",
+      "Chair"
+    ],
+    "Type of person / stimulus": [
+      "Test person",
+      "Familiar person",
+      "Camera person",
+      "Other"
+    ],
+    "Against/on empty chair": [
+      "nothing",
+      "test person",
+      "familiar person",
+      "gate",
+      "chair",
+      "on empty chair"
+    ]
+  },
+  "behaviour_aliases": {
+    "Other general posture/locomotion of the dog": "Other",
+    "Jumping without contact": "Jumping up without contact",
+    "Attention to familiar person": "Attention to FP",
+    "Attention to test person": "Attention to TP",
+    "Obstructing test person": "Obstructing TP",
+    "Out of sight position / locomotion": "Out of sight position/locomotion",
+    "Standing bij TP": "Standing by TP",
+    "Sitting (by TP or FP)": "Sitting (by TP or VP)",
+    "Walking by test person": "Walking by TP",
+    "Petting the dog": "Petting dog by TP",
+    "Running hand trough hair by TP": "Running hand through hair by TP",
+    "Arrival FP": "Arrival FP with dog",
+    "Departure familiar person": "Departure FP",
+    "Familiar person zero": "FP zero",
+    "End of test familiar person": "End of test FP"
+  },
+  "modifier_aliases": {
+    "Camera person orientation dog": "Orientation body dog to camera person",
+    "Familiar person orientation dog": "Orientation body dog to familiar person",
+    "Test person orientation dog": "Orientation body dog to test person",
+    "Direction in which FP left": "Orientation body dog to direction in which FP left",
+    "Familiar persoon": "Familiar person",
+    "Familiar person contact": "Familiar person",
+    "Test person contact": "Test person",
+    "Against nothing": "nothing",
+    "Against chair": "chair",
+    "Against gate": "gate",
+    "Against familiar person": "familiar person",
+    "Against test person": "test person"
+  },
+  "excluded_behaviours": {
+    "First contact with TP": "A separate first-contact measure, only scored in ME F1."
+  }
+}

@@ -21,12 +21,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/app ./app
 COPY backend/alembic ./alembic
 COPY backend/alembic.ini ./alembic.ini
-# Only the two domain modules the adapter (app/services/consolidation.py)
-# actually imports — not consolidation/'s own requirements.txt, notebook,
-# or sample fixtures, mirroring worker/Dockerfile's "only the slice this
-# image actually needs" style of explicit-file COPY.
+# Only the domain modules the adapter (app/services/consolidation.py)
+# actually imports, plus the generated Ethogram definition the importer
+# loads (ticket #150) — not consolidation/'s own requirements.txt, the
+# Ethogram workbook it's generated from, or sample fixtures, mirroring
+# worker/Dockerfile's "only the slice this image actually needs" style of
+# explicit-file COPY.
 COPY consolidation/consolidatie.py ./consolidation/consolidatie.py
 COPY consolidation/observer_import.py ./consolidation/observer_import.py
+COPY consolidation/ethogram_definition.py ./consolidation/ethogram_definition.py
+COPY consolidation/ethogram_definition.json ./consolidation/ethogram_definition.json
 
 EXPOSE 8000
 
