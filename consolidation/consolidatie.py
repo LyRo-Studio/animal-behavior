@@ -1,5 +1,6 @@
 """Gedragsduur en aantallen consolideren met een noemer per gedragsgroep."""
 import math
+import pandas as pd
 
 SCHEMAS = {
     "fases": ["test_id", "fase", "duur_s"],
@@ -44,18 +45,34 @@ def _controleer(frame, name, keys, numeric=True):
     return frame
 
 
-def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, tolerantie_s=1e-9,
-               geselecteerde_fases=tuple(range(1, 8))):
-    """Som gedrag / (som fase - som groeps-OOS), uitsluitend fases 1..7.
+def fase_label(fase):
+    """Observer-fase 12 -> 'ZE F4'. Fase 8 (vertrek eigenaar) telt nooit mee."""
+    return f"ME F{fase}" if fase <= 7 else f"ZE F{fase - 8}"
 
-    Invoer bevat fasesommen, geen losse gebeurtenissen. Iedere combinatie van
-    aanwezige fase en gedefinieerd gedrag/groep moet expliciet aanwezig zijn.
-    Een volledig onzichtbare groep krijgt een lege fractie met een duidelijke status.
+
+def _fase_labels(fases):
+    return ", ".join(fase_label(x) for x in sorted(set(fases)))
+
+
+def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, tolerantie_s=1e-9):
+    """Som gedrag / (som fase - som groeps-OOS), voor ieder niveau apart.
+
+    `niveaus` koppelt ieder niveau aan zijn fases (`fases`); een niveau met
+    `per_fase` rekent iedere fase apart. Invoer bevat fasesommen, geen losse
+    gebeurtenissen. Iedere combinatie van aanwezige fase en gedefinieerd
+    gedrag/groep moet expliciet aanwezig zijn. Zichtbare tijd van hoogstens
+    `tolerantie_s` is geen zichtbare tijd: lege waarde met status
+    no_visible_time, nooit 0. Een niveau zonder aanwezige fases heeft geen rijen.
+
+    Geeft de sommen (per niveau, test[, fase] en gedrag), de invoer per fase
+    en de noemers (per niveau, test[, fase] en groep).
     """
-    gekozen = tuple(geselecteerde_fases)
-    if (not gekozen or len(set(gekozen)) != len(gekozen)
-            or any(type(x) is not int or not 1 <= x <= 15 for x in gekozen)):
-        raise ValueError("Ongeldige selectie van fases: gebruik unieke gehele fasenummers 1..15.")
+    for naam, niveau in niveaus.items():
+        gekozen = tuple(niveau["fases"])
+        if (not gekozen or len(set(gekozen)) != len(gekozen)
+                or any(type(x) is not int or not 1 <= x <= 15 for x in gekozen)):
+            raise ValueError(f"Ongeldige fases voor niveau {naam}: gebruik unieke gehele fasenummers 1..15.")
+    alle_fases = {x for niveau in niveaus.values() for x in niveau["fases"]}
     f = _controleer(fases, "fases", ["test_id", "fase"])
     m = _controleer(gedrag_groepen, "gedrag_groepen", ["gedrag"], numeric=False)
     if m.groep.isna().any() or not m.groep.map(
@@ -86,13 +103,11 @@ def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, tolerantie_s=1
             raise ValueError(f"{column}: laat de niet-toepasselijke meetkolom leeg.")
         b[column] = b[column].astype(float)
     o = _controleer(out_of_sight, "out_of_sight", ["test_id", "fase", "groep"])
-    f = f[f.fase.isin(gekozen)].copy()
-    b = b[b.fase.isin(gekozen)].copy()
-    o = o[o.fase.isin(gekozen)].copy()
+    f = f[f.fase.isin(alle_fases)].copy()
+    b = b[b.fase.isin(alle_fases)].copy()
+    o = o[o.fase.isin(alle_fases)].copy()
     if f.empty:
-        raise ValueError(f"Geen aanwezige fases binnen de selectie {gekozen}.")
-    if not set(b.gedrag) <= set(m.gedrag):
-        raise ValueError("Onbekend gedrag: ontbrekende groepskoppeling.")
+        raise ValueError(f"The export has no Observations in the phases of any level ({_fase_labels(alle_fases)}).")
     if not set(o.groep) <= set(m.groep):
         raise ValueError("Onbekende out-of-sight-groep.")
     phase_keys = ["test_id", "fase"]
@@ -115,30 +130,53 @@ def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, tolerantie_s=1
         o.rename(columns={"duur_s": "out_of_sight_s"}),
         on=phase_keys + ["groep"], validate="one_to_one")
     visibility["zichtbaar_s"] = visibility.fase_duur_s - visibility.out_of_sight_s
-    if (visibility.zichtbaar_s < -tolerantie_s).any():
-        raise ValueError("Out of sight is groter dan de faseduur.")
+    for r in visibility[visibility.zichtbaar_s < -tolerantie_s].head(1).itertuples():
+        raise ValueError(
+            f"Out of Sight exceeds Duration for test {r.test_id}, Observer phase {r.fase} "
+            f"({fase_label(r.fase)}), {r.groep}: {r.out_of_sight_s} s against {r.fase_duur_s} s.")
     visibility["zichtbaar_s"] = visibility.zichtbaar_s.clip(lower=0)
     detail = b.rename(columns={"duur_s": "gedrag_s"}).merge(
         visibility, on=phase_keys + ["groep"], validate="many_to_one")
-    if (detail.gedrag_s > detail.zichtbaar_s + tolerantie_s).any():
-        raise ValueError("Gedragsduur is groter dan de zichtbare tijd binnen een fase.")
-    if ((detail.zichtbaar_s == 0) & (detail.aantal > 0)).any():
-        raise ValueError("Positief aantal zonder zichtbare tijd binnen een fase.")
-    sums = detail.groupby(["test_id", "groep", "gedrag", "meettype"], as_index=False).agg(
-        gedrag_s=("gedrag_s", lambda x: x.sum(min_count=1)),
-        aantal=("aantal", lambda x: x.sum(min_count=1)),
-        totale_faseduur_s=("fase_duur_s", "sum"),
-        out_of_sight_s=("out_of_sight_s", "sum"),
-        aantal_fases=("fase", "nunique"),
-        aanwezige_fases=("fase", lambda x: ", ".join(map(str, sorted(x)))),
-    )
-    # Eerst sommeren en dan delen, geen gemiddelde van fasepercentages.
-    sums["zichtbaar_s"] = (sums.totale_faseduur_s - sums.out_of_sight_s).clip(lower=0)
-    sums["fractie"] = sums.gedrag_s / sums.zichtbaar_s.where(sums.zichtbaar_s > 0)
+    for r in detail[detail.gedrag_s > detail.zichtbaar_s + tolerantie_s].head(1).itertuples():
+        raise ValueError(
+            f"{r.gedrag} lasts longer than its visible time for test {r.test_id}, Observer phase "
+            f"{r.fase} ({fase_label(r.fase)}): {r.gedrag_s} s against {r.zichtbaar_s} s visible.")
+    for r in detail[(detail.zichtbaar_s <= tolerantie_s) & (detail.aantal > 0)].head(1).itertuples():
+        raise ValueError(
+            f"{r.gedrag} is above 0 without visible time for test {r.test_id}, Observer phase "
+            f"{r.fase} ({fase_label(r.fase)}): {r.groep} was out of sight the whole phase.")
+    sommen, noemers = [], []
+    for naam, niveau in niveaus.items():
+        sleutel = phase_keys if niveau.get("per_fase") else ["test_id"]
+        d = detail[detail.fase.isin(niveau["fases"])]
+        v = visibility[visibility.fase.isin(niveau["fases"])]
+        som = d.groupby(sleutel + ["groep", "gedrag", "meettype"], as_index=False).agg(
+            gedrag_s=("gedrag_s", lambda x: x.sum(min_count=1)),
+            aantal=("aantal", lambda x: x.sum(min_count=1)),
+            totale_faseduur_s=("fase_duur_s", "sum"),
+            out_of_sight_s=("out_of_sight_s", "sum"),
+            aantal_fases=("fase", "nunique"),
+            aanwezige_fases=("fase", _fase_labels),
+        )
+        noemer = v.groupby(sleutel + ["groep"], as_index=False).agg(
+            totale_faseduur_s=("fase_duur_s", "sum"),
+            out_of_sight_s=("out_of_sight_s", "sum"),
+            aanwezige_fases=("fase", _fase_labels),
+        )
+        for frame, lijst in [(som, sommen), (noemer, noemers)]:
+            frame.insert(0, "level", naam)
+            lijst.append(frame)
+    sums, noemers = pd.concat(sommen, ignore_index=True), pd.concat(noemers, ignore_index=True)
+    for frame in (sums, noemers):
+        if "fase" in frame:
+            frame["fase"] = frame.fase.astype("Int64")
+        # Eerst sommeren en dan delen, geen gemiddelde van fasepercentages.
+        frame["zichtbaar_s"] = (frame.totale_faseduur_s - frame.out_of_sight_s).clip(lower=0)
+        frame["status"] = frame.zichtbaar_s.map(
+            lambda x: "ok" if x > tolerantie_s else "no_visible_time")
+    zichtbaar = sums.zichtbaar_s.where(sums.status == "ok")
+    sums["fractie"] = sums.gedrag_s / zichtbaar
     sums["percentage"] = 100 * sums.fractie
-    sums["frequentie_per_s"] = sums.aantal / sums.zichtbaar_s.where(sums.zichtbaar_s > 0)
+    sums["frequentie_per_s"] = sums.aantal / zichtbaar
     sums["frequentie_per_min"] = 60 * sums.frequentie_per_s
-    sums["status"] = sums.zichtbaar_s.map(
-        lambda x: "ok" if x > 0 else "geen_zichtbare_tijd")
-    return sums, detail.sort_values(phase_keys + ["groep", "gedrag"]).reset_index(drop=True)
-
+    return sums, detail.sort_values(phase_keys + ["groep", "gedrag"]).reset_index(drop=True), noemers

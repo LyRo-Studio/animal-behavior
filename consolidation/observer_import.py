@@ -8,7 +8,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
 from consolidation import ethogram_definition
 from consolidation.ethogram_definition import normalise
-from consolidation.consolidatie import consolideer
+from consolidation.consolidatie import consolideer, fase_label
 
 # Welke Behaviour group en Out of Sight bij een kolom horen, komt uit de
 # definitie die uit het ethogram gegenereerd is (ticket #150), nooit uit de
@@ -21,12 +21,16 @@ BLAD = "Results"
 EIGENAAR_AANWEZIG = "Aanwezigheid FP in fase"
 VERPLICHTE_KOLOMMEN = ["Observations", "Test ID", "Dog ID", EIGENAAR_AANWEZIG, "Duration"]
 TOLERANTIE_S = 0.001  # Observer exporteert seconden met een beperkte decimale precisie.
-DELEN = {
-    "1": {"naam": "Met eigenaar", "fases": tuple(range(1, 8)), "niveau": "with_owner"},
-    "2": {"naam": "Zonder eigenaar", "fases": tuple(range(9, 16)), "niveau": "without_owner"},
-    "1+2": {"naam": "Met en zonder eigenaar samen", "fases": tuple(range(1, 8)) + tuple(range(9, 16)),
-            "niveau": "combined"},
+ME, ZE = tuple(range(1, 8)), tuple(range(9, 16))
+# De vier Consolidation levels (ticket #152), elk met een eigen resultaatblad.
+# Vertrek eigenaar (fase 8) telt in geen enkel niveau.
+NIVEAUS = {
+    "per_phase": {"fases": ME + ZE, "per_fase": True},
+    "with_owner": {"fases": ME},
+    "without_owner": {"fases": ZE},
+    "combined": {"fases": ME + ZE},
 }
+GEBRUIKTE_FASES = set(ME + ZE)
 
 
 def fase_uit_observatie(value):
@@ -237,18 +241,14 @@ def _kolommen(blad):
     return {header: cell.column for header, (cell,) in per_kop.items()}
 
 
-def lees_observer(path, deel="1"):
-    """Lees deel 1, deel 2 of 1+2 uit het ruwe Results-blad van de Observer-export.
+def lees_observer(path):
+    """Lees iedere fase van ieder niveau uit het ruwe Results-blad van de Observer-export.
 
     Alleen dat blad wordt gelezen (ticket #151); handgemaakte werkkopieen zijn
     niet nodig. '-' is een gemeten nul; een blanke of niet-numerieke meetcel
     faalt. Fase wordt uit Observations gehaald: de bronkolom Fase nummert
     deel 2 opnieuw van 1 tot 7 en wordt nooit gelezen.
     """
-    deel = str(deel)
-    if deel not in DELEN:
-        raise ValueError("deel must be 1, 2 or 1+2.")
-    gekozen_fases = DELEN[deel]["fases"]
     try:
         wb = load_workbook(path, data_only=False, keep_links=False)
     except KeyError as exc:
@@ -287,8 +287,8 @@ def lees_observer(path, deel="1"):
             selection.append({"observatie": observation, "test_id": test, "dog_id": dog,
                               "fase": phase, "fase_in_deel": phase if phase <= 7 else phase - 8,
                               "deel": 1 if phase <= 7 else 2, "met_eigenaar": owner_flag == "true",
-                              "opgenomen": phase in gekozen_fases, "bronrij": row})
-            if phase not in gekozen_fases:
+                              "opgenomen": phase in GEBRUIKTE_FASES, "bronrij": row})
+            if phase not in GEBRUIKTE_FASES:
                 continue
             # Controleer iedere gelezen kolom, ook uitgesloten protocolkolommen.
             waarden = {}
@@ -313,6 +313,8 @@ def lees_observer(path, deel="1"):
         selected = pd.DataFrame(selection)
         if selected.empty:
             raise ValueError(f"The {BLAD} sheet has no Observations.")
+        if not phases:
+            raise ValueError(f"The {BLAD} sheet has no Observations in Observer phases 1-7 or 9-15.")
         dubbel = selected[selected.duplicated(["test_id", "fase"])]
         if not dubbel.empty:
             raise ValueError(f"Duplicate test and phase: {dubbel.test_id.iloc[0]} phase "
@@ -321,7 +323,7 @@ def lees_observer(path, deel="1"):
         fout = dogs[dogs.test_id.duplicated(keep=False) | dogs.dog_id.isna()].test_id.unique()
         if len(fout):
             raise ValueError(f"Missing or conflicting Dog ID for test {', '.join(map(str, fout))}.")
-        return {"deel": deel, "invoer": {"fases": pd.DataFrame(phases),
+        return {"invoer": {"fases": pd.DataFrame(phases),
                            "gedrag_groepen": definitions[["gedrag", "groep", "meettype"]],
                            "gedragingen": pd.DataFrame(behaviors),
                            "out_of_sight": pd.DataFrame(invisibility)},
@@ -332,58 +334,93 @@ def lees_observer(path, deel="1"):
         wb.close()
 
 
+def _breed(resultaat, sleutel, variabelen):
+    """Een rij per `sleutel`; duurkolommen bevatten fracties en aantal-kolommen
+    frequenties per seconde, in de volgorde van `variabelen`."""
+    if resultaat.empty:
+        return pd.DataFrame(columns=[*sleutel, *variabelen])
+    wide = resultaat.pivot(index=sleutel, columns="gedrag", values="geconsolideerde_waarde")
+    wide = wide.reindex(columns=variabelen).reset_index()
+    wide.columns.name = None
+    return wide
+
+
 def bereken_observer(bron):
-    deel = bron.get("deel", "1")
-    resultaat, detail = consolideer(**bron["invoer"], tolerantie_s=TOLERANTIE_S,
-                                   geselecteerde_fases=DELEN[deel]["fases"])
+    """Ieder niveau (NIVEAUS) uit een gelezen export: een breed resultaatblad
+    per niveau, plus de lange tabellen en meldingen."""
+    resultaat, detail, noemers = consolideer(**bron["invoer"], niveaus=NIVEAUS,
+                                            tolerantie_s=TOLERANTIE_S)
     labels = bron["definities"][["gedrag", "basisgedrag", "modifier", "bronkolom", "oos_kolom"]]
     resultaat = resultaat.merge(labels, on="gedrag", validate="many_to_one").merge(
         bron["honden"], on="test_id", validate="many_to_one")
-    resultaat["deel"] = int(deel) if deel in {"1", "2"} else deel
-    resultaat["met_eigenaar"] = (deel == "1") if deel != "1+2" else None
-    resultaat["selectie"] = DELEN[deel]["naam"]
-    detail = detail.merge(labels, on="gedrag", validate="many_to_one")
-    detail = detail.merge(bron["selectie"].query("opgenomen")[[
-        "test_id", "fase", "observatie", "fase_in_deel", "deel", "met_eigenaar", "bronrij"]],
-        on=["test_id", "fase"], validate="many_to_one")
-    notes = bron["meldingen"].to_dict("records")
-    for row in detail[detail.gedrag_s > detail.zichtbaar_s + 1e-9].itertuples():
-        notes.append({"type": "afronding", "test_id": row.test_id, "fase": row.fase,
-                      "variabele": row.gedrag,
-                      "melding": f"Gedragsduur {row.gedrag_s} s; zichtbare tijd {row.zichtbaar_s} s. Binnen {TOLERANTIE_S} s exporttolerantie; waarden niet aangepast."})
-    noemers = detail[["test_id", "fase", "groep", "fase_duur_s", "out_of_sight_s", "zichtbaar_s"]].drop_duplicates()
-    groep_totalen = noemers.groupby(["test_id", "groep"], as_index=False).agg(
-        totale_faseduur_s=("fase_duur_s", "sum"), out_of_sight_s=("out_of_sight_s", "sum"),
-        zichtbaar_s=("zichtbaar_s", "sum"), aantal_fases=("fase", "nunique"))
-    for row in groep_totalen[groep_totalen.zichtbaar_s == 0].itertuples():
-        notes.append({"type": "geen_zichtbare_tijd", "test_id": row.test_id, "fase": str(DELEN[deel]["fases"]),
-                      "variabele": row.groep, "melding": "Volledig out of sight: fracties/frequenties blijven leeg."})
-    # Brede tabel: een rij per test; duurkolommen bevatten fracties en
-    # aantal-kolommen frequenties per seconde, overeenkomstig de opdracht.
     resultaat["geconsolideerde_waarde"] = resultaat.fractie.where(
         resultaat.meettype == "duur", resultaat.frequentie_per_s)
-    wide = resultaat.pivot(index=["test_id", "dog_id"], columns="gedrag", values="geconsolideerde_waarde")
-    wide = wide.reindex(columns=bron["definities"].gedrag).reset_index()
-    wide.columns.name = None
-    return {"per_test": wide, "consolidatie": resultaat, "controle_per_fase": detail,
-            "noemers_per_groep": groep_totalen, "meldingen": pd.DataFrame(notes)}
+    notes = bron["meldingen"].to_dict("records")
+    for row in detail[detail.gedrag_s > detail.zichtbaar_s].itertuples():
+        notes.append(_melding("rounding", row.gedrag,
+                              f"Behaviour duration {row.gedrag_s} s against visible time "
+                              f"{row.zichtbaar_s} s: within the {TOLERANTIE_S} s export tolerance; "
+                              "values kept unchanged.", row.test_id, row.fase))
+    groepen = detail.drop_duplicates(["test_id", "fase", "groep"])
+    for row in groepen[groepen.out_of_sight_s > groepen.fase_duur_s].itertuples():
+        notes.append(_melding("rounding", row.groep,
+                              f"Out of Sight {row.out_of_sight_s} s against Duration "
+                              f"{row.fase_duur_s} s: within the {TOLERANTIE_S} s export tolerance, "
+                              "so no visible time.", row.test_id, row.fase))
+    variabelen = list(bron["definities"].gedrag)
+    aanwezig = bron["invoer"]["fases"].groupby("test_id").fase.agg(set)
+    per_niveau = {}
+    for niveau, config in NIVEAUS.items():
+        van_niveau = resultaat[resultaat.level == niveau]
+        if config.get("per_fase"):
+            wide = _breed(van_niveau, ["test_id", "dog_id", "fase"], variabelen).rename(
+                columns={"fase": "observer_phase"})
+            labels_fase = wide.observer_phase.map(fase_label)
+            wide.insert(3, "condition", labels_fase.str[:2])
+            wide.insert(4, "phase", labels_fase.str[3:])
+            per_niveau[niveau] = wide
+            continue
+        rijen = []
+        for test in bron["honden"].itertuples():
+            gebruikt = aanwezig[test.test_id] & set(config["fases"])
+            if not gebruikt:
+                notes.append(_melding("no_phases", niveau,
+                                      f"{test.test_id} has none of the {niveau} phases, so it has "
+                                      f"no row on {niveau}.", test.test_id))
+                continue
+            ontbrekend = set(config["fases"]) - gebruikt
+            rijen.append({"test_id": test.test_id, "dog_id": test.dog_id,
+                          "phases_used": ", ".join(map(fase_label, sorted(gebruikt))),
+                          "missing_phases": ", ".join(map(fase_label, sorted(ontbrekend))) or None,
+                          "status": "incomplete" if ontbrekend else "ok"})
+        kop = pd.DataFrame(rijen, columns=["test_id", "dog_id", "phases_used",
+                                            "missing_phases", "status"])
+        per_niveau[niveau] = kop.merge(_breed(van_niveau, ["test_id"], variabelen), on="test_id",
+                                       how="left", validate="one_to_one")
+    noemers = noemers.merge(bron["honden"], on="test_id", validate="many_to_one")
+    return {"per_niveau": per_niveau, "details": resultaat, "noemers": noemers,
+            "meldingen": pd.DataFrame(notes)}
 
 
-def schrijf_resultaat(path, bronnen, berekend, source_path):
-    """Een Engelstalig werkboek met ieder niveau (DELEN) uit een upload.
+def schrijf_resultaat(path, bron, berekend, source_path):
+    """Een Engelstalig werkboek met ieder niveau (NIVEAUS) uit een upload.
 
-    `bronnen` en `berekend` bevatten per deel de uitkomst van lees_observer en
-    bereken_observer. Diagnostische tabellen krijgen een kolom `level`.
+    `bron` en `berekend` zijn de uitkomst van lees_observer en bereken_observer.
     """
     path = Path(path)
     path.parent.mkdir(exist_ok=True)
     uitleg = [
         "CONSOLIDATION RESULT - every level from one Observer export.",
+        "per_phase: every Observer phase 1-7 and 9-15 on its own; one row per test and phase, with observer_phase, "
+        "condition (ME/ZE) and phase (F1-F7).",
         "with_owner: Observer phases 1-7 (ME, the owner is present).",
         "without_owner: Observer phases 9-15 (ZE, the owner is absent).",
         "combined: Observer phases 1-7 and 9-15 together. Owner departure (phase 8) never counts.",
         "Phases come from the Observation name; the owner-present flag is checked against them.",
-        "with_owner, without_owner, combined: one row per test; every original behaviour and modifier column kept separately.",
+        "with_owner, without_owner, combined: one row per test that has at least one of the level's phases, with "
+        "phases_used, missing_phases and status: ok (every phase present) or incomplete (calculated from the phases "
+        "present; the missing ones are listed). A test with none of a level's phases has no row there, with a warning.",
+        "Every original behaviour and modifier column is kept separately, on every result sheet.",
         "Total duration columns: sum of behaviour duration / (sum of phase Duration - sum of the group's Out of Sight duration). Fractions, not percentages.",
         "Total number columns: sum of counts / the same denominator. Unit: occurrences per visible second.",
         "Sums first, then one division: never an average of phase values. combined is never an average of with_owner and without_owner.",
@@ -397,14 +434,19 @@ def schrijf_resultaat(path, bronnen, berekend, source_path):
         "TP/FP protocol behaviours and First contact with TP (a separate F1 measure) are recognised by name and listed in excluded.",
         "Distance to TP/FP, Location and Dog following are only scored in some phases: until the Scoring plan is supported, "
         "their columns are listed in excluded, with a warning.",
-        "No visible time: blank fraction and frequency with status geen_zichtbare_tijd; never replaced by 0.",
+        f"No visible time: visible time of {TOLERANTIE_S} s or less, per phase or summed over a level, gives a blank "
+        "value with status no_visible_time (in details and denominators); never 0 and never a division.",
+        "Out of Sight above Duration by more than the tolerance fails the upload; within it, visible time is 0 and "
+        "there is a rounding warning.",
         "Only the export's raw Results sheet is read, exactly as Observer produces it. The source file is not changed.",
         "Observer's '-' is a measured 0. A blank or non-numeric cell in an exported column fails the upload.",
         "Never read: Fase, Geslacht hond, Observer's container columns, Total number Out of sight columns "
         "and the owner-departure (phase 8) rows. Every other exported cell is checked, used or not.",
         f"Maximum tolerance on individual times: {TOLERANTIE_S} s for export rounding; deviations are listed in warnings.",
-        "details: every numerator, denominator, percentage, frequency per second and per minute, and status, per level.",
-        "phase_details: every value per test and phase; denominators: per test, level and group.",
+        "details: every numerator, denominator, percentage, frequency per second and per minute, and status, per level "
+        "(fase is the Observer phase, on per_phase rows only).",
+        "denominators: Duration, Out of Sight and visible time per level, test, phase (per_phase only) and group, "
+        "with the phases used and the status, so every blank can be explained.",
         "phase_selection: every source row and the levels it was used in; variables: every result column; excluded: columns left out, with the reason.",
         "availability: every dog behaviour in the Ethogram, as not_exported (absent from the export, so absent from the results), "
         "exported_all_zero (a measured zero) or exported_nonzero.",
@@ -415,42 +457,34 @@ def schrijf_resultaat(path, bronnen, berekend, source_path):
         f"SHA256 source: {hashlib.sha256(Path(source_path).read_bytes()).hexdigest()}",
     ]
 
-    niveaus = {d: config["niveau"] for d, config in DELEN.items()}
-
-    def per_niveau(key, weglaten=()):
-        tabellen = []
-        for d, niveau in niveaus.items():
-            tabel = berekend[d][key].drop(columns=list(weglaten))
-            tabel.insert(0, "level", niveau)
-            tabellen.append(tabel)
-        return pd.concat(tabellen, ignore_index=True)
-
-    # Definities, uitsluitingen en de bronrijen zijn voor ieder deel gelijk;
-    # alleen `opgenomen` hangt af van het deel.
-    alle = bronnen["1+2"]
-    gebruikt = {d: set(bronnen[d]["selectie"].query("opgenomen")[["test_id", "fase"]]
-                       .itertuples(index=False, name=None)) for d in niveaus}
-    selectie = alle["selectie"].drop(columns="opgenomen")
-    selectie["levels"] = [", ".join(n for d, n in niveaus.items() if key in gebruikt[d]) or None
-                          for key in selectie[["test_id", "fase"]].itertuples(index=False, name=None)]
+    selectie = bron["selectie"].drop(columns="opgenomen")
+    selectie["levels"] = [", ".join(n for n, c in NIVEAUS.items() if fase in c["fases"]) or None
+                          for fase in selectie.fase]
+    details = berekend["details"]
+    details = details[["level", "test_id", "fase",
+                       *(c for c in details.columns if c not in {"level", "test_id", "fase"})]]
+    noemers = berekend["noemers"].rename(columns={
+        "fase": "observer_phase", "groep": "group", "totale_faseduur_s": "duration_s",
+        "zichtbaar_s": "visible_s", "aanwezige_fases": "phases_used"})[[
+        "level", "test_id", "observer_phase", "group", "duration_s", "out_of_sight_s",
+        "visible_s", "phases_used", "status"]]
     tables = {
-        **{niveau: berekend[d]["per_test"] for d, niveau in niveaus.items()},
+        **berekend["per_niveau"],
         "README": pd.DataFrame({"README": uitleg}),
-        # deel/met_eigenaar/selectie beschrijven per deel hetzelfde als level.
-        "details": per_niveau("consolidatie", ["deel", "met_eigenaar", "selectie"]),
-        "phase_details": per_niveau("controle_per_fase"),
-        "denominators": per_niveau("noemers_per_groep"),
-        "warnings": per_niveau("meldingen"),
-        "variables": alle["definities"].drop(columns="kolomnummer"),
-        "availability": alle["beschikbaarheid"],
+        "details": details,
+        "denominators": noemers,
+        "warnings": berekend["meldingen"],
+        "variables": bron["definities"].drop(columns="kolomnummer"),
+        "availability": bron["beschikbaarheid"],
         "phase_selection": selectie,
-        "excluded": alle["uitgesloten"],
+        "excluded": bron["uitgesloten"],
     }
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for name, table in tables.items():
             table.to_excel(writer, sheet_name=name, index=False)
             ws = writer.book[name]
-            ws.freeze_panes = "C2" if name in niveaus.values() else "A2"
+            # De vijf leidende kolommen van ieder resultaatblad blijven zichtbaar.
+            ws.freeze_panes = "F2" if name in NIVEAUS else "A2"
             ws.auto_filter.ref = ws.dimensions
             for cell in ws[1]:
                 cell.font = Font(bold=True, color="FFFFFF")
