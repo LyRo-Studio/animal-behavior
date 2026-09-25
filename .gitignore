@@ -34,8 +34,8 @@ Thumbs.db
 
 # Real research data that may sit alongside consolidation/'s source for local
 # verification (ticket #114) — never committed, not test fixtures. Covers the
-# real export and its companions (the "overzicht" overview workbook, and the
-# Ethogram reference file).
+# real export and its companion "overzicht" overview workbook. The printable
+# Ethogram is a protocol document, not research data: it is committed as the
+# source of consolidation/ethogram_definition.json (ticket #150).
 consolidation/10_extra_honden_alle_data_met_modifiers.xlsx
 consolidation/*overzicht*.xlsx
-consolidation/*ethogram*.xlsx

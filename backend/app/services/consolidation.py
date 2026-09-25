@@ -104,26 +104,16 @@ class ObserverConsolidationRunner:
     """
 
     def run(self, *, input_path: Path, output_path: Path) -> None:
-        # KeyError/BadZipFile/InvalidFileException/OSError are scoped to
-        # *reading* the workbook only, not the whole pipeline (caught in
-        # review): bereken_observer does its own pandas merges/groupby/
-        # pivot, which could in principle raise a KeyError of its own for a
-        # genuine bug unrelated to a missing sheet — catching that here
-        # too would silently misreport a real defect as a user input
-        # problem, with nothing logged anywhere to diagnose it.
+        # BadZipFile/InvalidFileException/OSError are scoped to *reading*
+        # the workbook only, not the whole pipeline (caught in review). A
+        # KeyError is never mapped (ticket #150): lees_observer checks
+        # every sheet and column it needs and says which one is missing,
+        # so a KeyError is a genuine bug — logged, and shown only as the
+        # generic failure reason, never as a raw message.
         try:
             bronnen = {deel: lees_observer(str(input_path), deel=deel) for deel in DELEN}
         except ValueError as exc:
             raise ConsolidationInputError(str(exc)) from exc
-        except KeyError as exc:
-            # lees_observer indexes required sheets via e.g.
-            # wb["Results (2)"] with no try/except -> ValueError translation
-            # of its own for a *missing* sheet specifically — confirmed
-            # during ticket #114's review by actually triggering this path
-            # (a raw KeyError, not one of the module's own ValueErrors).
-            # Same "your file's shape is wrong" class of problem as every
-            # other validation failure here.
-            raise ConsolidationInputError(f"Missing expected sheet: {exc}") from exc
         except (BadZipFile, InvalidFileException, OSError) as exc:
             # OSError alongside the two openpyxl-specific types: a
             # structurally-valid ZIP with corrupted/missing internal OOXML
@@ -142,7 +132,7 @@ class ObserverConsolidationRunner:
             # consolideer() (called from bereken_observer) raises its own
             # ValueErrors for the same class of validation failure as
             # lees_observer's — still mapped here, just no longer sharing
-            # the KeyError/OSError catches above with it.
+            # the OSError catches above with it.
             raise ConsolidationInputError(str(exc)) from exc
 
 

@@ -2323,8 +2323,11 @@ already written in; rewriting it onto SQLAlchemy/Pydantic types was
 explicitly out of scope. Since ticket #149 the module also carries code
 written for this app: `schrijf_resultaat` now writes every level into one
 workbook. It stays in pandas for the same reason, since it only rearranges
-the calculation's own DataFrames; the calculation is still unmodified. `openpyxl` was already an approved dependency
-(ticket #94). The module's own `pas_ethogram_indeling_toe`/
+the calculation's own DataFrames; the calculation is still unmodified.
+Since ticket #150 `lees_observer` maps columns by name through the
+generated Ethogram definition (`ethogram_definition.py`, plain Python
+with no pandas), and adds the `availability` table. `openpyxl` was
+already an approved dependency (ticket #94). The module's own `pas_ethogram_indeling_toe`/
 `verwerk_alle_delen` entry point was confirmed non-functional (imports a
 nonexistent `ethogram_controle` module and reads a nonexistent reference
 file) and was excluded from the web feature; only `lees_observer`/
@@ -2598,6 +2601,73 @@ real export.
   referenced keys, and a key is committed before its result is uploaded,
   so an in-flight consolidation's result is never removed. It isn't wired
   into `deploy.yml`: it's a one-off, not a step every deploy needs.
+
+**Consolidation: Ethogram-driven group mapping (ticket #150, part of
+#143):** which Behaviour group, Out of Sight and State/Event a column
+belongs to comes from `consolidation/ethogram_definition.json`, never from
+where the column sits in the export. The old fixed first/last-behaviour
+group boundaries are gone, so any behaviour column may be missing.
+- **Generated, never hand-edited.** `python -m consolidation.ethogram_definition`
+  derives the JSON from the committed printable Ethogram
+  (`20241218_Printbaar ethogram.xlsx`, un-ignored in `.gitignore`: it is a
+  protocol document, not research data). It records each behaviour's
+  code, group, State/Event, modifier categories and Ethogram order, and
+  each group's Out of Sight and scored phases.
+  - **Hand-maintained in the generator:** the export-name aliases (5
+    behaviours, the Out of Sight name variant, 9 TP/FP protocol names),
+    the modifier aliases, the `Blad1` column → group mapping, and the
+    exclusions (First contact with TP, the TP/FP protocol group).
+  - **Checks moved from the uncommitted `ethogram_controle.py`:** unique
+    names, alias targets that exist, one Out of Sight per group, known
+    modifier categories.
+  - `test_ethogram_definition.py` regenerates the JSON and fails on any
+    difference, so a new Ethogram behaviour always needs a deliberate
+    regeneration. Only the JSON and its module are copied into the backend
+    image; the Ethogram is never read at run time.
+- **Scored phases come from `Blad1`,** as #143 decided: F1/F3/F6 for
+  Distance and Location, F2/F4/F7 for Dog following. The group notes on
+  the Behaviours sheet disagree ("phases 1, 3, 6, 8, 9, 11, 14 and 16"),
+  so they are not used. Until #153, a group whose scored phases aren't
+  F1–F7 is "not yet supported": its columns go to `excluded` with one
+  warning per group. None of those groups is in the real export.
+- **Header matching:** a header resolves to the longest known behaviour
+  name (Ethogram name or alias) it starts with, ignoring case and
+  whitespace. The rest is the modifier. A header matching no known name
+  fails the upload, naming the column. Consequence of longest-match, per
+  #143: a new behaviour whose name *starts with* a known one (e.g.
+  "Sitting quietly") reads as that behaviour with an unknown modifier, a
+  warning rather than a failure.
+- **Modifiers:** each `;`-separated value, after the modifier aliases,
+  must sit in its own category the Ethogram allows for the behaviour.
+  Otherwise there is a warning, and the values are kept.
+- **Out of Sight:** a group's `Total duration Out of sight … <No Modifier>`
+  column is required only when the group has an exported behaviour
+  (missing → the upload fails, naming the group). Otherwise it is listed
+  in `excluded` as ignored. `Total number Out of sight …` is never used.
+- **Events:** their duration columns go to `excluded`, with a warning if
+  any value is nonzero. Only the frequency is a result column, so the real
+  layout now has 503 result columns (538 minus 35 Event durations).
+- **Result change against #149:** Stiffening up is now corrected by the
+  exploration Out of Sight (IW), not the stress one. The existing
+  `Results (REL)` formula check still lists it as a note, next to the
+  stress-group count formulas that point at IW (a copy error, per #143).
+  In both the synthetic fixture and the real export this moves no value:
+  compared with #149's output, every result value is identical, and only
+  the 35 Event duration columns are gone. The small-export tests show the
+  difference.
+- **`availability`:** every behaviour in a dog group (every non-excluded
+  group), as `not_exported`, `exported_all_zero` or `exported_nonzero`,
+  judged over every consolidated phase.
+- **No raw `KeyError` reaches a user.** `lees_observer` checks the three
+  sheets and its required columns itself, and names what is missing. The
+  runner no longer maps `KeyError` at all: one would now be a bug, logged,
+  with the generic failure reason shown. (A `KeyError` from openpyxl
+  opening a damaged workbook is mapped to "not a valid Excel workbook"
+  inside `lees_observer`.) `Fase` is no longer required, since #143 never
+  reads it. New messages are in English. The
+  importer's older ones stay Dutch until the importer rework in #151.
+- **Known wrinkle, from #149's layout:** `warnings` repeats an import
+  warning once per level.
 
 **`assist` vendored (ticket #112) — approved deviation, supersedes Feature
 C's "pinned external dependency" decision:** the cutting-worker image used to
