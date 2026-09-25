@@ -119,6 +119,8 @@ def test_phase_selection_lists_the_levels_each_source_row_was_used_in(
     assert levels_by_phase[("T901", 9)] == "per_phase, without_owner, combined"
     # Owner departure (F8) is listed, but never used.
     assert levels_by_phase[("T901", 8)] is None
+    phase_nine = next(r for r in _sheet_rows(synthetic_result, "phase_selection") if r["fase"] == 9)
+    assert (phase_nine["condition"], phase_nine["phase"]) == ("ZE", "F1")
 
 
 def _synthetic_export_without(tmp_path: Path, headers: list[str]) -> Path:
@@ -466,6 +468,29 @@ def test_missing_phases_are_listed_and_a_level_without_phases_has_no_row(tmp_pat
     assert (combined["missing_phases"], combined["status"]) == (f"ME F3, {_ZE}", "incomplete")
     no_phases = [w for w in _sheet_rows(result, "warnings") if w["type"] == "no_phases"]
     assert [(w["test_id"], w["variabele"]) for w in no_phases] == [("T901", "without_owner")]
+
+
+def test_a_test_with_only_owner_departure_gets_no_rows_but_warnings(tmp_path: Path) -> None:
+    input_path = write_observer_export(
+        tmp_path / "input.xlsx", {_PANTING: 20}, tests={"T901": "D901", "T902": "D902"}
+    )
+    workbook = openpyxl.load_workbook(input_path)
+    results = workbook["Results"]
+    # Rows 17-31 are T902's phases 1-15: keep only its F8 (row 24).
+    for row in sorted([*range(17, 24), *range(25, 32)], reverse=True):
+        results.delete_rows(row)
+    workbook.save(input_path)
+    output_path = tmp_path / "result.xlsx"
+
+    ObserverConsolidationRunner().run(input_path=input_path, output_path=output_path)
+
+    for sheet in _RESULT_SHEETS:
+        assert list(_result_rows(output_path, sheet)) == ["T901"]
+    assert {test_id for test_id, _ in _phase_rows(output_path)} == {"T901"}
+    no_phases = [w for w in _sheet_rows(output_path, "warnings") if w["type"] == "no_phases"]
+    assert [(w["test_id"], w["variabele"]) for w in no_phases] == [
+        ("T902", sheet) for sheet in _RESULT_SHEETS
+    ]
 
 
 def test_denominators_explain_every_level_phase_and_group(tmp_path: Path) -> None:

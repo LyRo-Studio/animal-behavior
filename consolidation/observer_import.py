@@ -8,7 +8,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
 from consolidation import ethogram_definition
 from consolidation.ethogram_definition import normalise
-from consolidation.consolidatie import consolideer, fase_label
+from consolidation.consolidatie import consolideer, fase_in_conditie, fase_labels
 
 # Welke Behaviour group en Out of Sight bij een kolom horen, komt uit de
 # definitie die uit het ethogram gegenereerd is (ticket #150), nooit uit de
@@ -30,7 +30,7 @@ NIVEAUS = {
     "without_owner": {"fases": ZE},
     "combined": {"fases": ME + ZE},
 }
-GEBRUIKTE_FASES = set(ME + ZE)
+GEBRUIKTE_FASES = {fase for niveau in NIVEAUS.values() for fase in niveau["fases"]}
 
 
 def fase_uit_observatie(value):
@@ -247,7 +247,7 @@ def lees_observer(path):
     Alleen dat blad wordt gelezen (ticket #151); handgemaakte werkkopieen zijn
     niet nodig. '-' is een gemeten nul; een blanke of niet-numerieke meetcel
     faalt. Fase wordt uit Observations gehaald: de bronkolom Fase nummert
-    deel 2 opnieuw van 1 tot 7 en wordt nooit gelezen.
+    ZE opnieuw van 1 tot 7 en wordt nooit gelezen.
     """
     try:
         wb = load_workbook(path, data_only=False, keep_links=False)
@@ -284,9 +284,10 @@ def lees_observer(path):
                 notes.append(_melding("observation_name", observation,
                                       f"The Observation name's Test ID ({label_test}) differs "
                                       f"from the Test ID column; {test} is used.", test, phase))
+            condition, phase_in_condition = fase_in_conditie(phase)
             selection.append({"observatie": observation, "test_id": test, "dog_id": dog,
-                              "fase": phase, "fase_in_deel": phase if phase <= 7 else phase - 8,
-                              "deel": 1 if phase <= 7 else 2, "met_eigenaar": owner_flag == "true",
+                              "fase": phase, "condition": condition, "phase": phase_in_condition,
+                              "met_eigenaar": owner_flag == "true",
                               "opgenomen": phase in GEBRUIKTE_FASES, "bronrij": row})
             if phase not in GEBRUIKTE_FASES:
                 continue
@@ -375,14 +376,15 @@ def bereken_observer(bron):
         if config.get("per_fase"):
             wide = _breed(van_niveau, ["test_id", "dog_id", "fase"], variabelen).rename(
                 columns={"fase": "observer_phase"})
-            labels_fase = wide.observer_phase.map(fase_label)
-            wide.insert(3, "condition", labels_fase.str[:2])
-            wide.insert(4, "phase", labels_fase.str[3:])
+            conditie = wide.observer_phase.map(fase_in_conditie)
+            wide.insert(3, "condition", conditie.str[0])
+            wide.insert(4, "phase", conditie.str[1])
             per_niveau[niveau] = wide
             continue
         rijen = []
         for test in bron["honden"].itertuples():
-            gebruikt = aanwezig[test.test_id] & set(config["fases"])
+            # Een test met alleen F8 heeft geen enkele gebruikte fase.
+            gebruikt = aanwezig.get(test.test_id, set()) & set(config["fases"])
             if not gebruikt:
                 notes.append(_melding("no_phases", niveau,
                                       f"{test.test_id} has none of the {niveau} phases, so it has "
@@ -390,8 +392,8 @@ def bereken_observer(bron):
                 continue
             ontbrekend = set(config["fases"]) - gebruikt
             rijen.append({"test_id": test.test_id, "dog_id": test.dog_id,
-                          "phases_used": ", ".join(map(fase_label, sorted(gebruikt))),
-                          "missing_phases": ", ".join(map(fase_label, sorted(ontbrekend))) or None,
+                          "phases_used": fase_labels(gebruikt),
+                          "missing_phases": fase_labels(ontbrekend) or None,
                           "status": "incomplete" if ontbrekend else "ok"})
         kop = pd.DataFrame(rijen, columns=["test_id", "dog_id", "phases_used",
                                             "missing_phases", "status"])

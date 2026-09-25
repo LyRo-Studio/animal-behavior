@@ -13,45 +13,56 @@ SCHEMAS = {
 def _controleer(frame, name, keys, numeric=True):
     missing = set(SCHEMAS[name]) - set(frame.columns)
     if missing:
-        raise ValueError(f"{name}: ontbrekende kolommen {sorted(missing)}")
+        raise ValueError(f"{name}: missing columns {sorted(missing)}.")
     optional = {"gedrag_groepen": ["meettype"], "gedragingen": ["aantal"]}
     columns = SCHEMAS[name] + [c for c in optional.get(name, []) if c in frame]
     frame = frame[columns].copy()
     if frame.empty:
-        raise ValueError(f"{name}: geen invoer.")
+        raise ValueError(f"{name}: no input.")
     for column in keys:
         if frame[column].isna().any():
-            raise ValueError(f"{name}: ontbrekende waarde in {column}.")
+            raise ValueError(f"{name}: missing value in {column}.")
         if column != "fase":
             if not frame[column].map(lambda x: isinstance(x, str) and bool(x.strip())).all():
-                raise ValueError(f"{name}: ongeldige tekst in {column}.")
+                raise ValueError(f"{name}: invalid text in {column}.")
             frame[column] = frame[column].str.strip()
     if "fase" in frame:
         valid = frame.fase.map(lambda x: not isinstance(x, bool)
                                and isinstance(x, (int, float))
                                and math.isfinite(x) and x == int(x) and 1 <= x <= 15)
         if not valid.all():
-            raise ValueError(f"{name}: ongeldige fase (verwacht geheel getal 1..15).")
+            raise ValueError(f"{name}: invalid phase (expected a whole number 1-15).")
         frame["fase"] = frame.fase.astype(int)
     if frame.duplicated(keys).any():
-        raise ValueError(f"{name}: dubbele sleutel {keys}.")
+        raise ValueError(f"{name}: duplicate key {keys}.")
     if numeric:
         valid = frame.duur_s.map(lambda x: not isinstance(x, bool)
                                 and isinstance(x, (int, float))
                                 and math.isfinite(x) and x >= 0)
         if not valid.all():
-            raise ValueError(f"{name}: duur_s moet ingevulde, eindige, niet-negatieve seconden bevatten.")
+            raise ValueError(f"{name}: duur_s must hold finite, non-negative seconds.")
         frame["duur_s"] = frame.duur_s.astype(float)
     return frame
 
 
+def fase_in_conditie(fase):
+    """Observer-fase 12 -> ('ZE', 'F4'). Fase 8 (vertrek eigenaar) telt nooit mee."""
+    return ("ME", f"F{fase}") if fase <= 7 else ("ZE", f"F{fase - 8}")
+
+
 def fase_label(fase):
-    """Observer-fase 12 -> 'ZE F4'. Fase 8 (vertrek eigenaar) telt nooit mee."""
-    return f"ME F{fase}" if fase <= 7 else f"ZE F{fase - 8}"
+    """Observer-fase 12 -> 'ZE F4'."""
+    return " ".join(fase_in_conditie(fase))
 
 
-def _fase_labels(fases):
+def fase_labels(fases):
+    """{1, 2, 9} -> 'ME F1, ME F2, ZE F1'."""
     return ", ".join(fase_label(x) for x in sorted(set(fases)))
+
+
+def _eerste(frame):
+    """De eerste rij van `frame`, of None: voor een foutmelding die een geval noemt."""
+    return next(frame.itertuples(), None)
 
 
 def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, tolerantie_s=1e-9):
@@ -71,23 +82,23 @@ def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, toler
         gekozen = tuple(niveau["fases"])
         if (not gekozen or len(set(gekozen)) != len(gekozen)
                 or any(type(x) is not int or not 1 <= x <= 15 for x in gekozen)):
-            raise ValueError(f"Ongeldige fases voor niveau {naam}: gebruik unieke gehele fasenummers 1..15.")
+            raise ValueError(f"Invalid phases for level {naam}: use unique whole phase numbers 1-15.")
     alle_fases = {x for niveau in niveaus.values() for x in niveau["fases"]}
     f = _controleer(fases, "fases", ["test_id", "fase"])
     m = _controleer(gedrag_groepen, "gedrag_groepen", ["gedrag"], numeric=False)
     if m.groep.isna().any() or not m.groep.map(
             lambda x: isinstance(x, str) and bool(x.strip())).all():
-        raise ValueError("gedrag_groepen: ontbrekende of ongeldige groep.")
+        raise ValueError("gedrag_groepen: missing or invalid group.")
     m["groep"] = m.groep.str.strip()
     # Oude invoer met alleen duur_s blijft bruikbaar. Een aanwezige maar lege
     # meettype-kolom wordt bewust niet automatisch als duur geinterpreteerd.
     if "meettype" not in m:
         m["meettype"] = "duur"
     if not m.meettype.isin(["duur", "aantal"]).all():
-        raise ValueError("meettype moet expliciet duur of aantal zijn.")
+        raise ValueError("meettype must be duur or aantal.")
     b = _controleer(gedragingen, "gedragingen", ["test_id", "fase", "gedrag"], numeric=False)
     if not set(b.gedrag) <= set(m.gedrag):
-        raise ValueError("Onbekend gedrag: ontbrekende groepskoppeling.")
+        raise ValueError("Unknown behaviour: it has no group.")
     if "aantal" not in b:
         b["aantal"] = float("nan")
     b = b.merge(m, on="gedrag", validate="many_to_one")
@@ -98,23 +109,23 @@ def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, toler
             and math.isfinite(x) and x >= 0
             and (kind != "aantal" or x == int(x)))
         if not valid.all():
-            raise ValueError(f"{column}: ontbrekende of ongeldige meting; aantallen moeten geheel zijn.")
+            raise ValueError(f"{column}: missing or invalid measurement; counts must be whole numbers.")
         if b.loc[~selected, column].notna().any():
-            raise ValueError(f"{column}: laat de niet-toepasselijke meetkolom leeg.")
+            raise ValueError(f"{column}: must be empty for the other statistic.")
         b[column] = b[column].astype(float)
     o = _controleer(out_of_sight, "out_of_sight", ["test_id", "fase", "groep"])
     f = f[f.fase.isin(alle_fases)].copy()
     b = b[b.fase.isin(alle_fases)].copy()
     o = o[o.fase.isin(alle_fases)].copy()
     if f.empty:
-        raise ValueError(f"The export has no Observations in the phases of any level ({_fase_labels(alle_fases)}).")
+        raise ValueError(f"The export has no Observations in the phases of any level ({fase_labels(alle_fases)}).")
     if not set(o.groep) <= set(m.groep):
-        raise ValueError("Onbekende out-of-sight-groep.")
+        raise ValueError("Out of Sight for an unknown group.")
     phase_keys = ["test_id", "fase"]
     for frame, name in [(b, "gedragingen"), (o, "out_of_sight")]:
         joined = frame.merge(f[phase_keys], on=phase_keys, how="left", indicator=True)
         if (joined._merge != "both").any():
-            raise ValueError(f"{name}: test/fase ontbreekt in fases.")
+            raise ValueError(f"{name}: test/phase missing from fases.")
     expected_b = f[phase_keys].merge(m[["gedrag"]], how="cross")
     expected_o = f[phase_keys].merge(m[["groep"]].drop_duplicates(), how="cross")
     for expected, actual, keys, name in [
@@ -123,25 +134,25 @@ def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, toler
     ]:
         check = expected.merge(actual[keys], on=keys, how="left", indicator=True)
         if (check._merge != "both").any():
-            raise ValueError(f"{name}: ontbrekende metingen; vul gemeten nullen expliciet in.")
+            raise ValueError(f"{name}: missing measurements; a measured zero must be explicit.")
     visibility = expected_o.merge(
         f.rename(columns={"duur_s": "fase_duur_s"}), on=phase_keys,
         validate="many_to_one").merge(
         o.rename(columns={"duur_s": "out_of_sight_s"}),
         on=phase_keys + ["groep"], validate="one_to_one")
     visibility["zichtbaar_s"] = visibility.fase_duur_s - visibility.out_of_sight_s
-    for r in visibility[visibility.zichtbaar_s < -tolerantie_s].head(1).itertuples():
+    if (r := _eerste(visibility[visibility.zichtbaar_s < -tolerantie_s])) is not None:
         raise ValueError(
             f"Out of Sight exceeds Duration for test {r.test_id}, Observer phase {r.fase} "
             f"({fase_label(r.fase)}), {r.groep}: {r.out_of_sight_s} s against {r.fase_duur_s} s.")
     visibility["zichtbaar_s"] = visibility.zichtbaar_s.clip(lower=0)
     detail = b.rename(columns={"duur_s": "gedrag_s"}).merge(
         visibility, on=phase_keys + ["groep"], validate="many_to_one")
-    for r in detail[detail.gedrag_s > detail.zichtbaar_s + tolerantie_s].head(1).itertuples():
+    if (r := _eerste(detail[detail.gedrag_s > detail.zichtbaar_s + tolerantie_s])) is not None:
         raise ValueError(
             f"{r.gedrag} lasts longer than its visible time for test {r.test_id}, Observer phase "
             f"{r.fase} ({fase_label(r.fase)}): {r.gedrag_s} s against {r.zichtbaar_s} s visible.")
-    for r in detail[(detail.zichtbaar_s <= tolerantie_s) & (detail.aantal > 0)].head(1).itertuples():
+    if (r := _eerste(detail[(detail.zichtbaar_s <= tolerantie_s) & (detail.aantal > 0)])) is not None:
         raise ValueError(
             f"{r.gedrag} is above 0 without visible time for test {r.test_id}, Observer phase "
             f"{r.fase} ({fase_label(r.fase)}): {r.groep} was out of sight the whole phase.")
@@ -156,12 +167,12 @@ def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, toler
             totale_faseduur_s=("fase_duur_s", "sum"),
             out_of_sight_s=("out_of_sight_s", "sum"),
             aantal_fases=("fase", "nunique"),
-            aanwezige_fases=("fase", _fase_labels),
+            aanwezige_fases=("fase", fase_labels),
         )
         noemer = v.groupby(sleutel + ["groep"], as_index=False).agg(
             totale_faseduur_s=("fase_duur_s", "sum"),
             out_of_sight_s=("out_of_sight_s", "sum"),
-            aanwezige_fases=("fase", _fase_labels),
+            aanwezige_fases=("fase", fase_labels),
         )
         for frame, lijst in [(som, sommen), (noemer, noemers)]:
             frame.insert(0, "level", naam)

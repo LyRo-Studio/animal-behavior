@@ -2324,6 +2324,10 @@ explicitly out of scope. Since ticket #149 the module also carries code
 written for this app: `schrijf_resultaat` now writes every level into one
 workbook. It stays in pandas for the same reason, since it only rearranges
 the calculation's own DataFrames; the calculation is still unmodified.
+Since ticket #152 the calculation itself is adapted, as #143 decided
+("adapted, not rewritten"): `consolideer` keeps its input checks and
+sum-then-divide, and gains the levels, the per-phase level and the
+no-visible-time threshold.
 Since ticket #150 `lees_observer` maps columns by name through the
 generated Ethogram definition (`ethogram_definition.py`, plain Python
 with no pandas), and adds the `availability` table. `openpyxl` was
@@ -2754,11 +2758,21 @@ without visibility at every level.
   above its visible time). An export with Observations only in F8 fails.
 - **Phase labels are `ME F3` / `ZE F1`** in `phases_used`,
   `missing_phases` and `denominators`, so combined can't be ambiguous;
-  `per_phase` also has `observer_phase`, `condition` and `phase`.
+  `per_phase` also has `observer_phase`, `condition` and `phase`, and so
+  does `phase_selection`, whose `deel`/`fase_in_deel` columns are gone.
 - **Missing phases:** `with_owner`/`without_owner`/`combined` rows carry
   `phases_used`, `missing_phases` and `status` (`ok`/`incomplete`). A
   test with none of a level's phases has no row there and a `no_phases`
   warning, instead of the whole upload failing ("Geen aanwezige fases").
+  That includes a test with only an F8 row.
+- **Within-tolerance Out of Sight in a level sum:** a phase whose Out of
+  Sight is up to 0.001 s above its Duration has visible time 0 on its
+  own. A level still sums the raw values (visible = ΣDuration − ΣOut of
+  Sight, as #143 states), so the excess is subtracted there. At most
+  0.001 s per phase: accepted rather than clipping Out of Sight.
+- **Messages:** every `consolideer` message is English now. Only the
+  three visibility failures can come from an upload, since `lees_observer`
+  already guarantees the rest; the others would mean a bug.
 - **Sheets:**
   - `phase_details` is gone. Its per-phase values are now `details` rows
     at level `per_phase`, with the Observer phase in `fase`. Its
