@@ -6,13 +6,13 @@ test_consolidations_api.py (which fake this runner entirely).
 """
 
 import os
+import re
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
 import openpyxl
 import pytest
-from consolidation.observer_import import normaliseer_kop
 
 from app.services.consolidation import ConsolidationInputError, ObserverConsolidationRunner
 from tests.observer_exports import ColumnValue, write_observer_export
@@ -66,16 +66,16 @@ def test_one_upload_produces_every_consolidation_level(synthetic_result: Path) -
         assert list(_result_rows(synthetic_result, sheet)) == ["T901", "T902"]
 
 
-def test_each_level_matches_what_its_old_condition_produced(synthetic_result: Path) -> None:
-    """Literal values from the old per-Condition consolidations (ME, ZE and
-    ME_ZE) of this same fixture, captured before ticket #149 merged them
-    into one upload."""
+def test_each_level_sums_its_own_phases_before_dividing(synthetic_result: Path) -> None:
+    """Worked out by hand from the fixture's cells (`-` read as 0): every
+    phase lasts 120 s with 10 s Out of sight tail and 10 s Out of sight
+    stress-related, so seven phases leave 770 visible seconds."""
     tail_tucked = "Total duration Tail tucked <No Modifier>"
     yawning = "Total number Yawning <No Modifier>"
     expected = {
-        "with_owner": {"T901": (0.06071428571428571, 0.01168831168831169)},
-        "without_owner": {"T901": (0.04350649350649351, 0.005194805194805195)},
-        "combined": {"T901": (0.05211038961038961, 0.008441558441558441)},
+        "with_owner": {"T901": (21.25 / 770, 12 / 770)},
+        "without_owner": {"T901": (59 / 770, 9 / 770)},
+        "combined": {"T901": (80.25 / 1540, 21 / 1540)},
     }
     for sheet, by_test in expected.items():
         rows = _result_rows(synthetic_result, sheet)
@@ -110,12 +110,11 @@ def test_phase_selection_lists_the_levels_each_source_row_was_used_in(
 
 
 def _synthetic_export_without(tmp_path: Path, headers: list[str]) -> Path:
-    """The synthetic export with `headers` removed from all three sheets."""
+    """The synthetic export with `headers` removed."""
     workbook = openpyxl.load_workbook(_SYNTHETIC_EXPORT)
-    for sheet in ("Results (2)", "Results", "Results (REL)"):
-        worksheet = workbook[sheet]
-        for column in sorted((c.column for c in worksheet[1] if c.value in headers), reverse=True):
-            worksheet.delete_cols(column)
+    results = workbook["Results"]
+    for column in sorted((c.column for c in results[1] if c.value in headers), reverse=True):
+        results.delete_cols(column)
     input_path = tmp_path / "input.xlsx"
     workbook.save(input_path)
     return input_path
@@ -153,10 +152,10 @@ def test_removing_former_boundary_and_other_columns_still_consolidates(
 def test_every_header_in_the_real_export_layout_resolves_to_one_definition_entry(
     synthetic_result: Path,
 ) -> None:
-    source = openpyxl.load_workbook(_SYNTHETIC_EXPORT, read_only=True)["Results (2)"]
+    results = openpyxl.load_workbook(_SYNTHETIC_EXPORT, read_only=True)["Results"]
     headers = [
-        normaliseer_kop(value)
-        for value in next(source.iter_rows(max_row=1, values_only=True))
+        value
+        for value in next(results.iter_rows(max_row=1, values_only=True))
         if str(value).startswith("Total ")
     ]
 
@@ -168,17 +167,26 @@ def test_every_header_in_the_real_export_layout_resolves_to_one_definition_entry
     ]
 
 
-def test_raw_and_edited_results_disagreeing_raises_the_domain_message(tmp_path: Path) -> None:
-    """A domain ValueError on the real sheet shape: lees_observer checks every
-    selected measurement in `Results (2)` against raw `Results`."""
+def test_the_synthetic_export_is_the_raw_results_sheet_only() -> None:
+    """Observer's export exactly as it produces it (ticket #151): no
+    hand-made working copies, and many zeros written as `-`."""
+    workbook = openpyxl.load_workbook(_SYNTHETIC_EXPORT, read_only=True)
+    assert workbook.sheetnames == ["Results"]
+    values = [v for row in workbook["Results"].iter_rows(min_row=2, values_only=True) for v in row]
+    assert "-" in values
+
+
+def test_a_text_cell_in_the_real_layout_raises_the_domain_message(tmp_path: Path) -> None:
     workbook = openpyxl.load_workbook(_SYNTHETIC_EXPORT)
-    source = workbook["Results (2)"]
-    duration_column = next(c.column for c in source[1] if c.value == "Duration")
-    source.cell(2, duration_column).value = 999.0
+    results = workbook["Results"]
+    duration_column = next(c for c in results[1] if c.value == "Duration").column_letter
+    results[f"{duration_column}2"] = "n/a"
     input_path = tmp_path / "input.xlsx"
     workbook.save(input_path)
 
-    with pytest.raises(ConsolidationInputError, match="Ruwe data wijkt af van kopie"):
+    with pytest.raises(
+        ConsolidationInputError, match=f"^Not a number in cell Results!{duration_column}2 "
+    ):
         ObserverConsolidationRunner().run(
             input_path=input_path,
             output_path=tmp_path / "result.xlsx",
@@ -197,30 +205,19 @@ def test_not_a_workbook_raises_consolidation_input_error(tmp_path: Path) -> None
 
 
 def test_missing_required_sheet_raises_consolidation_input_error(tmp_path: Path) -> None:
-    # A structurally valid .xlsx, but none of the sheets lees_observer
-    # actually requires ("Results (2)", "Results", "Results (REL)"). Since
-    # ticket #150 lees_observer names the missing sheet itself, rather
-    # than the adapter turning a raw KeyError into a message.
+    # A structurally valid .xlsx, but without the raw `Results` sheet, the
+    # only one lees_observer reads (ticket #151). Since ticket #150
+    # lees_observer names the missing sheet itself, rather than the
+    # adapter turning a raw KeyError into a message.
     workbook = openpyxl.Workbook()
     workbook.active.title = "SomeOtherSheet"
     input_path = tmp_path / "input.xlsx"
     workbook.save(input_path)
 
-    with pytest.raises(ConsolidationInputError, match="^Missing sheet: Results \\(2\\)$"):
+    with pytest.raises(ConsolidationInputError, match="^Missing sheet: Results$"):
         ObserverConsolidationRunner().run(
             input_path=input_path,
             output_path=tmp_path / "result.xlsx",
-        )
-
-
-def test_missing_required_column_fails_naming_the_column(tmp_path: Path) -> None:
-    input_path = _synthetic_export_without(tmp_path, ["Duration"])
-
-    with pytest.raises(
-        ConsolidationInputError, match="^Missing column in Results \\(2\\): Duration$"
-    ):
-        ObserverConsolidationRunner().run(
-            input_path=input_path, output_path=tmp_path / "result.xlsx"
         )
 
 
@@ -252,9 +249,7 @@ def test_a_bug_inside_bereken_observer_is_not_miscategorized_as_input_error(
     bereken_observer's own pandas merges) must propagate uncaught, not be
     silently reported to the user as "your file's shape is wrong"."""
     workbook = openpyxl.Workbook()
-    for name in ("Results", "Results (2)", "Results (REL)"):
-        workbook.create_sheet(name)
-    del workbook["Sheet"]
+    workbook.active.title = "Results"
     input_path = tmp_path / "input.xlsx"
     workbook.save(input_path)
 
@@ -299,16 +294,222 @@ def test_stiffening_up_is_corrected_by_the_exploration_out_of_sight(tmp_path: Pa
     assert row["Total duration Staring <No Modifier>"] == pytest.approx(0.25)
 
 
-def test_a_column_missing_from_raw_results_fails_naming_it(tmp_path: Path) -> None:
+def test_an_export_with_only_the_raw_results_sheet_consolidates(tmp_path: Path) -> None:
+    result = _consolidate(tmp_path, {"Total duration Panting <No Modifier>": 20})
+
+    row = _result_rows(result, "with_owner")["T901"]
+    assert row["Total duration Panting <No Modifier>"] == pytest.approx(0.20)
+
+
+def test_a_dash_is_a_measured_zero(tmp_path: Path) -> None:
+    result = _consolidate(
+        tmp_path,
+        {
+            "Total duration Panting <No Modifier>": lambda phase: 20 if phase in (2, 4) else "-",
+            "Total number Panting <No Modifier>": "-",
+        },
+    )
+
+    row = _result_rows(result, "with_owner")["T901"]
+    # 20 s in two of the seven ME phases: 40 / 700.
+    assert row["Total duration Panting <No Modifier>"] == pytest.approx(40 / 700)
+    assert row["Total number Panting <No Modifier>"] == 0
+    status = {a["behaviour"]: a["status"] for a in _sheet_rows(result, "availability")}
+    assert status["Panting"] == "exported_nonzero"
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (None, "Blank cell"),
+        ("", "Blank cell"),
+        ("n/a", "Not a number in cell"),
+        ("12.5", "Not a number in cell"),
+    ],
+)
+def test_a_blank_or_text_cell_fails_naming_the_cell(
+    tmp_path: Path, value: str | None, message: str
+) -> None:
+    # Observer phase 3 of the only test is on row 4, Panting in column J.
+    with pytest.raises(
+        ConsolidationInputError,
+        match=f"^{message} Results!J4 \\(Total duration Panting <No Modifier>\\)",
+    ):
+        _consolidate(
+            tmp_path,
+            {"Total duration Panting <No Modifier>": lambda phase: value if phase == 3 else 20},
+        )
+
+
+def test_a_blank_duration_fails_naming_the_cell(tmp_path: Path) -> None:
     input_path = write_observer_export(
         tmp_path / "input.xlsx", {"Total duration Panting <No Modifier>": 20}
     )
     workbook = openpyxl.load_workbook(input_path)
-    raw = workbook["Results"]
-    raw.delete_cols(next(c.column for c in raw[1] if c.value == "Duration"))
+    workbook["Results"]["I2"] = None
     workbook.save(input_path)
 
-    with pytest.raises(ConsolidationInputError, match="^Missing column in Results: Duration$"):
+    with pytest.raises(ConsolidationInputError, match=r"^Blank cell Results!I2 \(Duration\)"):
+        ObserverConsolidationRunner().run(
+            input_path=input_path, output_path=tmp_path / "result.xlsx"
+        )
+
+
+@pytest.mark.parametrize(
+    ("cell", "header"),
+    [("C2", "Observations"), ("D2", "Aanwezigheid FP in fase"), ("H2", "Test ID")],
+)
+def test_a_blank_structural_cell_fails_naming_the_cell(
+    tmp_path: Path, cell: str, header: str
+) -> None:
+    input_path = write_observer_export(
+        tmp_path / "input.xlsx", {"Total duration Panting <No Modifier>": 20}
+    )
+    workbook = openpyxl.load_workbook(input_path)
+    workbook["Results"][cell] = None
+    workbook.save(input_path)
+
+    with pytest.raises(
+        ConsolidationInputError, match=f"^Blank cell Results!{cell} \\({re.escape(header)}\\)$"
+    ):
+        ObserverConsolidationRunner().run(
+            input_path=input_path, output_path=tmp_path / "result.xlsx"
+        )
+
+
+def test_an_empty_row_is_skipped_and_no_observations_at_all_fails(tmp_path: Path) -> None:
+    input_path = write_observer_export(
+        tmp_path / "input.xlsx", {"Total duration Panting <No Modifier>": 20}
+    )
+    workbook = openpyxl.load_workbook(input_path)
+    results = workbook["Results"]
+    results.insert_rows(3)
+    workbook.save(input_path)
+    output_path = tmp_path / "result.xlsx"
+
+    ObserverConsolidationRunner().run(input_path=input_path, output_path=output_path)
+    row = _result_rows(output_path, "with_owner")["T901"]
+    assert row["Total duration Panting <No Modifier>"] == pytest.approx(0.20)
+
+    results.delete_rows(2, results.max_row)
+    workbook.save(input_path)
+    with pytest.raises(ConsolidationInputError, match="^The Results sheet has no Observations"):
+        ObserverConsolidationRunner().run(input_path=input_path, output_path=output_path)
+
+
+@pytest.mark.parametrize(
+    "column", ["Observations", "Test ID", "Dog ID", "Aanwezigheid FP in fase", "Duration"]
+)
+def test_a_missing_required_column_fails_naming_it(tmp_path: Path, column: str) -> None:
+    input_path = write_observer_export(
+        tmp_path / "input.xlsx", {"Total duration Panting <No Modifier>": 20}
+    )
+    workbook = openpyxl.load_workbook(input_path)
+    results = workbook["Results"]
+    results.delete_cols(next(c.column for c in results[1] if c.value == column))
+    workbook.save(input_path)
+
+    with pytest.raises(
+        ConsolidationInputError, match=f"^Missing column in Results: {re.escape(column)}$"
+    ):
+        ObserverConsolidationRunner().run(
+            input_path=input_path, output_path=tmp_path / "result.xlsx"
+        )
+
+
+def test_columns_observer_adds_that_are_never_read_do_not_block_an_upload(
+    tmp_path: Path,
+) -> None:
+    """Fase, Geslacht hond and Observer's container columns may be missing
+    or hold anything; Out of Sight counts and the owner-departure (F8) rows
+    are never read either."""
+    input_path = write_observer_export(
+        tmp_path / "input.xlsx",
+        {
+            "Total duration Tail tucked <No Modifier>": lambda phase: "junk" if phase == 8 else 20,
+            "Total duration Out of sight tail <No Modifier>": 20,
+            "Total number Out of sight tail <No Modifier>": "junk",
+        },
+    )
+    workbook = openpyxl.load_workbook(input_path)
+    results = workbook["Results"]
+    for header in ("Geslacht hond", "Fase"):
+        results.delete_cols(next(c.column for c in results[1] if c.value == header))
+    results["B2"] = None
+    workbook.save(input_path)
+    output_path = tmp_path / "result.xlsx"
+
+    ObserverConsolidationRunner().run(input_path=input_path, output_path=output_path)
+
+    row = _result_rows(output_path, "with_owner")["T901"]
+    assert row["Total duration Tail tucked <No Modifier>"] == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        # Corrects no exported group, so it is listed as ignored.
+        "Total duration Out of sight attention <No Modifier>",
+        "Total duration Standing bij TP <No Modifier>",
+        "Total number First contact with TP <No Modifier>",
+    ],
+)
+def test_every_exported_column_is_validated_even_when_it_never_enters_a_result(
+    tmp_path: Path, header: str
+) -> None:
+    """One rule for every exported column (ticket #151): only `Total number
+    Out of sight …` is never read."""
+    with pytest.raises(
+        ConsolidationInputError, match=f"^Blank cell Results!K4 \\({re.escape(header)}\\)"
+    ):
+        _consolidate(
+            tmp_path,
+            {
+                "Total duration Panting <No Modifier>": 20,
+                header: lambda phase: None if phase == 3 else 0,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("cell", "value", "message"),
+    [
+        # Row 2 is Observer phase 1, row 3 phase 2.
+        ("D2", "False", r"owner-present flag .* contradicts the phase of Observation T901_\w+_F1"),
+        ("C3", "T901_synthetic_F1", r"^Duplicate test and phase: T901 phase 1 "),
+        ("E3", "D999", r"^Missing or conflicting Dog ID for test T901\.$"),
+    ],
+)
+def test_contradicting_rows_fail_naming_the_test_or_phase(
+    tmp_path: Path, cell: str, value: str, message: str
+) -> None:
+    input_path = write_observer_export(
+        tmp_path / "input.xlsx", {"Total duration Panting <No Modifier>": 20}
+    )
+    workbook = openpyxl.load_workbook(input_path)
+    workbook["Results"][cell] = value
+    workbook.save(input_path)
+
+    with pytest.raises(ConsolidationInputError, match=message):
+        ObserverConsolidationRunner().run(
+            input_path=input_path, output_path=tmp_path / "result.xlsx"
+        )
+
+
+def test_a_duplicate_header_fails_naming_the_column(tmp_path: Path) -> None:
+    panting = "Total duration Panting <No Modifier>"
+    input_path = write_observer_export(tmp_path / "input.xlsx", {panting: 20})
+    workbook = openpyxl.load_workbook(input_path)
+    results = workbook["Results"]
+    # Column J copied into K, header and all.
+    for row in range(1, results.max_row + 1):
+        results.cell(row, 11).value = results.cell(row, 10).value
+    workbook.save(input_path)
+
+    with pytest.raises(
+        ConsolidationInputError,
+        match=f"^Duplicate column in Results: {re.escape(panting)} \\(columns J, K\\)$",
+    ):
         ObserverConsolidationRunner().run(
             input_path=input_path, output_path=tmp_path / "result.xlsx"
         )
@@ -342,7 +543,7 @@ def test_an_out_of_sight_without_any_exported_behaviour_of_its_group_is_ignored(
 def test_an_unknown_behaviour_fails_naming_the_column(tmp_path: Path) -> None:
     with pytest.raises(
         ConsolidationInputError,
-        match=r"Unknown behaviour in column H \(Total duration Sniffing air <No Modifier>\)",
+        match=r"Unknown behaviour in column J \(Total duration Sniffing air <No Modifier>\)",
     ):
         _consolidate(tmp_path, {"Total duration Sniffing air <No Modifier>": 20})
 

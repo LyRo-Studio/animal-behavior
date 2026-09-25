@@ -1,4 +1,4 @@
-"""Import van de aangeleverde Observer-export; behoud iedere modifiercombinatie."""
+"""Import van het ruwe Results-blad van de Observer-export; behoud iedere modifiercombinatie."""
 from pathlib import Path
 import hashlib
 import math
@@ -14,8 +14,12 @@ from consolidation.consolidatie import consolideer
 # definitie die uit het ethogram gegenereerd is (ticket #150), nooit uit de
 # kolompositie in de export.
 DEFINITIE = ethogram_definition.load()
-VERPLICHT_IN_BEIDE = ["Observations", "Test ID", "Dog ID", "Duration"]
-VERPLICHTE_KOLOMMEN = [*VERPLICHT_IN_BEIDE, "Aanwezigheid FP in fase"]
+# Het enige blad dat gelezen wordt (ticket #151): de export zoals Observer
+# hem maakt. Fase, Geslacht hond en Observers containerkolommen worden nooit
+# gelezen.
+BLAD = "Results"
+EIGENAAR_AANWEZIG = "Aanwezigheid FP in fase"
+VERPLICHTE_KOLOMMEN = ["Observations", "Test ID", "Dog ID", EIGENAAR_AANWEZIG, "Duration"]
 TOLERANTIE_S = 0.001  # Observer exporteert seconden met een beperkte decimale precisie.
 DELEN = {
     "1": {"naam": "Met eigenaar", "fases": tuple(range(1, 8)), "niveau": "with_owner"},
@@ -25,17 +29,13 @@ DELEN = {
 }
 
 
-def normaliseer_kop(value):
-    return str(value).replace("stress0", "stress-").replace("self0", "self-")
-
-
 def fase_uit_observatie(value):
     match = re.fullmatch(r"(T\d+)_.+_F(\d+)", str(value))
     if not match:
-        raise ValueError(f"Onherkenbare observatienaam: {value!r}")
+        raise ValueError(f"Malformed Observation name {value!r}: expected <Test ID>_..._F<phase>.")
     phase = int(match[2])
     if not 1 <= phase <= 15:
-        raise ValueError(f"Ongeldige fase in observatienaam: {value}")
+        raise ValueError(f"Phase outside 1-15 in Observation name {value!r}.")
     return match[1], phase
 
 
@@ -81,6 +81,9 @@ def _deel_kolommen_in(headers, source, definitie):
 
     Een kolom zonder bekend gedrag faalt. De Out of Sight van een groep is
     alleen verplicht wanneer minstens een gedrag van die groep geexporteerd is.
+    `ongelezen` zijn de `Total number Out of sight …`-kolommen: de enige
+    Total-kolommen waarvan de cellen nooit gelezen (en dus nooit gecontroleerd)
+    worden.
     """
     bekend = _bekende_gedragingen(definitie)
     groepen = {g["name"]: g for g in definitie["groups"]}
@@ -103,7 +106,7 @@ def _deel_kolommen_in(headers, source, definitie):
         if gedrag["name"] == groep["out_of_sight"]:
             if kind == "duur" and modifier == "<No Modifier>":
                 oos_kolommen[groep["name"]] = c
-            oos_kandidaten.append((rij, groep["name"], c))
+            oos_kandidaten.append((rij, groep["name"], c, kind))
         elif groep["excluded"] or gedrag["name"] in definitie["excluded_behaviours"]:
             excluded.append({**rij, "reden": groep["excluded"]
                              or definitie["excluded_behaviours"][gedrag["name"]]})
@@ -133,9 +136,13 @@ def _deel_kolommen_in(headers, source, definitie):
             raise ValueError(
                 f"Missing Out of Sight column for {naam}: the export has behaviours of this "
                 f"group but no 'Total duration {oos} <No Modifier>' column.")
-    for rij, groep, c in oos_kandidaten:
-        if oos_kolommen.get(groep) != c:
-            reden = "Out of Sight count or modifier column: never used."
+    ongelezen = set()
+    for rij, groep, c, kind in oos_kandidaten:
+        if kind == "aantal":
+            reden = "Out of Sight count: never read."
+            ongelezen.add(c)
+        elif oos_kolommen.get(groep) != c:
+            reden = "Out of Sight modifier column: never used."
         elif groep in gebruikt:
             reden = "Out of Sight correction column: its duration corrects the group's denominator."
         else:
@@ -149,7 +156,7 @@ def _deel_kolommen_in(headers, source, definitie):
     for m in mapping:
         oc = oos_per_groep[m["groep"]]
         m["oos_kolom"] = source.cell(1, oc).column_letter if oc else "geen"
-    return mapping, excluded, notes, oos_per_groep, event_duur, per_gedrag
+    return mapping, excluded, notes, oos_per_groep, event_duur, per_gedrag, ongelezen
 
 
 def _beschikbaarheid(per_gedrag, niet_nul, definitie):
@@ -173,23 +180,74 @@ def _melding(soort, variabele, melding, test_id="", fase=""):
             "melding": melding}
 
 
-def _getal(value, context):
-    if (isinstance(value, bool) or not isinstance(value, (int, float))
-            or not math.isfinite(value) or value < 0):
-        raise ValueError(f"Ongeldige meetwaarde in {context}: {value!r}")
+def _is_meetkolom(header):
+    return header == "Duration" or header.startswith(("Total duration ", "Total number "))
+
+
+def _plaats(cell, header):
+    return f"{BLAD}!{cell.coordinate} ({header})"
+
+
+def _ingevuld(cell, header):
+    """De waarde van een verplichte cel; een blanke cel faalt en noemt de cel."""
+    value = cell.value
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError(f"Blank cell {_plaats(cell, header)}")
+    return value
+
+
+def _meetwaarde(cell, header):
+    """Een meetcel als seconden of aantal. Observers '-' is een gemeten nul.
+
+    Een blanke of niet-numerieke cel faalt en noemt de cel.
+    """
+    value = cell.value
+    if isinstance(value, str) and value.strip() == "-":
+        return 0.0
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError(f"Blank cell {_plaats(cell, header)}: every exported cell must hold "
+                         "a number, or '-' for a measured zero.")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Not a number in cell {_plaats(cell, header)}: {str(value)[:40]!r}.")
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"Invalid value in cell {_plaats(cell, header)}: {value!r}; "
+                         "measurements are finite and never negative.")
     return float(value)
 
 
-def lees_observer(path, deel="1"):
-    """Lees deel 1, deel 2 of 1+2 uit Results (2), met controle tegen Results.
+def _kolommen(blad):
+    """{kop: kolomnummer} van alle kolommen die gelezen worden.
 
-    '-' wordt alleen als nul aanvaard wanneer de bewerkte kopie expliciet nul
-    bevat. Blanke meetcellen zijn fouten. Fase wordt uit Observations gehaald:
-    de bronkolom Fase nummert deel 2 opnieuw van 1 tot 7.
+    Een dubbele verplichte of Total-kolom faalt: welke van de twee telt, is
+    niet te zeggen. Andere kolommen worden nooit gelezen, dus hun koppen doen
+    er niet toe.
+    """
+    per_kop = {}
+    for cell in blad[1]:
+        header = "" if cell.value is None else str(cell.value)
+        if header in VERPLICHTE_KOLOMMEN or _is_meetkolom(header):
+            per_kop.setdefault(header, []).append(cell)
+    for header, cells in per_kop.items():
+        if len(cells) > 1:
+            letters = ", ".join(c.column_letter for c in cells)
+            raise ValueError(f"Duplicate column in {BLAD}: {header} (columns {letters})")
+    for header in VERPLICHTE_KOLOMMEN:
+        if header not in per_kop:
+            raise ValueError(f"Missing column in {BLAD}: {header}")
+    return {header: cell.column for header, (cell,) in per_kop.items()}
+
+
+def lees_observer(path, deel="1"):
+    """Lees deel 1, deel 2 of 1+2 uit het ruwe Results-blad van de Observer-export.
+
+    Alleen dat blad wordt gelezen (ticket #151); handgemaakte werkkopieen zijn
+    niet nodig. '-' is een gemeten nul; een blanke of niet-numerieke meetcel
+    faalt. Fase wordt uit Observations gehaald: de bronkolom Fase nummert
+    deel 2 opnieuw van 1 tot 7 en wordt nooit gelezen.
     """
     deel = str(deel)
     if deel not in DELEN:
-        raise ValueError("Deel moet 1, 2 of 1+2 zijn.")
+        raise ValueError("deel must be 1, 2 or 1+2.")
     gekozen_fases = DELEN[deel]["fases"]
     try:
         wb = load_workbook(path, data_only=False, keep_links=False)
@@ -197,89 +255,53 @@ def lees_observer(path, deel="1"):
         # openpyxl meldt sommige ontbrekende OOXML-onderdelen als KeyError.
         raise ValueError("The uploaded file is not a valid Excel workbook.") from exc
     try:
-        for sheet in ("Results (2)", "Results", "Results (REL)"):
-            if sheet not in wb.sheetnames:
-                raise ValueError(f"Missing sheet: {sheet}")
-        source = wb["Results (2)"]
-        raw = wb["Results"]
-        rel = wb["Results (REL)"]
-        headers = {normaliseer_kop(c.value): c.column for c in source[1]}
-        raw_headers = {normaliseer_kop(c.value): c.column for c in raw[1]}
-        if len(headers) != source.max_column or len(raw_headers) != raw.max_column:
-            raise ValueError("Dubbele kolomkoppen in de Observer-export.")
-        for header in VERPLICHTE_KOLOMMEN:
-            if header not in headers:
-                raise ValueError(f"Missing column in Results (2): {header}")
-        for header in [*VERPLICHT_IN_BEIDE, *(h for h in headers if h.startswith("Total "))]:
-            if header not in raw_headers:
-                raise ValueError(f"Missing column in Results: {header}")
-        raw_rows = {raw.cell(r, raw_headers["Observations"]).value: r
-                    for r in range(2, raw.max_row + 1)}
-        if len(raw_rows) != raw.max_row - 1:
-            raise ValueError("Dubbele observaties in ruwe Results.")
-        mapping, excluded, notes, oos_columns, event_duur, per_gedrag = _deel_kolommen_in(
-            headers, source, DEFINITIE)
-        for group, oc in oos_columns.items():
-            if oc:
-                color = source.cell(1, oc).fill.fgColor
-                if color.type != "rgb" or color.rgb[-6:] != "FFFF00":
-                    raise ValueError(f"OOS-kolom is niet geel gemarkeerd: {source.cell(1, oc).value}")
-        for m in mapping:
-            formula = rel.cell(2, m["kolomnummer"]).value
-            refs = re.findall(r"\$([A-Z]+)2", str(formula))
-            found = sorted(set(refs) - {"G"})
-            if found != ([] if m["oos_kolom"] == "geen" else [m["oos_kolom"]]):
-                notes.append({"type": "bestaande_formule", "test_id": "", "fase": "",
-                              "variabele": m["gedrag"],
-                              "melding": f"Results (REL) verwijst naar {found}; gebruikt: {m['oos_kolom']}."})
+        if BLAD not in wb.sheetnames:
+            raise ValueError(f"Missing sheet: {BLAD}")
+        source = wb[BLAD]
+        headers = _kolommen(source)
+        (mapping, excluded, notes, oos_columns, event_duur, per_gedrag,
+         ongelezen) = _deel_kolommen_in(headers, source, DEFINITIE)
+        # Duration en iedere Total-kolom, behalve de Out of Sight-aantallen.
+        te_lezen = {header: c for header, c in headers.items()
+                    if _is_meetkolom(header) and c not in ongelezen}
         definitions = pd.DataFrame(mapping)
         phases, behaviors, invisibility, selection = [], [], [], []
-        zero_count = 0
         niet_nul = set()
         for row in range(2, source.max_row + 1):
-            observation = source.cell(row, headers["Observations"]).value
+            if all(cell.value is None for cell in source[row]):
+                continue  # Een lege rij is geen observatie.
+            observation, test, owner_flag = (
+                _ingevuld(source.cell(row, headers[h]), h)
+                for h in ("Observations", "Test ID", EIGENAAR_AANWEZIG))
             label_test, phase = fase_uit_observatie(observation)
-            test = source.cell(row, headers["Test ID"]).value
-            owner_flag = str(source.cell(row, headers["Aanwezigheid FP in fase"]).value).lower()
+            dog = source.cell(row, headers["Dog ID"]).value
+            owner_flag = str(owner_flag).lower()
             if owner_flag not in {"true", "false"} or (owner_flag == "true") != (phase <= 7):
-                raise ValueError(f"Fase en aanwezigheid eigenaar/FP komen niet overeen: {observation}")
-            if observation not in raw_rows:
-                raise ValueError(f"Observation {observation} is missing from Results.")
-            raw_row = raw_rows[observation]
-            if (raw.cell(raw_row, raw_headers["Test ID"]).value != test
-                    or raw.cell(raw_row, raw_headers["Dog ID"]).value != source.cell(row, headers["Dog ID"]).value):
-                raise ValueError(f"Test/Dog-ID verschillen tussen de twee brontabbladen: {observation}")
+                raise ValueError(
+                    f"The owner-present flag ({EIGENAAR_AANWEZIG}) contradicts the phase of "
+                    f"Observation {observation}: it must be True exactly for phases 1-7.")
             if test != label_test:
-                notes.append({"type": "observatienaam", "test_id": test, "fase": phase,
-                              "variabele": observation,
-                              "melding": "Typfout in observatienaam; Test ID en Dog ID uit beide brontabbladen komen overeen en worden gebruikt."})
-            selection.append({"observatie": observation, "test_id": test,
-                              "dog_id": source.cell(row, headers["Dog ID"]).value,
-                              "fase": phase, "fase_bronkolom": source.cell(row, headers["Fase"]).value if "Fase" in headers else None,
-                              "fase_in_deel": phase if phase <= 7 else phase - 8,
+                notes.append(_melding("observation_name", observation,
+                                      f"The Observation name's Test ID ({label_test}) differs "
+                                      f"from the Test ID column; {test} is used.", test, phase))
+            selection.append({"observatie": observation, "test_id": test, "dog_id": dog,
+                              "fase": phase, "fase_in_deel": phase if phase <= 7 else phase - 8,
                               "deel": 1 if phase <= 7 else 2, "met_eigenaar": owner_flag == "true",
                               "opgenomen": phase in gekozen_fases, "bronrij": row})
             if phase not in gekozen_fases:
                 continue
-            # Controleer alle statistieken, ook uitgesloten protocolkolommen.
-            for header, c in headers.items():
-                if not header.startswith(("Total duration ", "Total number ")) and header != "Duration":
-                    continue
-                actual = _getal(source.cell(row, c).value, f"Results (2)!{source.cell(row, c).coordinate}")
-                original = raw.cell(raw_row, raw_headers[header]).value
-                if actual > 0:
+            # Controleer iedere gelezen kolom, ook uitgesloten protocolkolommen.
+            waarden = {}
+            for header, c in te_lezen.items():
+                waarden[c] = _meetwaarde(source.cell(row, c), header)
+                if waarden[c] > 0:
                     niet_nul.add(c)
-                if original == "-" and actual == 0:
-                    zero_count += 1
-                elif not isinstance(original, (int, float)) or original != actual:
-                    raise ValueError(f"Ruwe data wijkt af van kopie: {observation}, {header}")
-            duration = _getal(source.cell(row, headers["Duration"]).value, observation)
-            phases.append({"test_id": test, "fase": phase, "duur_s": duration})
+            phases.append({"test_id": test, "fase": phase, "duur_s": waarden[headers["Duration"]]})
             for group, oc in oos_columns.items():
                 invisibility.append({"test_id": test, "fase": phase, "groep": group,
-                                     "duur_s": float(source.cell(row, oc).value) if oc else 0.0})
+                                     "duur_s": waarden[oc] if oc else 0.0})
             for m in mapping:
-                value = _getal(source.cell(row, m["kolomnummer"]).value, observation)
+                value = waarden[m["kolomnummer"]]
                 behaviors.append({"test_id": test, "fase": phase, "gedrag": m["gedrag"],
                                   "duur_s": value if m["meettype"] == "duur" else float("nan"),
                                   "aantal": value if m["meettype"] == "aantal" else float("nan")})
@@ -289,13 +311,16 @@ def lees_observer(path, deel="1"):
                                       "This Event has a nonzero duration; Observer's coding may "
                                       "have changed. Only its frequency is reported."))
         selected = pd.DataFrame(selection)
-        if selected.duplicated(["test_id", "fase"]).any():
-            raise ValueError("Dubbele echte test/fase-combinatie.")
+        if selected.empty:
+            raise ValueError(f"The {BLAD} sheet has no Observations.")
+        dubbel = selected[selected.duplicated(["test_id", "fase"])]
+        if not dubbel.empty:
+            raise ValueError(f"Duplicate test and phase: {dubbel.test_id.iloc[0]} phase "
+                             f"{dubbel.fase.iloc[0]} appears more than once.")
         dogs = selected[["test_id", "dog_id"]].drop_duplicates()
-        if dogs.test_id.duplicated().any() or dogs.dog_id.isna().any():
-            raise ValueError("Test heeft ontbrekend of tegenstrijdig Dog ID.")
-        notes.append({"type": "broncontrole", "test_id": "", "fase": "", "variabele": "",
-                      "melding": f"Alle gekozen waarden gelijk aan ruwe Results; {zero_count} '-' expliciet als 0 bevestigd door Results (2)."})
+        fout = dogs[dogs.test_id.duplicated(keep=False) | dogs.dog_id.isna()].test_id.unique()
+        if len(fout):
+            raise ValueError(f"Missing or conflicting Dog ID for test {', '.join(map(str, fout))}.")
         return {"deel": deel, "invoer": {"fases": pd.DataFrame(phases),
                            "gedrag_groepen": definitions[["gedrag", "groep", "meettype"]],
                            "gedragingen": pd.DataFrame(behaviors),
@@ -373,10 +398,11 @@ def schrijf_resultaat(path, bronnen, berekend, source_path):
         "Distance to TP/FP, Location and Dog following are only scored in some phases: until the Scoring plan is supported, "
         "their columns are listed in excluded, with a warning.",
         "No visible time: blank fraction and frequency with status geen_zichtbare_tijd; never replaced by 0.",
-        "Raw Results and Results (2) are compared cell by cell for every selected value. The source file is not changed.",
-        "Headers with stress0/self0 are restored to stress-/self-, matching raw Results.",
+        "Only the export's raw Results sheet is read, exactly as Observer produces it. The source file is not changed.",
+        "Observer's '-' is a measured 0. A blank or non-numeric cell in an exported column fails the upload.",
+        "Never read: Fase, Geslacht hond, Observer's container columns, Total number Out of sight columns "
+        "and the owner-departure (phase 8) rows. Every other exported cell is checked, used or not.",
         f"Maximum tolerance on individual times: {TOLERANTIE_S} s for export rounding; deviations are listed in warnings.",
-        "Existing phase percentages from Results (REL) are not summed or averaged. Wrong group references are listed in warnings.",
         "details: every numerator, denominator, percentage, frequency per second and per minute, and status, per level.",
         "phase_details: every value per test and phase; denominators: per test, level and group.",
         "phase_selection: every source row and the levels it was used in; variables: every result column; excluded: columns left out, with the reason.",

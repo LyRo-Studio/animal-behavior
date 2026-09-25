@@ -2617,7 +2617,8 @@ group boundaries are gone, so any behaviour column may be missing.
     behaviours, the Out of Sight name variant, 9 TP/FP protocol names),
     the modifier aliases, the `Blad1` column → group mapping, and the
     exclusions (First contact with TP, the TP/FP protocol group).
-  - **Checks moved from the uncommitted `ethogram_controle.py`:** unique
+  - **Checks moved from the uncommitted `ethogram_controle.py`** (deleted
+    in #151, since it no longer ran): unique
     names, alias targets that exist, one Out of Sight per group, known
     modifier categories.
   - `test_ethogram_definition.py` regenerates the JSON and fails on any
@@ -2651,6 +2652,7 @@ group boundaries are gone, so any behaviour column may be missing.
   exploration Out of Sight (IW), not the stress one. The existing
   `Results (REL)` formula check still lists it as a note, next to the
   stress-group count formulas that point at IW (a copy error, per #143).
+  (#151 removed that check.)
   In both the synthetic fixture and the real export this moves no value:
   compared with #149's output, every result value is identical, and only
   the 35 Event duration columns are gone. The small-export tests show the
@@ -2665,9 +2667,63 @@ group boundaries are gone, so any behaviour column may be missing.
   opening a damaged workbook is mapped to "not a valid Excel workbook"
   inside `lees_observer`.) `Fase` is no longer required, since #143 never
   reads it. New messages are in English. The
-  importer's older ones stay Dutch until the importer rework in #151.
+  importer's older ones stay Dutch until the importer rework in #151
+  (done: since #151 `lees_observer` checks only the `Results` sheet).
 - **Known wrinkle, from #149's layout:** `warnings` repeats an import
   warning once per level.
+
+**Consolidation: the raw Observer export as-is (ticket #151, part of
+#143):** `lees_observer` reads only the `Results` sheet, exactly as
+Observer exports it. The hand-made working copies (`Results (2)`,
+`Results (REL)`) are never needed or read; a workbook that still has them
+consolidates from its `Results` sheet alone. The yellow-highlight check,
+the `Results (REL)` formula-reference check (and its notes), the
+cell-by-cell cross-check against the copy and the `stress0`/`self0` header
+repair (`normaliseer_kop`, which only the copy needed) are gone.
+- **Required columns:** Observations, Test ID, Dog ID, the owner-present
+  flag (`Aanwezigheid FP in fase`) and Duration. Missing → "Missing column
+  in Results: <header>". A duplicate of one of these or of a `Total …`
+  column fails naming it and its column letters, since which one counts
+  can't be told. Other headers are never read, so duplicates there don't
+  matter.
+- **Never read:** Fase, Geslacht hond, Observer's container columns
+  (`Independent Variables …`, `Result Containers`) and `Total number Out
+  of sight …`, exactly #143's "Ignored" class. Their cells may hold
+  anything; the Out of Sight counts are still listed in `excluded`.
+  `phase_selection` lost its `fase_bronkolom` column.
+- **F8 rows are listed but never validated** (decided with the user on
+  this branch): they never contribute to any result, per #143's "F8 rows
+  are ignored and listed", so junk there can't corrupt anything.
+- **Cells:** `-` is a measured 0. A blank cell or anything that isn't a
+  number (text, including a number stored as text) fails, naming the cell:
+  "Blank cell Results!J4 (<header>)" / "Not a number in cell Results!J4
+  (<header>)". **One rule for every other exported column** (decided with
+  the user on this branch): Duration and every `Total …` column is checked
+  whether or not it enters a result. That includes excluded protocol and
+  First-contact columns, and an Out of Sight column that corrects no
+  exported group. #143 story 34 ("irrelevant columns never block an
+  upload") is read as being about such a column not being *required*.
+  Observer always writes a number or `-`, so a blank there means a
+  damaged export. A
+  blank Observations, Test ID or owner-present flag cell fails the same
+  way ("Blank cell Results!C2 (Observations)"). A fully empty row is
+  skipped: it is not an Observation.
+- **Messages:** every `lees_observer` failure and warning is now English,
+  and names the column, cell, test or phase. The calculation's own
+  (`consolideer`) messages and `bereken_observer`'s notes stay Dutch; they
+  belong to the per-phase/no-visible-time rework (#152).
+- **Fixture:** `synthetic_observer_export.xlsx` is rebuilt as a raw
+  `Results`-only workbook from the real export's header row, values
+  generated (seed 151, many zeros as `-`). Its literal-value test is worked
+  out by hand from its cells.
+- **Verified against #150's importer:** on a legacy three-sheet copy of the
+  new fixture, #150's code gives every result and diagnostic sheet cell for
+  cell identical to this one on the raw sheet alone. On the real export,
+  the three result sheets and `denominators` are identical. Only
+  source column letters (`bronkolom`/`oos_kolom`, now pointing into raw
+  `Results`, two container columns further right) differ, and raw
+  `Results`' `Total duration First contact with TP` column, which the copy
+  lacked, is now listed in `excluded`.
 
 **`assist` vendored (ticket #112) — approved deviation, supersedes Feature
 C's "pinned external dependency" decision:** the cutting-worker image used to
