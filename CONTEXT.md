@@ -2324,6 +2324,10 @@ explicitly out of scope. Since ticket #149 the module also carries code
 written for this app: `schrijf_resultaat` now writes every level into one
 workbook. It stays in pandas for the same reason, since it only rearranges
 the calculation's own DataFrames; the calculation is still unmodified.
+Since ticket #152 the calculation itself is adapted, as #143 decided
+("adapted, not rewritten"): `consolideer` keeps its input checks and
+sum-then-divide, and gains the levels, the per-phase level and the
+no-visible-time threshold.
 Since ticket #150 `lees_observer` maps columns by name through the
 generated Ethogram definition (`ethogram_definition.py`, plain Python
 with no pandas), and adds the `availability` table. `openpyxl` was
@@ -2670,7 +2674,7 @@ group boundaries are gone, so any behaviour column may be missing.
   importer's older ones stay Dutch until the importer rework in #151
   (done: since #151 `lees_observer` checks only the `Results` sheet).
 - **Known wrinkle, from #149's layout:** `warnings` repeats an import
-  warning once per level.
+  warning once per level. (Fixed in #152: the export is read once.)
 
 **Consolidation: the raw Observer export as-is (ticket #151, part of
 #143):** `lees_observer` reads only the `Results` sheet, exactly as
@@ -2724,6 +2728,62 @@ repair (`normaliseer_kop`, which only the copy needed) are gone.
   `Results`, two container columns further right) differ, and raw
   `Results`' `Total duration First contact with TP` column, which the copy
   lacked, is now listed in `excluded`.
+
+**Consolidation: per-phase results and no visible time (ticket #152,
+part of #143):** a fourth level, `per_phase`, and one rule for time
+without visibility at every level.
+- **One read, one calculation.** The runner calls `lees_observer` once and
+  `consolideer` once. `consolideer` takes `niveaus` (`NIVEAUS` in
+  `observer_import.py`: each level's Observer phases, `per_fase` for
+  `per_phase`) and sums each level separately. It is still sum first,
+  divide once; its input checks are unchanged. This replaces #149's
+  one-read-per-`deel` loop (`DELEN` is gone), so `warnings` no longer
+  repeats import warnings per level. Verified: `with_owner`,
+  `without_owner` and `combined` values are identical to #151's for the
+  synthetic fixture and the real export. Every `per_phase` cell of both
+  matches behaviour ÷ (Duration − group Out of Sight) recomputed straight
+  from the raw cells.
+- **No visible time:** visible time ≤ 0.001 s (the Observer tolerance,
+  `TOLERANTIE_S`), per phase or summed over a level, gives a blank
+  value with status `no_visible_time` in `details` and `denominators`,
+  never 0 and never a division. It used to be exactly 0 only, with the
+  Dutch status `geen_zichtbare_tijd` and a warning per group; that warning
+  is gone, since the status explains every blank. In the real export, the
+  28 phases where tail Out of Sight equals Duration are the only ones.
+- **Failures name test, phase and group/behaviour:** Out of Sight above
+  Duration by more than 0.001 s, a behaviour longer than its visible time
+  beyond it, and a count above 0 without visible time. Out of Sight within
+  the tolerance above Duration keeps the values, is no visible time, and
+  gives a `rounding` warning (as does a behaviour within the tolerance
+  above its visible time). An export with Observations only in F8 fails.
+- **Phase labels are `ME F3` / `ZE F1`** in `phases_used`,
+  `missing_phases` and `denominators`, so combined can't be ambiguous;
+  `per_phase` also has `observer_phase`, `condition` and `phase`, and so
+  does `phase_selection`, whose `deel`/`fase_in_deel` columns are gone.
+- **Missing phases:** `with_owner`/`without_owner`/`combined` rows carry
+  `phases_used`, `missing_phases` and `status` (`ok`/`incomplete`). A
+  test with none of a level's phases has no row there and a `no_phases`
+  warning, instead of the whole upload failing ("Geen aanwezige fases").
+  That includes a test with only an F8 row.
+- **Within-tolerance Out of Sight in a level sum:** a phase whose Out of
+  Sight is up to 0.001 s above its Duration has visible time 0 on its
+  own. A level still sums the raw values (visible = ΣDuration − ΣOut of
+  Sight, as #143 states), so the excess is subtracted there. At most
+  0.001 s per phase: accepted rather than clipping Out of Sight.
+- **Messages:** every `consolideer` message is English now. Only the
+  three visibility failures can come from an upload, since `lees_observer`
+  already guarantees the rest; the others would mean a bug.
+- **Sheets:**
+  - `phase_details` is gone. Its per-phase values are now `details` rows
+    at level `per_phase`, with the Observer phase in `fase`. Its
+    source-row columns are on `phase_selection`, where `levels` now
+    includes `per_phase`.
+  - `denominators` is rebuilt per level × test × phase (`per_phase` only)
+    × group, in English (`duration_s`, `out_of_sight_s`, `visible_s`,
+    `phases_used`, `status`). Before, it was per test and group only,
+    and summed clipped per-phase visible times.
+  - `details` keeps its Dutch column names until #154.
+  - Result sheets freeze their five leading columns.
 
 **`assist` vendored (ticket #112) — approved deviation, supersedes Feature
 C's "pinned external dependency" decision:** the cutting-worker image used to

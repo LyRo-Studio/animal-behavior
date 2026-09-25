@@ -9,6 +9,7 @@ import os
 import re
 import zipfile
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import openpyxl
@@ -48,13 +49,18 @@ def _result_rows(path: Path, sheet: str) -> dict[str, dict[str, object]]:
     return {row["test_id"]: row for row in _sheet_rows(path, sheet)}
 
 
+def _phase_rows(path: Path) -> dict[tuple[str, int], dict[str, object]]:
+    """The per_phase sheet as {(test_id, observer_phase): {header: value}}."""
+    return {(row["test_id"], row["observer_phase"]): row for row in _sheet_rows(path, "per_phase")}
+
+
 def test_one_upload_produces_every_consolidation_level(synthetic_result: Path) -> None:
     workbook = openpyxl.load_workbook(synthetic_result, read_only=True)
     assert workbook.sheetnames == [
+        "per_phase",
         *_RESULT_SHEETS,
         "README",
         "details",
-        "phase_details",
         "denominators",
         "warnings",
         "variables",
@@ -64,6 +70,10 @@ def test_one_upload_produces_every_consolidation_level(synthetic_result: Path) -
     ]
     for sheet in _RESULT_SHEETS:
         assert list(_result_rows(synthetic_result, sheet)) == ["T901", "T902"]
+    # One row per test and Observer phase, F8 never.
+    assert list(_phase_rows(synthetic_result)) == [
+        (test_id, phase) for test_id in ("T901", "T902") for phase in (*range(1, 8), *range(9, 16))
+    ]
 
 
 def test_each_level_sums_its_own_phases_before_dividing(synthetic_result: Path) -> None:
@@ -85,8 +95,10 @@ def test_each_level_sums_its_own_phases_before_dividing(synthetic_result: Path) 
             assert rows[test_id][yawning] == pytest.approx(count_per_second)
         # Every exported behaviour/modifier column is kept, per level,
         # except the 35 Event duration columns (ticket #150): 538 - 35,
-        # plus test_id and dog_id.
-        assert len(rows["T902"]) == 505
+        # after test_id, dog_id, phases_used, missing_phases and status.
+        assert len(rows["T902"]) == 508
+        assert rows["T902"]["status"] == "ok"
+        assert rows["T902"]["missing_phases"] is None
 
 
 def test_the_readme_is_english_and_names_the_source_file(synthetic_result: Path) -> None:
@@ -103,10 +115,12 @@ def test_phase_selection_lists_the_levels_each_source_row_was_used_in(
         (row["test_id"], row["fase"]): row["levels"]
         for row in _sheet_rows(synthetic_result, "phase_selection")
     }
-    assert levels_by_phase[("T901", 1)] == "with_owner, combined"
-    assert levels_by_phase[("T901", 9)] == "without_owner, combined"
+    assert levels_by_phase[("T901", 1)] == "per_phase, with_owner, combined"
+    assert levels_by_phase[("T901", 9)] == "per_phase, without_owner, combined"
     # Owner departure (F8) is listed, but never used.
     assert levels_by_phase[("T901", 8)] is None
+    phase_nine = next(r for r in _sheet_rows(synthetic_result, "phase_selection") if r["fase"] == 9)
+    assert (phase_nine["condition"], phase_nine["phase"]) == ("ZE", "F1")
 
 
 def _synthetic_export_without(tmp_path: Path, headers: list[str]) -> Path:
@@ -142,6 +156,9 @@ def test_removing_former_boundary_and_other_columns_still_consolidates(
             # Every other behaviour keeps its group and Out of Sight: its
             # value is exactly what the full export gives.
             assert row == {k: v for k, v in full[test_id].items() if k not in removed}
+    full_phases = _phase_rows(synthetic_result)
+    for key, row in _phase_rows(output_path).items():
+        assert row == {k: v for k, v in full_phases[key].items() if k not in removed}
     status = {a["behaviour"]: a["status"] for a in _sheet_rows(output_path, "availability")}
     assert status["Other tail"] == "not_exported"
     assert status["Panting"] == "not_exported"
@@ -254,7 +271,7 @@ def test_a_bug_inside_bereken_observer_is_not_miscategorized_as_input_error(
     workbook.save(input_path)
 
     with (
-        patch("app.services.consolidation.lees_observer", return_value={"deel": "1+2"}),
+        patch("app.services.consolidation.lees_observer", return_value={}),
         patch(
             "app.services.consolidation.bereken_observer",
             side_effect=KeyError("unrelated_bug"),
@@ -267,12 +284,250 @@ def test_a_bug_inside_bereken_observer_is_not_miscategorized_as_input_error(
         )
 
 
-def _consolidate(tmp_path: Path, columns: dict[str, ColumnValue]) -> Path:
-    """Consolidate a small synthetic export (tests/observer_exports.py)."""
-    input_path = write_observer_export(tmp_path / "input.xlsx", columns)
+def _consolidate(tmp_path: Path, columns: dict[str, ColumnValue], **export: Any) -> Path:
+    """Consolidate a small synthetic export (tests/observer_exports.py);
+    `export` passes on its `tests`, `duration` and `phases` options."""
+    input_path = write_observer_export(tmp_path / "input.xlsx", columns, **export)
     output_path = tmp_path / "result.xlsx"
     ObserverConsolidationRunner().run(input_path=input_path, output_path=output_path)
     return output_path
+
+
+# Per-phase results and no-visible-time handling (ticket #152).
+_TAIL = "Total duration Tail tucked <No Modifier>"
+_TAIL_COUNT = "Total number Tail tucked <No Modifier>"
+_OOS_TAIL = "Total duration Out of sight tail <No Modifier>"
+_PANTING = "Total duration Panting <No Modifier>"
+_ME = ", ".join(f"ME F{phase}" for phase in range(1, 8))
+_ZE = ", ".join(f"ZE F{phase}" for phase in range(1, 8))
+
+
+def _details(path: Path, level: str, behaviour: str) -> dict[object, dict[str, object]]:
+    """The `details` rows of one level and behaviour, by Observer phase
+    (per_phase) or as the level's single row (key None)."""
+    return {
+        row["fase"]: row
+        for row in _sheet_rows(path, "details")
+        if row["level"] == level and row["gedrag"] == behaviour
+    }
+
+
+def test_per_phase_rows_name_the_observer_phase_condition_and_phase(tmp_path: Path) -> None:
+    result = _consolidate(tmp_path, {_PANTING: 20})
+
+    rows = _phase_rows(result)
+    assert list(rows[("T901", 12)]) == [
+        "test_id",
+        "dog_id",
+        "observer_phase",
+        "condition",
+        "phase",
+        _PANTING,
+    ]
+    assert (rows[("T901", 3)]["condition"], rows[("T901", 3)]["phase"]) == ("ME", "F3")
+    assert (rows[("T901", 12)]["condition"], rows[("T901", 12)]["phase"]) == ("ZE", "F4")
+    assert ("T901", 8) not in rows
+
+
+def test_a_phase_is_divided_by_its_own_visible_time(tmp_path: Path) -> None:
+    result = _consolidate(tmp_path, {_TAIL: 20, _OOS_TAIL: 20, _PANTING: 20})
+
+    row = _phase_rows(result)[("T901", 1)]
+    # Duration 100, behaviour 20, Out of Sight 20.
+    assert row[_TAIL] == pytest.approx(0.25)
+    # Vocalisation has no Out of Sight: Duration 100, behaviour 20.
+    assert row[_PANTING] == pytest.approx(0.20)
+
+
+def test_a_phase_without_visible_time_is_blank_never_zero(tmp_path: Path) -> None:
+    result = _consolidate(
+        tmp_path,
+        {
+            _TAIL: lambda phase: 0 if phase == 2 else 20,
+            _TAIL_COUNT: lambda phase: 0 if phase == 2 else 1,
+            _OOS_TAIL: lambda phase: 100 if phase == 2 else 20,
+        },
+    )
+
+    rows = _phase_rows(result)
+    assert rows[("T901", 2)][_TAIL] is None
+    assert rows[("T901", 2)][_TAIL_COUNT] is None
+    assert rows[("T901", 1)][_TAIL] == pytest.approx(0.25)
+    assert _details(result, "per_phase", _TAIL)[2]["status"] == "no_visible_time"
+    assert _details(result, "per_phase", _TAIL)[1]["status"] == "ok"
+    # ME still sums all seven phases: 120 / (700 - 220).
+    assert _result_rows(result, "with_owner")["T901"][_TAIL] == pytest.approx(0.25)
+
+
+def test_out_of_sight_just_within_the_tolerance_above_duration_is_no_visible_time(
+    tmp_path: Path,
+) -> None:
+    result = _consolidate(tmp_path, {_TAIL: 0, _OOS_TAIL: lambda p: 100.0005 if p == 2 else 20})
+
+    assert _phase_rows(result)[("T901", 2)][_TAIL] is None
+    assert _details(result, "per_phase", _TAIL)[2]["status"] == "no_visible_time"
+    rounding = [w for w in _sheet_rows(result, "warnings") if w["type"] == "rounding"]
+    assert [(w["test_id"], w["fase"], w["variabele"]) for w in rounding] == [
+        ("T901", 2, "Tail position")
+    ]
+
+
+def test_out_of_sight_beyond_the_tolerance_above_duration_fails_naming_test_phase_and_group(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ConsolidationInputError,
+        match=r"^Out of Sight exceeds Duration for test T901, Observer phase 3 \(ME F3\), "
+        r"Tail position: 101(\.0)? s against 100(\.0)? s\.$",
+    ):
+        _consolidate(tmp_path, {_TAIL: 0, _OOS_TAIL: lambda p: 101 if p == 3 else 20})
+
+
+def test_a_behaviour_longer_than_its_visible_time_fails_naming_it(tmp_path: Path) -> None:
+    with pytest.raises(
+        ConsolidationInputError,
+        match=rf"^{re.escape(_TAIL)} lasts longer than its visible time for test T901, "
+        r"Observer phase 3 \(ME F3\): ",
+    ):
+        _consolidate(tmp_path, {_TAIL: lambda p: 90 if p == 3 else 20, _OOS_TAIL: 20})
+
+
+def test_a_count_without_visible_time_fails_naming_it(tmp_path: Path) -> None:
+    with pytest.raises(
+        ConsolidationInputError,
+        match=rf"^{re.escape(_TAIL_COUNT)} is above 0 without visible time for test T901, "
+        r"Observer phase 3 \(ME F3\)",
+    ):
+        _consolidate(
+            tmp_path,
+            {_TAIL_COUNT: lambda p: 2 if p == 3 else 0, _OOS_TAIL: lambda p: 100 if p == 3 else 20},
+        )
+
+
+def test_a_level_sums_before_it_divides(tmp_path: Path) -> None:
+    result = _consolidate(
+        tmp_path,
+        {_TAIL: lambda p: {1: 20, 2: 30}[p], _OOS_TAIL: lambda p: {1: 10, 2: 50}[p]},
+        duration=lambda p: {1: 100, 2: 200}[p],
+        phases=[1, 2],
+    )
+
+    value = _result_rows(result, "with_owner")["T901"][_TAIL]
+    assert value == pytest.approx(50 / 240)
+    # Not the mean of the two phase ratios.
+    assert value != pytest.approx((20 / 90 + 30 / 150) / 2)
+
+
+def test_each_level_uses_only_its_own_phases_and_never_f8(tmp_path: Path) -> None:
+    # 10 s in every ME phase, 30 s in every ZE phase, and all of F8.
+    result = _consolidate(tmp_path, {_PANTING: lambda p: 100 if p == 8 else 10 if p <= 7 else 30})
+
+    expected = {
+        "with_owner": (0.10, _ME),
+        "without_owner": (0.30, _ZE),
+        "combined": (0.20, f"{_ME}, {_ZE}"),
+    }
+    for sheet, (value, phases_used) in expected.items():
+        row = _result_rows(result, sheet)["T901"]
+        assert row[_PANTING] == pytest.approx(value)
+        assert (row["phases_used"], row["missing_phases"], row["status"]) == (
+            phases_used,
+            None,
+            "ok",
+        )
+
+
+@pytest.mark.parametrize("out_of_sight", [100, 99.9999])
+def test_a_level_without_visible_time_is_blank_even_with_behaviour_zero(
+    tmp_path: Path, out_of_sight: float
+) -> None:
+    """Summed Out of Sight equal to summed Duration, or leaving at most
+    0.001 s (7 x 0.0001 s), is no visible time."""
+    result = _consolidate(
+        tmp_path,
+        {_TAIL: 0, _PANTING: 20, _OOS_TAIL: lambda p: out_of_sight if p <= 7 else 20},
+    )
+
+    row = _result_rows(result, "with_owner")["T901"]
+    assert row[_TAIL] is None
+    assert _details(result, "with_owner", _TAIL)[None]["status"] == "no_visible_time"
+    # Only the tail group is affected, and only where it was out of sight.
+    assert row[_PANTING] == pytest.approx(0.20)
+    assert _result_rows(result, "without_owner")["T901"][_TAIL] == 0
+
+
+def test_missing_phases_are_listed_and_a_level_without_phases_has_no_row(tmp_path: Path) -> None:
+    result = _consolidate(tmp_path, {_PANTING: 20}, phases=[1, 2, 4, 5, 6, 7])
+
+    with_owner = _result_rows(result, "with_owner")["T901"]
+    assert with_owner[_PANTING] == pytest.approx(0.20)
+    assert (with_owner["missing_phases"], with_owner["status"]) == ("ME F3", "incomplete")
+    assert with_owner["phases_used"] == "ME F1, ME F2, ME F4, ME F5, ME F6, ME F7"
+    assert _result_rows(result, "without_owner") == {}
+    combined = _result_rows(result, "combined")["T901"]
+    assert (combined["missing_phases"], combined["status"]) == (f"ME F3, {_ZE}", "incomplete")
+    no_phases = [w for w in _sheet_rows(result, "warnings") if w["type"] == "no_phases"]
+    assert [(w["test_id"], w["variabele"]) for w in no_phases] == [("T901", "without_owner")]
+
+
+def test_a_test_with_only_owner_departure_gets_no_rows_but_warnings(tmp_path: Path) -> None:
+    input_path = write_observer_export(
+        tmp_path / "input.xlsx", {_PANTING: 20}, tests={"T901": "D901", "T902": "D902"}
+    )
+    workbook = openpyxl.load_workbook(input_path)
+    results = workbook["Results"]
+    # Rows 17-31 are T902's phases 1-15: keep only its F8 (row 24).
+    for row in sorted([*range(17, 24), *range(25, 32)], reverse=True):
+        results.delete_rows(row)
+    workbook.save(input_path)
+    output_path = tmp_path / "result.xlsx"
+
+    ObserverConsolidationRunner().run(input_path=input_path, output_path=output_path)
+
+    for sheet in _RESULT_SHEETS:
+        assert list(_result_rows(output_path, sheet)) == ["T901"]
+    assert {test_id for test_id, _ in _phase_rows(output_path)} == {"T901"}
+    no_phases = [w for w in _sheet_rows(output_path, "warnings") if w["type"] == "no_phases"]
+    assert [(w["test_id"], w["variabele"]) for w in no_phases] == [
+        ("T902", sheet) for sheet in _RESULT_SHEETS
+    ]
+
+
+def test_denominators_explain_every_level_phase_and_group(tmp_path: Path) -> None:
+    result = _consolidate(
+        tmp_path,
+        {
+            _TAIL: lambda p: 0 if p == 2 else 20,
+            _OOS_TAIL: lambda p: 100 if p == 2 else 20,
+            _PANTING: 20,
+        },
+        phases=[1, 2, 9],
+    )
+
+    rows = _sheet_rows(result, "denominators")
+    assert list(rows[0]) == [
+        "level",
+        "test_id",
+        "observer_phase",
+        "group",
+        "duration_s",
+        "out_of_sight_s",
+        "visible_s",
+        "phases_used",
+        "status",
+    ]
+    by_key = {(r["level"], r["observer_phase"], r["group"]): r for r in rows}
+    # Three phases and three aggregate levels, for two groups.
+    assert len(by_key) == len(rows) == 12
+    tail = "Tail position"
+    assert [
+        by_key[key][c]
+        for key in [("per_phase", 2, tail), ("with_owner", None, tail)]
+        for c in ("duration_s", "out_of_sight_s", "visible_s", "phases_used", "status")
+    ] == [100, 100, 0, "ME F2", "no_visible_time", 200, 120, 80, "ME F1, ME F2", "ok"]
+    vocalisation = by_key[("combined", None, "Vocalisation by the dog")]
+    assert (vocalisation["duration_s"], vocalisation["out_of_sight_s"]) == (300, 0)
+    assert vocalisation["phases_used"] == "ME F1, ME F2, ZE F1"
 
 
 def test_stiffening_up_is_corrected_by_the_exploration_out_of_sight(tmp_path: Path) -> None:
@@ -609,6 +864,9 @@ def test_first_contact_and_protocol_behaviours_are_excluded_by_name(tmp_path: Pa
     assert list(_result_rows(result, "with_owner")["T901"]) == [
         "test_id",
         "dog_id",
+        "phases_used",
+        "missing_phases",
+        "status",
         "Total duration Panting <No Modifier>",
     ]
     reasons = {e["bronkop"]: e["reden"] for e in _sheet_rows(result, "excluded")}

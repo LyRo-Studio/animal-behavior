@@ -7,8 +7,8 @@ MediaProber Protocol / FakeMediaProber split:
 
 - `ConsolidationRunner` / `ObserverConsolidationRunner`: the adapter that
   calls consolidation/observer_import.py's `lees_observer` ->
-  `bereken_observer` pipeline unmodified for every Consolidation level, then
-  `schrijf_resultaat` once for the one result workbook (ticket #149) — issue
+  `bereken_observer` -> `schrijf_resultaat` pipeline once, for the one
+  result workbook holding every Consolidation level (tickets #149, #152) — issue
   #113: "Do NOT rewrite the consolidation algorithm... prefer an
   adapter/service layer". Only the hardcoded file-path arguments are
   replaced with a request-scoped temp path. Tests inject
@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Protocol
 from zipfile import BadZipFile
 
-from consolidation.observer_import import DELEN, bereken_observer, lees_observer, schrijf_resultaat
+from consolidation.observer_import import bereken_observer, lees_observer, schrijf_resultaat
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy import delete, select, update
@@ -85,7 +85,7 @@ class ConsolidationStillProcessingError(Exception):
 class ConsolidationRunner(Protocol):
     def run(self, *, input_path: Path, output_path: Path) -> None:
         """Consolidate the Excel workbook at `input_path` into one result
-        workbook holding every Consolidation level (with_owner,
+        workbook holding every Consolidation level (per_phase, with_owner,
         without_owner, combined), written to `output_path`. Raises
         ConsolidationInputError for anything wrong with the input file;
         never raises for a downstream (storage/DB) problem, since it never
@@ -95,12 +95,10 @@ class ConsolidationRunner(Protocol):
 
 class ObserverConsolidationRunner:
     """The real ConsolidationRunner. Wraps `lees_observer` ->
-    `bereken_observer` (consolidation/observer_import.py) exactly as
-    reviewed in ticket #114, once per `deel` — each one a Consolidation
-    level, the same calculation the old per-Condition consolidations ran
-    (ticket #149) — then `schrijf_resultaat` writes them all into one
-    workbook. The calculation itself is unchanged; only path plumbing
-    here.
+    `bereken_observer` -> `schrijf_resultaat`
+    (consolidation/observer_import.py): the export is read once, and one
+    calculation produces every Consolidation level (ticket #152). Only
+    path plumbing here.
     """
 
     def run(self, *, input_path: Path, output_path: Path) -> None:
@@ -111,7 +109,7 @@ class ObserverConsolidationRunner:
         # so a KeyError is a genuine bug — logged, and shown only as the
         # generic failure reason, never as a raw message.
         try:
-            bronnen = {deel: lees_observer(str(input_path), deel=deel) for deel in DELEN}
+            bron = lees_observer(str(input_path))
         except ValueError as exc:
             raise ConsolidationInputError(str(exc)) from exc
         except (BadZipFile, InvalidFileException, OSError) as exc:
@@ -126,8 +124,8 @@ class ObserverConsolidationRunner:
             ) from exc
 
         try:
-            berekend = {deel: bereken_observer(bron) for deel, bron in bronnen.items()}
-            schrijf_resultaat(str(output_path), bronnen, berekend, str(input_path))
+            berekend = bereken_observer(bron)
+            schrijf_resultaat(str(output_path), bron, berekend, str(input_path))
         except ValueError as exc:
             # consolideer() (called from bereken_observer) raises its own
             # ValueErrors for the same class of validation failure as
