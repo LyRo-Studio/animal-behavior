@@ -41,6 +41,12 @@ onMounted(async () => {
         >
           Data Consolidation
         </RouterLink>
+        <RouterLink
+          :to="{ name: 'cutting-upload' }"
+          class="text-sm font-medium text-primary hover:underline"
+        >
+          Video Cutting
+        </RouterLink>
         <span v-if="identity" class="text-sm text-muted" data-testid="identity">
           Signed in as {{ identity }}
         </span>

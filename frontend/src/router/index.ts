@@ -4,6 +4,8 @@ import AnalysesHistoryView from '@/views/AnalysesHistoryView.vue'
 import AnalysisView from '@/views/AnalysisView.vue'
 import ConsolidationsHistoryView from '@/views/ConsolidationsHistoryView.vue'
 import ConsolidationView from '@/views/ConsolidationView.vue'
+import CuttingJobView from '@/views/CuttingJobView.vue'
+import CuttingUploadView from '@/views/CuttingUploadView.vue'
 import HomeView from '@/views/HomeView.vue'
 import MediaBrowserView from '@/views/MediaBrowserView.vue'
 import StatusView from '@/views/StatusView.vue'
@@ -32,6 +34,10 @@ const router = createRouter({
       name: 'consolidations-history',
       component: ConsolidationsHistoryView,
     },
+    // Ticket #100, part of issue #93's Feature C: upload source videos and
+    // submit up to 5 Tests' cutting jobs.
+    { path: '/cutting', name: 'cutting-upload', component: CuttingUploadView },
+    { path: '/cutting-jobs/:id', name: 'cutting-job-detail', component: CuttingJobView },
   ],
 })
 
