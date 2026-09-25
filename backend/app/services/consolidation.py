@@ -7,7 +7,8 @@ MediaProber Protocol / FakeMediaProber split:
 
 - `ConsolidationRunner` / `ObserverConsolidationRunner`: the adapter that
   calls consolidation/observer_import.py's `lees_observer` ->
-  `bereken_observer` -> `schrijf_resultaat` pipeline unmodified — issue
+  `bereken_observer` pipeline unmodified for every Consolidation level, then
+  `schrijf_resultaat` once for the one result workbook (ticket #149) — issue
   #113: "Do NOT rewrite the consolidation algorithm... prefer an
   adapter/service layer". Only the hardcoded file-path arguments are
   replaced with a request-scoped temp path. Tests inject
@@ -31,7 +32,7 @@ from pathlib import Path
 from typing import Protocol
 from zipfile import BadZipFile
 
-from consolidation.observer_import import bereken_observer, lees_observer, schrijf_resultaat
+from consolidation.observer_import import DELEN, bereken_observer, lees_observer, schrijf_resultaat
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy import delete, select, update
@@ -41,7 +42,6 @@ from app.models.audit_log import AuditAction
 from app.models.consolidation import (
     FAILURE_REASON_MAX_LENGTH,
     Consolidation,
-    ConsolidationCondition,
     ConsolidationStatus,
 )
 from app.services.audit_log import record_required_audit_event
@@ -53,16 +53,6 @@ logger = logging.getLogger(__name__)
 # app.api.consolidations, which audits every consolidation action except
 # delete (see delete_consolidation for why that one is audited here).
 AUDIT_TARGET_TYPE = "consolidation"
-
-# Confirmed 1:1 during issue #113's spec work by actually running the
-# pipeline: deel "1" writes "...deel1_met_eigenaar..." (ME), deel "2"
-# writes "...deel2_zonder_eigenaar..." (ZE), "1+2" is both conditions
-# combined.
-_CONDITION_TO_DEEL = {
-    ConsolidationCondition.ME: "1",
-    ConsolidationCondition.ZE: "2",
-    ConsolidationCondition.ME_ZE: "1+2",
-}
 
 
 class ConsolidationInputError(Exception):
@@ -93,28 +83,27 @@ class ConsolidationStillProcessingError(Exception):
 
 
 class ConsolidationRunner(Protocol):
-    def run(
-        self, *, input_path: Path, output_path: Path, condition: ConsolidationCondition
-    ) -> None:
-        """Consolidate the Excel workbook at `input_path` for `condition`,
-        writing the result to `output_path`. Raises ConsolidationInputError
-        for anything wrong with the input file; never raises for a
-        downstream (storage/DB) problem, since it never touches either."""
+    def run(self, *, input_path: Path, output_path: Path) -> None:
+        """Consolidate the Excel workbook at `input_path` into one result
+        workbook holding every Consolidation level (with_owner,
+        without_owner, combined), written to `output_path`. Raises
+        ConsolidationInputError for anything wrong with the input file;
+        never raises for a downstream (storage/DB) problem, since it never
+        touches either."""
         ...
 
 
 class ObserverConsolidationRunner:
     """The real ConsolidationRunner. Wraps `lees_observer` ->
-    `bereken_observer` -> `schrijf_resultaat` (consolidation/
-    observer_import.py) exactly as reviewed in ticket #114 — no change to
-    that module's own logic, only path plumbing here.
+    `bereken_observer` (consolidation/observer_import.py) exactly as
+    reviewed in ticket #114, once per `deel` — each one a Consolidation
+    level, the same calculation the old per-Condition consolidations ran
+    (ticket #149) — then `schrijf_resultaat` writes them all into one
+    workbook. The calculation itself is unchanged; only path plumbing
+    here.
     """
 
-    def run(
-        self, *, input_path: Path, output_path: Path, condition: ConsolidationCondition
-    ) -> None:
-        deel = _CONDITION_TO_DEEL[condition]
-
+    def run(self, *, input_path: Path, output_path: Path) -> None:
         # KeyError/BadZipFile/InvalidFileException/OSError are scoped to
         # *reading* the workbook only, not the whole pipeline (caught in
         # review): bereken_observer does its own pandas merges/groupby/
@@ -123,7 +112,7 @@ class ObserverConsolidationRunner:
         # too would silently misreport a real defect as a user input
         # problem, with nothing logged anywhere to diagnose it.
         try:
-            bron = lees_observer(str(input_path), deel=deel)
+            bronnen = {deel: lees_observer(str(input_path), deel=deel) for deel in DELEN}
         except ValueError as exc:
             raise ConsolidationInputError(str(exc)) from exc
         except KeyError as exc:
@@ -147,8 +136,8 @@ class ObserverConsolidationRunner:
             ) from exc
 
         try:
-            berekend = bereken_observer(bron)
-            schrijf_resultaat(str(output_path), bron, berekend, str(input_path))
+            berekend = {deel: bereken_observer(bron) for deel, bron in bronnen.items()}
+            schrijf_resultaat(str(output_path), bronnen, berekend, str(input_path))
         except ValueError as exc:
             # consolideer() (called from bereken_observer) raises its own
             # ValueErrors for the same class of validation failure as
@@ -196,8 +185,13 @@ def validate_workbook_opens(file_bytes: bytes) -> None:
     workbook.close()
 
 
+# Every consolidation result is stored under this prefix, and nothing else
+# is — see remove_unreferenced_consolidation_results.
+RESULT_KEY_PREFIX = "consolidations/"
+
+
 def _new_result_key() -> str:
-    return f"consolidations/{uuid.uuid4().hex}/result.xlsx"
+    return f"{RESULT_KEY_PREFIX}{uuid.uuid4().hex}/result.xlsx"
 
 
 def start_consolidation(
@@ -205,7 +199,6 @@ def start_consolidation(
     *,
     requested_by_identity: str | None,
     original_filename: str,
-    condition: ConsolidationCondition,
     input_size_bytes: int,
 ) -> Consolidation:
     """Create and commit a `processing` Consolidation — before the runner
@@ -215,7 +208,6 @@ def start_consolidation(
     reconcile_stale_consolidations."""
     consolidation = Consolidation(
         original_filename=original_filename,
-        condition=condition,
         status=ConsolidationStatus.PROCESSING,
         requested_by_identity=requested_by_identity,
         input_size_bytes=input_size_bytes,
@@ -315,9 +307,7 @@ def run_consolidation(
     try:
         try:
             input_path.write_bytes(file_bytes)
-            runner.run(
-                input_path=input_path, output_path=output_path, condition=consolidation.condition
-            )
+            runner.run(input_path=input_path, output_path=output_path)
             result_size_bytes = output_path.stat().st_size
             s3.upload_file(output_path, key)
         except ConsolidationInputError as exc:
@@ -505,6 +495,37 @@ def reconcile_stale_consolidations(
             continue
         _delete_result_best_effort(s3, result_storage_key, consolidation_id=consolidation_id)
     return [consolidation_id for consolidation_id, _ in reconciled]
+
+
+def remove_unreferenced_consolidation_results(db: Session, *, s3: S3Client) -> list[str]:
+    """Delete every stored consolidation result that no Consolidation
+    references, and return their keys (ticket #149). Only objects under
+    RESULT_KEY_PREFIX are ever considered.
+
+    Migration 0016 deletes every Consolidation made under the old
+    per-Condition format, but a migration can't reach object storage, so
+    this removes their results afterward. Re-runnable: a second run finds
+    nothing left to remove. Run once at deploy with
+    `python -m app.commands.remove_unreferenced_consolidation_results`.
+
+    Objects are listed *before* the referenced keys are read. A
+    Consolidation's key is committed before its result is uploaded
+    (start_consolidation), so a result uploaded while this runs is either
+    not listed yet or already referenced — never removed.
+    """
+    stored = [info.key for info in s3.list_objects_info(RESULT_KEY_PREFIX)]
+    referenced = set(
+        db.scalars(
+            select(Consolidation.result_storage_key).where(
+                Consolidation.result_storage_key.is_not(None)
+            )
+        )
+    )
+    removed = [key for key in stored if key not in referenced]
+    for key in removed:
+        s3.delete_object(key)
+        logger.info("Removed unreferenced consolidation result %s", key)
+    return removed
 
 
 def _delete_result_best_effort(s3: S3Client, key: str, *, consolidation_id: int) -> None:

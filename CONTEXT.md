@@ -58,6 +58,44 @@ Uploading a Test's C1 and/or C2 source video (plus the matching row of its times
 **Cutting, Feature C:**
 Slicing an ingested source video into its Cuts, via `assist` (the tool this app wraps, vendored into `cutting-worker/assist/` since ticket #112), driven by one Test's phase timestamps. The unit of work is a **CuttingJob** — one Test, mirroring `AnalysisJob`'s role for analysis. See "Video cutting + S3 ingestion (Feature C)" below.
 
+**Observer export**:
+The raw `Results` sheet of an Observer XT export: one row per Observation (one Test in one Observer phase), one column per exported statistic (`Duration`, `Total duration <behaviour> <modifier>`, `Total number <behaviour> <modifier>`). The only input a Consolidation needs.
+_Avoid_: "Results (2)", "Results (REL)" as required inputs — those were hand-made working copies.
+
+**Observer phase number**:
+Observer's continuous 1–15 numbering of a Test's phases, taken from the Observation name (`…_F12`). 1–7 are ME F1–F7, 8 is ME F8, 9–15 are ZE F1–F7. Distinct from **Phase** (a Cut's per-Condition `F1`–`F8`) and from the export's own `Fase` column, which restarts at 1 for ZE.
+
+**Owner departure (F8)**:
+Observer phase 8: the variable-length stretch in which the owner (FP) leaves the test arena. Not a protocol phase; never part of any consolidated result.
+
+**Ethogram**:
+The printable behaviour catalogue (`20241218_Printbaar ethogram.xlsx`): every behaviour's code, Behaviour group, State or Event, and allowed modifiers. The source of truth for which group a behaviour belongs to — never its column position in an Observer export.
+
+**Behaviour group**:
+An Ethogram heading (e.g. "Tail position") grouping mutually related behaviours. Every behaviour belongs to exactly one. A group has at most one Out of Sight behaviour.
+
+**Out of Sight (OOS)**:
+A Behaviour group's own "not visible" state (e.g. "Out of sight tail"). It corrects only its own group's denominator; there is no global Out of Sight.
+
+**Zero state**:
+A Behaviour group's "cannot be determined" behaviour in a group without Out of Sight (e.g. "Distance TP zero", "Square zero", "Following TP zero"). An ordinary behaviour with its own Relative duration — never subtracted from the denominator, even though its definition partly overlaps with not being visible.
+
+**Scoring plan**:
+Which Behaviour groups are scored in which phase (the Ethogram's `Blad1` sheet). Distance to TP/FP and Location are scored only in F1, F3 and F6 of each Condition, Dog following the TP only in F2, F4 and F7; every other dog group in every phase. A group's results use only its scored phases; elsewhere its per-phase value is blank with status `not_scored`, even though Observer exports a 0 there.
+
+**Visible time**:
+Duration minus the applicable group's Out of Sight duration, or plain Duration for a group without one. At most 0.001 s counts as none: the relative value is then blank with status `no_visible_time`, never 0.
+
+**Relative duration**:
+A behaviour's duration divided by its Visible time, as a fraction (0.25, not 25%). Over several phases the durations, Durations and Out of Sight durations are summed first and divided once — never an average of per-phase values.
+
+**Consolidation level**:
+One of the four result levels of a Consolidation: per phase, ME (Observer phases 1–7), ZE (9–15) and Combined (1–7 + 9–15).
+_Avoid_: "Part 1"/"Part 2", "deel 1"/"deel 2" — use the Condition names.
+
+**Not exported**:
+A behaviour/modifier column absent from the Observer export. Not a measured zero: it is left out of the result sheets entirely. An exported column holding 0 is a measured zero.
+
 ## Decisions & Approved Deviations
 
 **Scope (this round) — superseded by ticket #72 (application auth removed; kept as history):** Covers only Account/Admin/User management (login,
@@ -2282,12 +2320,19 @@ mandatory backend stack (ENGINEERING-STANDARDS.md §1 names
 SQLAlchemy/Pydantic for data handling, not pandas) — approved because the
 domain logic itself is unmodified and pandas is the vocabulary it's
 already written in; rewriting it onto SQLAlchemy/Pydantic types was
-explicitly out of scope. `openpyxl` was already an approved dependency
+explicitly out of scope. Since ticket #149 the module also carries code
+written for this app: `schrijf_resultaat` now writes every level into one
+workbook. It stays in pandas for the same reason, since it only rearranges
+the calculation's own DataFrames; the calculation is still unmodified. `openpyxl` was already an approved dependency
 (ticket #94). The module's own `pas_ethogram_indeling_toe`/
-`verwerk_alle_delen` entry point is confirmed non-functional (imports a
+`verwerk_alle_delen` entry point was confirmed non-functional (imports a
 nonexistent `ethogram_controle` module and reads a nonexistent reference
-file) and is excluded from the web feature; only `lees_observer`/
-`bereken_observer`/`schrijf_resultaat` are wired into #115's adapter. A
+file) and was excluded from the web feature; only `lees_observer`/
+`bereken_observer`/`schrijf_resultaat` are wired into #115's adapter.
+Ticket #149 removed that entry point (with `groepeer_kolommen`, which only
+it used), `consolidatie.py`'s unused manual-template input path
+(`inspecteer_bron`, `maak_sjabloon`, `lees_invoer`, `exporteer`,
+`demo_invoer`) and that path's two blank template fixtures. A
 notebook (`consolidatie_honden.ipynb`) that originally accompanied this
 code was deliberately not committed — its saved cell outputs embedded
 real research data (test/dog IDs) from having been run against a real,
@@ -2364,8 +2409,9 @@ it's ever hit). The frontend history is its own page,
 of being folded into `ConsolidationView` — it mirrors
 `AnalysesHistoryView`, which is also a separate page. Each row shows
 `display_name` (falling back to `original_filename`), plus the original
-filename as "Source" when a display name is set, and its Condition,
-status, created date and requesting Identity. Only `completed` rows offer
+filename as "Source" when a display name is set, and its status,
+created date and requesting Identity (its Condition too, until ticket
+#149 removed it). Only `completed` rows offer
 a download (the same `GET /consolidations/{id}/download` as #115).
 `failed` rows show their `failure_reason`. This also settles the
 "stuck `processing`" gap from #115's core-flow decision: those rows are
@@ -2519,6 +2565,39 @@ upload page.
   frontend then shows them as "Failed" like any other. Two independent
   thresholds (backend minutes vs. a frontend guess) would drift apart, so the
   database stays the single source of truth.
+
+**Consolidation: every level from one upload, Condition removed (ticket
+#149, part of #143):** the upload no longer takes a Condition. The runner
+runs `lees_observer` → `bereken_observer`, whose calculation is unchanged
+(only a dead ethogram branch was removed), once per `deel`
+(`1`, `2`, `1+2`), exactly the calculation the old ME, ZE and ME_ZE
+consolidations ran, and `schrijf_resultaat` writes one English workbook:
+`with_owner`, `without_owner` and `combined` (one row per test), then
+`README`, `details`, `phase_details`, `denominators`, `warnings`,
+`variables`, `phase_selection` and `excluded`. Verified cell for cell
+against the old per-Condition outputs, for the synthetic fixture and a
+real export.
+- **Diagnostic sheets keep the calculation's own column names** (`fase`,
+  `groep`, `gedrag_s`, ...) and gain a leading `level` column; the README
+  translates them. The importer's own messages stay Dutch. Translating
+  both belongs to the importer/workbook rework (#150-#154), not this
+  slice. `phase_selection` lists every source row once, with the `levels`
+  it was used in.
+- **Migration 0016 deletes every Consolidation** (all made under the old
+  per-Condition format) and drops the `condition` column and its
+  `consolidation_condition` enum type. The audit log is untouched. It's
+  irreversible: `downgrade()` restores only the column, `NOT NULL` as in
+  0011, filling any row made after the upgrade with `ME_ZE`, the old
+  Condition that covered both parts.
+- **Stored results are removed by a separate, re-runnable command**, since
+  a migration has no storage client:
+  `docker compose exec backend python -m app.commands.remove_unreferenced_consolidation_results`,
+  run once after the deploy that ships 0016. It deletes every object under
+  `consolidations/` that no Consolidation's `result_storage_key`
+  references, and nothing else. It lists objects before reading the
+  referenced keys, and a key is committed before its result is uploaded,
+  so an in-flight consolidation's result is never removed. It isn't wired
+  into `deploy.yml`: it's a one-off, not a step every deploy needs.
 
 **`assist` vendored (ticket #112) — approved deviation, supersedes Feature
 C's "pinned external dependency" decision:** the cutting-worker image used to

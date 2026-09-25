@@ -1,109 +1,12 @@
 """Gedragsduur en aantallen consolideren met een noemer per gedragsgroep."""
-from pathlib import Path
 import math
-import pandas as pd
-from openpyxl import load_workbook
-from openpyxl.styles import PatternFill
 
-SOURCE_NAME = "10_extra_honden_alle_data_met_modifiers.xlsx"
-OVERVIEW_NAME = "10_EXTRA_HONDEN_overzicht data.xlsx"
 SCHEMAS = {
     "fases": ["test_id", "fase", "duur_s"],
     "gedrag_groepen": ["gedrag", "groep"],
     "gedragingen": ["test_id", "fase", "gedrag", "duur_s"],
     "out_of_sight": ["test_id", "fase", "groep", "duur_s"],
 }
-
-
-def inspecteer_bron(path):
-    """Lees lokale waarden en markeringen; volg geen externe Excel-koppelingen."""
-    wb = load_workbook(path, data_only=True, keep_links=False)
-    try:
-        sheets = pd.DataFrame([
-            {"tabblad": ws.title, "rijen": ws.max_row, "kolommen": ws.max_column}
-            for ws in wb
-        ])
-        dogs = pd.DataFrame(wb["Dog data"].values)
-        dogs.columns = dogs.iloc[0]
-        dogs = dogs.iloc[1:].reset_index(drop=True)[["Test ID", "Dog ID"]]
-        dogs.columns = ["test_id", "dog_id"]
-        groups = [row[0] for row in wb["Observer groepen"].iter_rows(
-            min_row=2, values_only=True) if isinstance(row[0], str)]
-        phases = []
-        for row in wb["Observer fases data"].iter_rows(min_row=3, values_only=True):
-            if row[0] in set(dogs.test_id):
-                for phase in range(1, 8):
-                    flag = row[phase + 2]
-                    if isinstance(flag, str) and flag.strip().lower().startswith("yes"):
-                        phases.append({"test_id": row[0], "fase": phase,
-                                       "beschikbaarheid": flag})
-        yellow = []
-        for ws in wb:
-            for row in ws:
-                for cell in row:
-                    color = cell.fill.fgColor
-                    if (cell.value is not None and cell.fill.patternType == "solid"
-                            and color.type == "rgb" and color.rgb[-6:] == "FFFF00"):
-                        yellow.append({"tabblad": ws.title, "cel": cell.coordinate,
-                                       "waarde": str(cell.value)})
-        return {"tabbladen": sheets, "honden": dogs, "groepen": groups,
-                "beschikbare_fases": pd.DataFrame(phases),
-                "gele_cellen": pd.DataFrame(yellow)}
-    finally:
-        wb.close()
-
-
-def maak_sjabloon(path, bron):
-    """Maak alleen een nieuw sjabloon; overschrijf nooit ingevulde invoer."""
-    path = Path(path)
-    if path.exists():
-        raise FileExistsError(f"Sjabloon bestaat al: {path}")
-    phases = bron["beschikbare_fases"][["test_id", "fase"]].copy()
-    phases["duur_s"] = None
-    instructions = [
-        "INVOERSJABLOON - ontbrekende duurtijden, geen meetresultaten.",
-        "Alle duurtijden zijn numerieke seconden. Vul een expliciete 0 in bij gemeten duur nul.",
-        "fases: een rij per aanwezige test/fase. Verwijder alleen werkelijk afwezige fases.",
-        "De vooringevulde fases komen uit Observer fases data, voor de 10 tests in Dog data.",
-        "gedrag_groepen: koppel elk gedrag aan een groep; meettype is duur of aantal.",
-        "gedragingen: een rij per test/fase/gedrag. Vul duur_s OF aantal in volgens meettype.",
-        "Laat de andere meetkolom leeg. Vul gemeten nullen expliciet in.",
-        "Aantal / zichtbare seconden geeft frequentie per seconde, geen percentage.",
-        "out_of_sight: een rij per test/fase/groep, ook bij duur 0.",
-        "Sommeer losse gebeurtenissen eerst per fase; dubbele sleutels worden geweigerd.",
-        "Overlappende out-of-sight-intervallen binnen een groep niet dubbel tellen.",
-        "Gebruik uitsluitend fases 1 t/m 7. De andere fases worden niet geconsolideerd.",
-        "Er zijn geen gedragstijden of out-of-sight-tijden gevonden in het overzichtsbestand.",
-    ]
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        pd.DataFrame({"uitleg": instructions}).to_excel(writer, sheet_name="LEESMIJ", index=False)
-        for name, columns in SCHEMAS.items():
-            frame = phases if name == "fases" else pd.DataFrame(columns=columns)
-            if name == "gedrag_groepen":
-                frame["meettype"] = pd.Series(dtype="str")
-            if name == "gedragingen":
-                frame["aantal"] = pd.Series(dtype="float")
-            frame.to_excel(writer, sheet_name=name, index=False)
-        pd.DataFrame({"groep": bron["groepen"]}).to_excel(
-            writer, sheet_name="groepen_referentie", index=False)
-        for ws in writer.book:
-            ws.freeze_panes = "A2"
-            ws.auto_filter.ref = ws.dimensions
-            for column in ws.columns:
-                ws.column_dimensions[column[0].column_letter].width = 28
-        writer.book["LEESMIJ"].column_dimensions["A"].width = 115
-        writer.book["groepen_referentie"].column_dimensions["A"].width = 65
-        for cell in writer.book["out_of_sight"][1]:
-            cell.fill = PatternFill("solid", fgColor="FFFF00")
-    return path
-
-
-def lees_invoer(path):
-    with pd.ExcelFile(path, engine="openpyxl") as book:
-        missing = set(SCHEMAS) - set(book.sheet_names)
-        if missing:
-            raise ValueError(f"Ontbrekende tabbladen: {sorted(missing)}")
-        return {name: pd.read_excel(book, sheet_name=name) for name in SCHEMAS}
 
 
 def _controleer(frame, name, keys, numeric=True):
@@ -239,31 +142,3 @@ def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, tolerantie_s=1
         lambda x: "ok" if x > 0 else "geen_zichtbare_tijd")
     return sums, detail.sort_values(phase_keys + ["groep", "gedrag"]).reset_index(drop=True)
 
-
-def exporteer(path, resultaat, detail):
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        resultaat.to_excel(writer, sheet_name="consolidatie", index=False)
-        detail.to_excel(writer, sheet_name="controle_per_fase", index=False)
-        for ws in writer.book:
-            ws.freeze_panes = "A2"
-            ws.auto_filter.ref = ws.dimensions
-            for column in ws.columns:
-                ws.column_dimensions[column[0].column_letter].width = 24
-
-
-def demo_invoer():
-    """Volledig fictief voorbeeld, nooit data van de echte honden."""
-    return {
-        "fases": pd.DataFrame([["DEMO", 1, 100], ["DEMO", 2, 200]],
-                              columns=SCHEMAS["fases"]),
-        "gedrag_groepen": pd.DataFrame([["zitten", "houding"], ["kijken", "aandacht"]],
-                                       columns=SCHEMAS["gedrag_groepen"]),
-        "gedragingen": pd.DataFrame([
-            ["DEMO", 1, "zitten", 20], ["DEMO", 2, "zitten", 10],
-            ["DEMO", 1, "kijken", 10], ["DEMO", 2, "kijken", 20]],
-            columns=SCHEMAS["gedragingen"]),
-        "out_of_sight": pd.DataFrame([
-            ["DEMO", 1, "houding", 10], ["DEMO", 2, "houding", 20],
-            ["DEMO", 1, "aandacht", 40], ["DEMO", 2, "aandacht", 20]],
-            columns=SCHEMAS["out_of_sight"]),
-    }

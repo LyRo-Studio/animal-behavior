@@ -2,11 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models.consolidation import (
-    DISPLAY_NAME_MAX_LENGTH,
-    ConsolidationCondition,
-    ConsolidationStatus,
-)
+from app.models.consolidation import DISPLAY_NAME_MAX_LENGTH, ConsolidationStatus
 
 
 class ConsolidationOut(BaseModel):
@@ -15,7 +11,6 @@ class ConsolidationOut(BaseModel):
     id: int
     original_filename: str
     display_name: str | None
-    condition: ConsolidationCondition
     status: ConsolidationStatus
     requested_by_identity: str | None
     failure_reason: str | None
