@@ -421,16 +421,14 @@ def test_columns_observer_adds_that_are_never_read_do_not_block_an_upload(
     tmp_path: Path,
 ) -> None:
     """Fase, Geslacht hond and Observer's container columns may be missing
-    or hold anything; Out of Sight counts, an Out of Sight correcting
-    nothing, and the owner-departure (F8) rows are never read either."""
+    or hold anything; Out of Sight counts and the owner-departure (F8) rows
+    are never read either."""
     input_path = write_observer_export(
         tmp_path / "input.xlsx",
         {
             "Total duration Tail tucked <No Modifier>": lambda phase: "junk" if phase == 8 else 20,
             "Total duration Out of sight tail <No Modifier>": 20,
             "Total number Out of sight tail <No Modifier>": "junk",
-            "Total duration Out of sight attention <No Modifier>": None,
-            "Total duration Out of sight stress-related <No Modifier>": 5,
         },
     )
     workbook = openpyxl.load_workbook(input_path)
@@ -445,11 +443,32 @@ def test_columns_observer_adds_that_are_never_read_do_not_block_an_upload(
 
     row = _result_rows(output_path, "with_owner")["T901"]
     assert row["Total duration Tail tucked <No Modifier>"] == pytest.approx(0.25)
-    # A never-read column still counts towards availability when it holds
-    # a positive number.
-    status = {a["behaviour"]: a["status"] for a in _sheet_rows(output_path, "availability")}
-    assert status["Out of sight stress-related"] == "exported_nonzero"
-    assert status["Out of sight attention"] == "exported_all_zero"
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        # Corrects no exported group, so it is listed as ignored.
+        "Total duration Out of sight attention <No Modifier>",
+        "Total duration Standing bij TP <No Modifier>",
+        "Total number First contact with TP <No Modifier>",
+    ],
+)
+def test_every_exported_column_is_validated_even_when_it_never_enters_a_result(
+    tmp_path: Path, header: str
+) -> None:
+    """One rule for every exported column (ticket #151): only `Total number
+    Out of sight …` is never read."""
+    with pytest.raises(
+        ConsolidationInputError, match=f"^Blank cell Results!K4 \\({re.escape(header)}\\)"
+    ):
+        _consolidate(
+            tmp_path,
+            {
+                "Total duration Panting <No Modifier>": 20,
+                header: lambda phase: None if phase == 3 else 0,
+            },
+        )
 
 
 @pytest.mark.parametrize(

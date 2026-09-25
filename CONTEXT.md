@@ -2617,7 +2617,8 @@ group boundaries are gone, so any behaviour column may be missing.
     behaviours, the Out of Sight name variant, 9 TP/FP protocol names),
     the modifier aliases, the `Blad1` column → group mapping, and the
     exclusions (First contact with TP, the TP/FP protocol group).
-  - **Checks moved from the uncommitted `ethogram_controle.py`:** unique
+  - **Checks moved from the uncommitted `ethogram_controle.py`** (deleted
+    in #151, since it no longer ran): unique
     names, alias targets that exist, one Out of Sight per group, known
     modifier categories.
   - `test_ethogram_definition.py` regenerates the JSON and fails on any
@@ -2686,17 +2687,24 @@ repair (`normaliseer_kop`, which only the copy needed) are gone.
   can't be told. Other headers are never read, so duplicates there don't
   matter.
 - **Never read:** Fase, Geslacht hond, Observer's container columns
-  (`Independent Variables …`, `Result Containers`), `Total number Out of
-  sight …`, and any Out of Sight column that corrects no exported group
-  (#143 user story 34: irrelevant columns never block an upload). Their
-  cells may hold anything. They still show up in `excluded` and
-  `availability`, where a positive number counts as nonzero. `phase_selection`
-  lost its `fase_bronkolom` column. F8 rows are listed but never validated.
+  (`Independent Variables …`, `Result Containers`) and `Total number Out
+  of sight …`, exactly #143's "Ignored" class. Their cells may hold
+  anything; the Out of Sight counts are still listed in `excluded`.
+  `phase_selection` lost its `fase_bronkolom` column.
+- **F8 rows are listed but never validated** (decided with the user on
+  this branch): they never contribute to any result, per #143's "F8 rows
+  are ignored and listed", so junk there can't corrupt anything.
 - **Cells:** `-` is a measured 0. A blank cell or anything that isn't a
   number (text, including a number stored as text) fails, naming the cell:
   "Blank cell Results!J4 (<header>)" / "Not a number in cell Results!J4
-  (<header>)". This applies to every other `Total …` column and Duration,
-  including excluded protocol and First-contact columns, as before. A
+  (<header>)". **One rule for every other exported column** (decided with
+  the user on this branch): Duration and every `Total …` column is checked
+  whether or not it enters a result. That includes excluded protocol and
+  First-contact columns, and an Out of Sight column that corrects no
+  exported group. #143 story 34 ("irrelevant columns never block an
+  upload") is read as being about such a column not being *required*.
+  Observer always writes a number or `-`, so a blank there means a
+  damaged export. A
   blank Observations, Test ID or owner-present flag cell fails the same
   way ("Blank cell Results!C2 (Observations)"). A fully empty row is
   skipped: it is not an Observation.

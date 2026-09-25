@@ -81,8 +81,9 @@ def _deel_kolommen_in(headers, source, definitie):
 
     Een kolom zonder bekend gedrag faalt. De Out of Sight van een groep is
     alleen verplicht wanneer minstens een gedrag van die groep geexporteerd is.
-    `ongelezen` zijn de Out of Sight-kolommen die niets corrigeren: hun cellen
-    worden nooit gelezen, dus blokkeren nooit een upload.
+    `ongelezen` zijn de `Total number Out of sight …`-kolommen: de enige
+    Total-kolommen waarvan de cellen nooit gelezen (en dus nooit gecontroleerd)
+    worden.
     """
     bekend = _bekende_gedragingen(definitie)
     groepen = {g["name"]: g for g in definitie["groups"]}
@@ -105,7 +106,7 @@ def _deel_kolommen_in(headers, source, definitie):
         if gedrag["name"] == groep["out_of_sight"]:
             if kind == "duur" and modifier == "<No Modifier>":
                 oos_kolommen[groep["name"]] = c
-            oos_kandidaten.append((rij, groep["name"], c))
+            oos_kandidaten.append((rij, groep["name"], c, kind))
         elif groep["excluded"] or gedrag["name"] in definitie["excluded_behaviours"]:
             excluded.append({**rij, "reden": groep["excluded"]
                              or definitie["excluded_behaviours"][gedrag["name"]]})
@@ -136,15 +137,16 @@ def _deel_kolommen_in(headers, source, definitie):
                 f"Missing Out of Sight column for {naam}: the export has behaviours of this "
                 f"group but no 'Total duration {oos} <No Modifier>' column.")
     ongelezen = set()
-    for rij, groep, c in oos_kandidaten:
-        if oos_kolommen.get(groep) != c:
-            reden = "Out of Sight count or modifier column: never read."
+    for rij, groep, c, kind in oos_kandidaten:
+        if kind == "aantal":
+            reden = "Out of Sight count: never read."
             ongelezen.add(c)
+        elif oos_kolommen.get(groep) != c:
+            reden = "Out of Sight modifier column: never used."
         elif groep in gebruikt:
             reden = "Out of Sight correction column: its duration corrects the group's denominator."
         else:
             reden = "Out of Sight column ignored: none of its group's behaviours were exported."
-            ongelezen.add(c)
         excluded.append({**rij, "reden": reden})
     for naam, fases in niet_ondersteund.items():
         notes.append(_melding("not_yet_supported", naam,
@@ -213,11 +215,6 @@ def _meetwaarde(cell, header):
     return float(value)
 
 
-def _positief(value):
-    """Voor kolommen die niet gelezen worden: telt de cel als niet-nul?"""
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
-
-
 def _kolommen(blad):
     """{kop: kolomnummer} van alle kolommen die gelezen worden.
 
@@ -264,7 +261,7 @@ def lees_observer(path, deel="1"):
         headers = _kolommen(source)
         (mapping, excluded, notes, oos_columns, event_duur, per_gedrag,
          ongelezen) = _deel_kolommen_in(headers, source, DEFINITIE)
-        # Duration en iedere Total-kolom, behalve Out of Sight die niets corrigeert.
+        # Duration en iedere Total-kolom, behalve de Out of Sight-aantallen.
         te_lezen = {header: c for header, c in headers.items()
                     if _is_meetkolom(header) and c not in ongelezen}
         definitions = pd.DataFrame(mapping)
@@ -299,7 +296,6 @@ def lees_observer(path, deel="1"):
                 waarden[c] = _meetwaarde(source.cell(row, c), header)
                 if waarden[c] > 0:
                     niet_nul.add(c)
-            niet_nul.update(c for c in ongelezen if _positief(source.cell(row, c).value))
             phases.append({"test_id": test, "fase": phase, "duur_s": waarden[headers["Duration"]]})
             for group, oc in oos_columns.items():
                 invisibility.append({"test_id": test, "fase": phase, "groep": group,
@@ -404,8 +400,8 @@ def schrijf_resultaat(path, bronnen, berekend, source_path):
         "No visible time: blank fraction and frequency with status geen_zichtbare_tijd; never replaced by 0.",
         "Only the export's raw Results sheet is read, exactly as Observer produces it. The source file is not changed.",
         "Observer's '-' is a measured 0. A blank or non-numeric cell in an exported column fails the upload.",
-        "Never read: Fase, Geslacht hond, Observer's container columns, Total number Out of sight columns, "
-        "and Out of Sight columns that correct no exported group.",
+        "Never read: Fase, Geslacht hond, Observer's container columns, Total number Out of sight columns "
+        "and the owner-departure (phase 8) rows. Every other exported cell is checked, used or not.",
         f"Maximum tolerance on individual times: {TOLERANTIE_S} s for export rounding; deviations are listed in warnings.",
         "details: every numerator, denominator, percentage, frequency per second and per minute, and status, per level.",
         "phase_details: every value per test and phase; denominators: per test, level and group.",
