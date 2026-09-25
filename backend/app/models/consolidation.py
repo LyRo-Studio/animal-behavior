@@ -20,22 +20,6 @@ FAILURE_REASON_MAX_LENGTH = 500
 DISPLAY_NAME_MAX_LENGTH = 255
 
 
-class ConsolidationCondition(str, enum.Enum):
-    """Which of consolidation/observer_import.py's `deel` this consolidation
-    covers, in this app's own Condition vocabulary (CONTEXT.md's Language
-    section: ME/ZE, also used for Cut filenames) rather than the Dutch
-    "deel1"/"deel2"/"deel1+2" names the domain code uses internally —
-    confirmed 1:1 during issue #113's spec work: deel 1 = met eigenaar =
-    ME, deel 2 = zonder eigenaar = ZE. See
-    app.services.consolidation._CONDITION_TO_DEEL for the mapping back to
-    the domain code's own parameter.
-    """
-
-    ME = "ME"
-    ZE = "ZE"
-    ME_ZE = "ME_ZE"
-
-
 class ConsolidationStatus(str, enum.Enum):
     """`processing` -> `completed` | `failed`. Consolidation still runs
     synchronously inside the request (issue #113's "simplest reliable
@@ -54,9 +38,10 @@ class ConsolidationStatus(str, enum.Enum):
 class Consolidation(Base):
     """One upload -> consolidate -> persist request against
     consolidation/observer_import.py's Observer-export pipeline (ticket
-    #115, part of issue #113). Fully shared visibility, no ownership,
-    mirroring AnalysisJob/CuttingJob (ADR-0004) — requested_by_identity is
-    attribution only, never an access check.
+    #115, part of issue #113). Its one result holds every Consolidation
+    level, so there is no Condition to choose (ticket #149). Fully shared
+    visibility, no ownership, mirroring AnalysisJob/CuttingJob (ADR-0004) —
+    requested_by_identity is attribution only, never an access check.
 
     Created as `processing` and moved to its terminal status exactly once
     (app.services.consolidation.run_consolidation never marks a row
@@ -74,15 +59,6 @@ class Consolidation(Base):
     # column, never overwriting original_filename, so a rename never
     # destroys the source file's provenance.
     display_name: Mapped[str | None] = mapped_column(String(DISPLAY_NAME_MAX_LENGTH), nullable=True)
-    condition: Mapped[ConsolidationCondition] = mapped_column(
-        Enum(
-            ConsolidationCondition,
-            name="consolidation_condition",
-            native_enum=True,
-            values_callable=lambda enum_cls: [member.value for member in enum_cls],
-        ),
-        nullable=False,
-    )
     status: Mapped[ConsolidationStatus] = mapped_column(
         Enum(
             ConsolidationStatus,

@@ -1,26 +1,14 @@
 import { API_BASE_URL, errorFromResponse } from '@/services/apiBase'
 
-// Mirrors the backend's ConsolidationCondition / ConsolidationStatus enums
+// Mirrors the backend's ConsolidationStatus enum
 // (backend/app/models/consolidation.py) — ticket #115, part of issue #113's
-// Excel consolidation feature. ME/ZE are this app's own Condition
-// vocabulary (CONTEXT.md's Language section), not consolidation/'s
-// internal Dutch "deel" names.
-export type ConsolidationCondition = 'ME' | 'ZE' | 'ME_ZE'
+// Excel consolidation feature.
 export type ConsolidationStatus = 'processing' | 'completed' | 'failed'
-
-// How each Condition is shown to the user — the upload page's selector and
-// the history list both render from this.
-export const CONSOLIDATION_CONDITION_LABELS: Record<ConsolidationCondition, string> = {
-  ME: 'ME',
-  ZE: 'ZE',
-  ME_ZE: 'ME + ZE',
-}
 
 export interface Consolidation {
   id: number
   originalFilename: string
   displayName: string | null
-  condition: ConsolidationCondition
   status: ConsolidationStatus
   requestedByIdentity: string | null
   failureReason: string | null
@@ -34,7 +22,6 @@ interface ConsolidationResponse {
   id: number
   original_filename: string
   display_name: string | null
-  condition: ConsolidationCondition
   status: ConsolidationStatus
   requested_by_identity: string | null
   failure_reason: string | null
@@ -49,7 +36,6 @@ function toConsolidation(row: ConsolidationResponse): Consolidation {
     id: row.id,
     originalFilename: row.original_filename,
     displayName: row.display_name,
-    condition: row.condition,
     status: row.status,
     requestedByIdentity: row.requested_by_identity,
     failureReason: row.failure_reason,
@@ -67,13 +53,11 @@ function toConsolidation(row: ConsolidationResponse): Consolidation {
 // thrown error here means no Consolidation was created at all (bad
 // extension, empty/oversized file, or throttled) — surfaced via the
 // backend's own safe `detail` string, same as createAnalysis.
-export async function createConsolidation(
-  file: File,
-  condition: ConsolidationCondition,
-): Promise<Consolidation> {
+// Ticket #149: no Condition — one upload produces every Consolidation level
+// (with owner, without owner, combined) in one result workbook.
+export async function createConsolidation(file: File): Promise<Consolidation> {
   const formData = new FormData()
   formData.append('file', file)
-  formData.append('condition', condition)
 
   const response = await fetch(`${API_BASE_URL}/consolidations`, {
     method: 'POST',

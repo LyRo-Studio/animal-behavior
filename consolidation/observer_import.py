@@ -5,9 +5,8 @@ import math
 import re
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-from openpyxl.utils import get_column_letter
-from consolidation.consolidatie import consolideer, SOURCE_NAME
+from openpyxl.styles import Font, PatternFill
+from consolidation.consolidatie import consolideer
 
 # De grenzen staan als gedragsnamen in Results (2), niet als vaste kolomnummers.
 # De vijf OOS-kolommen zijn geel gemarkeerd. Vocalisatie gebruikt de volledige
@@ -26,12 +25,10 @@ GROUPS = [
 ]
 TOLERANTIE_S = 0.001  # Observer exporteert seconden met een beperkte decimale precisie.
 DELEN = {
-    "1": {"naam": "Met eigenaar", "fases": tuple(range(1, 8)),
-          "bestand": "consolidatie_deel1_met_eigenaar.xlsx", "tabblad": "met_eigenaar"},
-    "2": {"naam": "Zonder eigenaar", "fases": tuple(range(9, 16)),
-          "bestand": "consolidatie_deel2_zonder_eigenaar.xlsx", "tabblad": "zonder_eigenaar"},
+    "1": {"naam": "Met eigenaar", "fases": tuple(range(1, 8)), "niveau": "with_owner"},
+    "2": {"naam": "Zonder eigenaar", "fases": tuple(range(9, 16)), "niveau": "without_owner"},
     "1+2": {"naam": "Met en zonder eigenaar samen", "fases": tuple(range(1, 8)) + tuple(range(9, 16)),
-            "bestand": "consolidatie_deel1_en_2_samen.xlsx", "tabblad": "samen"},
+            "niveau": "combined"},
 }
 
 
@@ -231,15 +228,6 @@ def bereken_observer(bron):
     # aantal-kolommen frequenties per seconde, overeenkomstig de opdracht.
     resultaat["geconsolideerde_waarde"] = resultaat.fractie.where(
         resultaat.meettype == "duur", resultaat.frequentie_per_s)
-    if bron.get("indeling") == "ethogram":
-        extra = bron["definities"][["gedrag", "ethogram_code", "state_event", "ethogram_rij", "groep_export"]]
-        resultaat = resultaat.merge(extra, on="gedrag", validate="many_to_one")
-        detail = detail.merge(extra, on="gedrag", validate="many_to_one")
-        order = {name: i for i, name in enumerate(bron["definities"].gedrag)}
-        resultaat = resultaat.assign(_volgorde=resultaat.gedrag.map(order)).sort_values(
-            ["test_id", "_volgorde"]).drop(columns="_volgorde").reset_index(drop=True)
-        detail = detail.assign(_volgorde=detail.gedrag.map(order)).sort_values(
-            ["test_id", "fase", "_volgorde"]).drop(columns="_volgorde").reset_index(drop=True)
     wide = resultaat.pivot(index=["test_id", "dog_id"], columns="gedrag", values="geconsolideerde_waarde")
     wide = wide.reindex(columns=bron["definities"].gedrag).reset_index()
     wide.columns.name = None
@@ -247,168 +235,84 @@ def bereken_observer(bron):
             "noemers_per_groep": groep_totalen, "meldingen": pd.DataFrame(notes)}
 
 
-def schrijf_resultaat(path, bron, berekend, source_path):
+def schrijf_resultaat(path, bronnen, berekend, source_path):
+    """Een Engelstalig werkboek met ieder niveau (DELEN) uit een upload.
+
+    `bronnen` en `berekend` bevatten per deel de uitkomst van lees_observer en
+    bereken_observer. Diagnostische tabellen krijgen een kolom `level`.
+    """
     path = Path(path)
     path.parent.mkdir(exist_ok=True)
-    deel = bron.get("deel", "1")
     uitleg = [
-        f"ECHTE RESULTATEN - {DELEN[deel]['naam']}; deel {deel}.",
-        f"Echte fases uit Observations: {DELEN[deel]['fases']}. Aanwezigheid FP in fase is onafhankelijk gecontroleerd.",
-        "per_test: een rij per hond/test; alle oorspronkelijke gedrags- en modifierkolommen afzonderlijk.",
-        "Total duration-kolommen: som gedragsduur / (som faseduur - som groeps-OOS-duur). Dit zijn fracties, geen percentages.",
-        "Total number-kolommen: som aantallen / dezelfde noemer. Eenheid: voorkomens per zichtbare seconde.",
-        "consolidatie: alle tellers/noemers, percentages, frequenties per seconde/minuut en status.",
-        "Modifiers worden niet opgeteld tot basisgedrag; combinaties blijven behouden en worden alleen over fases gesommeerd.",
-        "Vocalisatie heeft geen OOS-kolom: volledige faseduur, zoals de bronformules aangeven.",
-        "OOS-aantallen zijn geen tijd: alleen OOS-duurtijden worden afgetrokken.",
-        "Deel 1 gebruikt echte fases 1-7; deel 2 echte fases 9-15 (hernummerd 1-7 in de bron). Samen gebruikt alle 14 fases. Fase 8 telt nooit mee.",
-        "Samen wordt berekend uit de opgetelde tellers en noemers, niet als gemiddelde van beide delen.",
-        ("Groepsindeling en kolomvolgorde volgen het ethogram; Stiffening up gebruikt exploratie-OOS (IW)."
-         if bron.get("indeling") == "ethogram" else "Groepsindeling volgt de bronexport; zie controle_ethogram.xlsx voor verschillen."),
-        "Protocolgedrag valt buiten de hondgedragsgroepen. First contact with TP is volgens ethogram een aparte F1-maat: zie uitgesloten.",
-        "Nul zichtbare tijd: lege fractie/frequentie met status geen_zichtbare_tijd; nooit vervangen door 0%.",
-        "Ruwe Results en Results (2) zijn per gekozen meetcel vergeleken. Bronbestanden zijn niet gewijzigd.",
-        "Labels met stress0/self0 zijn hersteld naar stress-/self-, overeenkomstig ruwe Results.",
-        f"Maximale tolerantie op individuele tijden: {TOLERANTIE_S} s wegens exportafronding; afwijkingen staan in meldingen.",
-        "Bestaande fasepercentages uit Results (REL) zijn niet opgeteld of gemiddeld. Foutieve groepsverwijzingen staan in meldingen.",
-        f"Bron: {Path(source_path).name}",
-        f"SHA256 bron: {hashlib.sha256(Path(source_path).read_bytes()).hexdigest()}",
+        "CONSOLIDATION RESULT - every level from one Observer export.",
+        "with_owner: Observer phases 1-7 (ME, the owner is present).",
+        "without_owner: Observer phases 9-15 (ZE, the owner is absent).",
+        "combined: Observer phases 1-7 and 9-15 together. Owner departure (phase 8) never counts.",
+        "Phases come from the Observation name; the owner-present flag is checked against them.",
+        "with_owner, without_owner, combined: one row per test; every original behaviour and modifier column kept separately.",
+        "Total duration columns: sum of behaviour duration / (sum of phase Duration - sum of the group's Out of Sight duration). Fractions, not percentages.",
+        "Total number columns: sum of counts / the same denominator. Unit: occurrences per visible second.",
+        "Sums first, then one division: never an average of phase values. combined is never an average of with_owner and without_owner.",
+        "Modifier combinations are never summed into a base behaviour; each is only summed over phases.",
+        "Vocalisation has no Out of Sight column: it uses the full phase Duration, as the source formulas state.",
+        "Out of Sight counts are not time: only Out of Sight durations are subtracted.",
+        "Behaviour groups follow the export's column order in Results (2).",
+        "Protocol behaviours are not dog behaviour groups. First contact with TP is a separate F1 measure: see excluded.",
+        "No visible time: blank fraction and frequency with status geen_zichtbare_tijd; never replaced by 0.",
+        "Raw Results and Results (2) are compared cell by cell for every selected value. The source file is not changed.",
+        "Headers with stress0/self0 are restored to stress-/self-, matching raw Results.",
+        f"Maximum tolerance on individual times: {TOLERANTIE_S} s for export rounding; deviations are listed in warnings.",
+        "Existing phase percentages from Results (REL) are not summed or averaged. Wrong group references are listed in warnings.",
+        "details: every numerator, denominator, percentage, frequency per second and per minute, and status, per level.",
+        "phase_details: every value per test and phase; denominators: per test, level and group.",
+        "phase_selection: every source row and the levels it was used in; variables: every result column; excluded: columns left out, with the reason.",
+        "Diagnostic sheets keep the calculation's own column names: fase = Observer phase number, groep = Behaviour group, "
+        "gedrag = result column, basisgedrag = behaviour, duur = duration, aantal = count, zichtbaar = visible time, "
+        "fractie = fraction, frequentie = frequency.",
+        f"Source: {Path(source_path).name}",
+        f"SHA256 source: {hashlib.sha256(Path(source_path).read_bytes()).hexdigest()}",
     ]
-    tables = {"per_test": berekend["per_test"], "LEESMIJ": pd.DataFrame({"uitleg": uitleg}),
-              **{k: v for k, v in berekend.items() if k != "per_test"},
-              "variabelen": bron["definities"].drop(columns="kolomnummer"),
-              "fase_selectie": bron["selectie"], "uitgesloten": bron["uitgesloten"]}
+
+    niveaus = {d: config["niveau"] for d, config in DELEN.items()}
+
+    def per_niveau(key, weglaten=()):
+        tabellen = []
+        for d, niveau in niveaus.items():
+            tabel = berekend[d][key].drop(columns=list(weglaten))
+            tabel.insert(0, "level", niveau)
+            tabellen.append(tabel)
+        return pd.concat(tabellen, ignore_index=True)
+
+    # Definities, uitsluitingen en de bronrijen zijn voor ieder deel gelijk;
+    # alleen `opgenomen` hangt af van het deel.
+    alle = bronnen["1+2"]
+    gebruikt = {d: set(bronnen[d]["selectie"].query("opgenomen")[["test_id", "fase"]]
+                       .itertuples(index=False, name=None)) for d in niveaus}
+    selectie = alle["selectie"].drop(columns="opgenomen")
+    selectie["levels"] = [", ".join(n for d, n in niveaus.items() if key in gebruikt[d]) or None
+                          for key in selectie[["test_id", "fase"]].itertuples(index=False, name=None)]
+    tables = {
+        **{niveau: berekend[d]["per_test"] for d, niveau in niveaus.items()},
+        "README": pd.DataFrame({"README": uitleg}),
+        # deel/met_eigenaar/selectie beschrijven per deel hetzelfde als level.
+        "details": per_niveau("consolidatie", ["deel", "met_eigenaar", "selectie"]),
+        "phase_details": per_niveau("controle_per_fase"),
+        "denominators": per_niveau("noemers_per_groep"),
+        "warnings": per_niveau("meldingen"),
+        "variables": alle["definities"].drop(columns="kolomnummer"),
+        "phase_selection": selectie,
+        "excluded": alle["uitgesloten"],
+    }
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for name, table in tables.items():
             table.to_excel(writer, sheet_name=name, index=False)
             ws = writer.book[name]
-            ws.freeze_panes = "C2" if name == "per_test" else "A2"
+            ws.freeze_panes = "C2" if name in niveaus.values() else "A2"
             ws.auto_filter.ref = ws.dimensions
             for cell in ws[1]:
                 cell.font = Font(bold=True, color="FFFFFF")
                 cell.fill = PatternFill("solid", fgColor="245447")
                 ws.column_dimensions[cell.column_letter].width = 24
-            if name == "LEESMIJ":
+            if name == "README":
                 ws.column_dimensions["A"].width = 140
-            if name == "per_test" and bron.get("indeling") == "ethogram":
-                groepeer_kolommen(ws, bron["definities"])
     return path
-
-
-def pas_ethogram_indeling_toe(bron, path="20241218_Printbaar ethogram.xlsx"):
-    """Behoud metingen, orden op ethogram en koppel iedere groep aan haar OOS-duur.
-
-    Currently broken: `ethogram_controle` and the reference file above are not
-    in this repo, so this (and therefore verwerk_alle_delen) cannot run today.
-    Confirmed during ticket #114's review; excluded from the web feature.
-    """
-    from ethogram_controle import lees_ethogram, ALIASES
-    eth, _ = lees_ethogram(path)
-    result = {k: v.copy() if isinstance(v, pd.DataFrame) else v for k, v in bron.items()}
-    result["invoer"] = {k: v.copy() for k, v in bron["invoer"].items()}
-    defs = bron["definities"].copy()
-    defs["groep_export"] = defs.groep
-    by_name = eth.set_index("ethogram_gedrag")
-    oos_cols = defs.groupby("groep").oos_kolom.first().to_dict()
-    modifier_order = {}
-    for base, modifier in defs[["basisgedrag", "modifier"]].itertuples(index=False, name=None):
-        modifier_order.setdefault((base, modifier), len(modifier_order))
-    for i, row in defs.iterrows():
-        name = ALIASES.get(row.basisgedrag, row.basisgedrag)
-        record = by_name.loc[name]
-        if isinstance(record, pd.DataFrame):
-            raise ValueError(f"Dubbele gedragsnaam in ethogram: {name}")
-        defs.loc[i, "groep"] = record.ethogram_groep
-        defs.loc[i, "oos_kolom"] = oos_cols[record.ethogram_groep]
-        defs.loc[i, "ethogram_code"] = record.code
-        defs.loc[i, "state_event"] = record.state_event
-        defs.loc[i, "ethogram_rij"] = int(record.ethogram_rij)
-    defs["ethogram_rij"] = defs.ethogram_rij.astype(int)
-    defs["_modifier"] = [modifier_order[(r.basisgedrag, r.modifier)] for r in defs.itertuples()]
-    defs["_type"] = defs.meettype.map({"duur": 0, "aantal": 1})
-    defs = defs.sort_values(["ethogram_rij", "_modifier", "_type"]).drop(columns=["_modifier", "_type"]).reset_index(drop=True)
-    result["definities"] = defs
-    result["invoer"]["gedrag_groepen"] = defs[["gedrag", "groep", "meettype"]].copy()
-    result["indeling"] = "ethogram"
-    notes = result["meldingen"].to_dict("records")
-    for row in defs[defs.groep != defs.groep_export].itertuples():
-        notes.append({"type": "ethogram_groepscorrectie", "test_id": "", "fase": "",
-                      "variabele": row.gedrag,
-                      "melding": f"Van {row.groep_export} naar {row.groep}, OOS {row.oos_kolom}; ethogram rij {row.ethogram_rij}."})
-    result["meldingen"] = pd.DataFrame(notes)
-    return result
-
-
-def groepeer_kolommen(ws, definitions):
-    """Een doorlopende kop per groep, met de exacte variabelenamen daaronder."""
-    ws.insert_rows(1)
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
-    ws.cell(1, 1, "Test / hond")
-    colors = ["245447", "285F82", "70477F", "996329", "80464A", "3B6870"]
-    group_order = definitions.groep.drop_duplicates().tolist()
-    for index, group in enumerate(group_order):
-        positions = [i + 3 for i, g in enumerate(definitions.groep) if g == group]
-        if positions != list(range(min(positions), max(positions) + 1)):
-            raise ValueError(f"Groepskolommen staan niet aaneengesloten: {group}")
-        ws.merge_cells(start_row=1, start_column=min(positions), end_row=1, end_column=max(positions))
-        ws.cell(1, min(positions), group)
-        for c in positions:
-            for r in [1, 2]:
-                ws.cell(r, c).fill = PatternFill("solid", fgColor=colors[index % len(colors)])
-                ws.cell(r, c).font = Font(bold=True, color="FFFFFF")
-            ws.cell(2, c).alignment = Alignment(wrap_text=True, vertical="top")
-    ws.row_dimensions[1].height = 26
-    ws.row_dimensions[2].height = 95
-    ws.freeze_panes = "C3"
-    ws.auto_filter.ref = f"A2:{get_column_letter(ws.max_column)}{ws.max_row}"
-
-
-def verwerk_alle_delen(source_path=SOURCE_NAME, output_dir="output"):
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True)
-    resultaten, bronnen = {}, {}
-    for deel, config in DELEN.items():
-        bronnen[deel] = pas_ethogram_indeling_toe(lees_observer(source_path, deel=deel))
-        resultaten[deel] = bereken_observer(bronnen[deel])
-        schrijf_resultaat(output_dir / config["bestand"], bronnen[deel], resultaten[deel], source_path)
-    overzicht = output_dir / "consolidatie_alle_delen.xlsx"
-    uitleg = [
-        "DRIE AFZONDERLIJKE RESULTATEN: met_eigenaar, zonder_eigenaar en samen. Bron: Results (2).",
-        "Elk resultaat heeft 10 tests en behoudt alle 538 oorspronkelijke gedrags-/modifierkolommen.",
-        "met_eigenaar: deel 1, echte fases 1-7; zonder_eigenaar: deel 2, echte fases 9-15 (1-7 binnen deel 2).",
-        "samen: alle 14 fases; som gedragswaarde / (som faseduur - som groeps-OOS-duur). Geen gemiddelde van de twee resultaten.",
-        "Total duration: tijdsfractie. Total number: frequentie per zichtbare seconde. Zie de detailbestanden voor percentages en frequentie per minuut.",
-        "Elke groep staat aaneengesloten onder een eigen gekleurde kop, in ethogramvolgorde. Binnen elk gedrag staan de modifiers en hun duurtijd/aantal naast elkaar.",
-        "Individuele gedragingen zijn niet opgeteld tot een groepsscore. First contact blijft een afzonderlijke F1-maat.",
-        "Stiffening up volgt nu het ethogram: exploratie/zelfverzorging, OOS IW. Het oude ethogramcontroleverslag beschrijft de eerdere bronindeling.",
-        "Event-duurkolommen bevatten nul en zijn geen inhoudelijke maat; gebruik hun frequenties. Zie variabelen voor State/Event.",
-        "Nul zichtbare tijd geeft een lege uitkomst. Fase 8 is uitgesloten.",
-        f"Bron: {Path(source_path).name}; SHA256: {hashlib.sha256(Path(source_path).read_bytes()).hexdigest()}",
-    ]
-    with pd.ExcelWriter(overzicht, engine="openpyxl") as writer:
-        for deel, config in DELEN.items():
-            resultaten[deel]["per_test"].to_excel(writer, sheet_name=config["tabblad"], index=False)
-        pd.DataFrame({"uitleg": uitleg}).to_excel(writer, sheet_name="LEESMIJ", index=False)
-        pd.concat([r["noemers_per_groep"].assign(selectie=DELEN[d]["naam"]) for d, r in resultaten.items()],
-                  ignore_index=True).to_excel(writer, sheet_name="noemers_per_groep", index=False)
-        bronnen["1+2"]["definities"].drop(columns="kolomnummer").to_excel(writer, sheet_name="variabelen", index=False)
-        bronnen["1+2"]["selectie"].to_excel(writer, sheet_name="fases", index=False)
-        for ws in writer.book:
-            ws.freeze_panes = "C2"
-            ws.auto_filter.ref = ws.dimensions
-            for cell in ws[1]:
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = PatternFill("solid", fgColor="245447")
-                ws.column_dimensions[cell.column_letter].width = 24
-        writer.book["LEESMIJ"].column_dimensions["A"].width = 140
-        for deel, config in DELEN.items():
-            groepeer_kolommen(writer.book[config["tabblad"]], bronnen[deel]["definities"])
-    return bronnen, resultaten, overzicht
-
-
-if __name__ == "__main__":
-    bronnen, resultaten, pad = verwerk_alle_delen()
-    print(pad.resolve())
-    for deel, result in resultaten.items():
-        print(DELEN[deel]["naam"], len(result["per_test"]), "tests;",
-              len(bronnen[deel]["invoer"]["fases"]), "fases")

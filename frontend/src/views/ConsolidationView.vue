@@ -3,11 +3,9 @@ import { ref } from 'vue'
 
 import ConsolidationStatusBadge from '@/components/ConsolidationStatusBadge.vue'
 import {
-  CONSOLIDATION_CONDITION_LABELS,
   createConsolidation,
   downloadConsolidation,
   type Consolidation,
-  type ConsolidationCondition,
 } from '@/services/consolidations'
 import { formatDate } from '@/utils/date'
 import { triggerBlobDownload } from '@/utils/download'
@@ -15,7 +13,6 @@ import { triggerBlobDownload } from '@/utils/download'
 // Plain file picker, no drag-and-drop (issue #113's UX decision — matches
 // the mockup's `[ Select file ]`).
 const selectedFile = ref<File | null>(null)
-const condition = ref<ConsolidationCondition>('ME_ZE')
 
 function onFileChange(event: Event) {
   const input = event.target as HTMLInputElement
@@ -38,7 +35,7 @@ async function consolidate() {
     // Synchronous, in-request processing (issue #113: "simplest reliable
     // architecture", no worker/queue) — this resolves only once the
     // consolidation has actually finished, one way or another.
-    result.value = await createConsolidation(selectedFile.value, condition.value)
+    result.value = await createConsolidation(selectedFile.value)
   } catch (err) {
     submitError.value = err instanceof Error ? err.message : 'Failed to consolidate file.'
   } finally {
@@ -100,27 +97,9 @@ async function download() {
         <p v-if="selectedFile" class="mt-2 text-sm text-muted" data-testid="selected-filename">
           {{ selectedFile.name }}
         </p>
-      </div>
-
-      <div class="mt-4">
-        <label for="consolidation-condition" class="block text-sm font-medium text-foreground">
-          Condition
-        </label>
-        <select
-          id="consolidation-condition"
-          v-model="condition"
-          data-testid="condition-select"
-          :disabled="isSubmitting"
-          class="mt-2 block w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-foreground"
-        >
-          <option
-            v-for="(label, value) in CONSOLIDATION_CONDITION_LABELS"
-            :key="value"
-            :value="value"
-          >
-            {{ label }}
-          </option>
-        </select>
+        <p class="mt-2 text-sm text-muted">
+          The result workbook holds every level: with owner (ME), without owner (ZE) and combined.
+        </p>
       </div>
 
       <button

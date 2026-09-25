@@ -43,7 +43,6 @@ function consolidation(overrides: Record<string, unknown> = {}) {
     id: 7,
     originalFilename: 'export.xlsx',
     displayName: null,
-    condition: 'ME_ZE',
     status: 'completed',
     requestedByIdentity: 'jan.peeters@vives.be',
     failureReason: null,
@@ -73,10 +72,10 @@ describe('ConsolidationsHistoryView', () => {
     deleteConsolidationMock.mockReset()
   })
 
-  it('loads and lists every consolidation with its filename, condition, status and date', async () => {
+  it('loads and lists every consolidation with its filename, status and date', async () => {
     listConsolidationsMock.mockResolvedValue([
-      consolidation({ id: 8, originalFilename: 'second.xlsx', condition: 'ZE' }),
-      consolidation({ id: 7, originalFilename: 'first.xlsx', condition: 'ME_ZE' }),
+      consolidation({ id: 8, originalFilename: 'second.xlsx' }),
+      consolidation({ id: 7, originalFilename: 'first.xlsx' }),
     ])
 
     const wrapper = await mountView()
@@ -85,9 +84,9 @@ describe('ConsolidationsHistoryView', () => {
     const rows = wrapper.findAll('[data-testid="consolidation-history-row"]')
     expect(rows).toHaveLength(2)
     expect(rows[0].text()).toContain('second.xlsx')
-    expect(rows[0].find('[data-testid="consolidation-history-condition"]').text()).toBe('ZE')
     expect(rows[1].text()).toContain('first.xlsx')
-    expect(rows[1].find('[data-testid="consolidation-history-condition"]').text()).toBe('ME + ZE')
+    // Ticket #149: a consolidation holds every level, so no Condition.
+    expect(wrapper.find('[data-testid="consolidation-history-condition"]').exists()).toBe(false)
     expect(rows[0].find('[data-testid="consolidation-history-status"]').text()).toBe('Completed')
     expect(rows[0].find('[data-testid="consolidation-history-created-at"]').text()).toBe(
       formatDate('2026-01-02T10:00:00Z'),

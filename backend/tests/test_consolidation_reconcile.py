@@ -15,7 +15,7 @@ import app.services.consolidation as consolidation_service
 from alembic import command
 from alembic.config import Config
 from app.models.audit_log import AuditAction, AuditLog
-from app.models.consolidation import Consolidation, ConsolidationCondition, ConsolidationStatus
+from app.models.consolidation import Consolidation, ConsolidationStatus
 from app.services.consolidation import reconcile_stale_consolidations, start_consolidation
 from tests.conftest import _ALEMBIC_INI
 from tests.fakes import FakeS3Client
@@ -35,7 +35,6 @@ def _aged_consolidation(
         db,
         requested_by_identity=None,
         original_filename="export.xlsx",
-        condition=ConsolidationCondition.ME,
         input_size_bytes=1,
     )
     consolidation.created_at = datetime.now(UTC) - age
@@ -63,7 +62,6 @@ def test_a_new_consolidation_records_its_result_key_at_creation(db_session):
         db_session,
         requested_by_identity=None,
         original_filename="export.xlsx",
-        condition=ConsolidationCondition.ME,
         input_size_bytes=1,
     )
 
@@ -75,7 +73,6 @@ def test_a_new_consolidation_records_its_result_key_at_creation(db_session):
         db_session,
         requested_by_identity=None,
         original_filename="export.xlsx",
-        condition=ConsolidationCondition.ME,
         input_size_bytes=1,
     )
     assert other.result_storage_key != key

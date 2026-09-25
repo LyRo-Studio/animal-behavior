@@ -3,7 +3,6 @@ import { onMounted, ref } from 'vue'
 
 import ConsolidationStatusBadge from '@/components/ConsolidationStatusBadge.vue'
 import {
-  CONSOLIDATION_CONDITION_LABELS,
   CONSOLIDATION_DISPLAY_NAME_MAX_LENGTH,
   deleteConsolidation,
   downloadConsolidation,
@@ -210,9 +209,6 @@ async function confirmDelete(consolidation: Consolidation) {
                   :status="consolidation.status"
                   data-testid="consolidation-history-status"
                 />
-                <span data-testid="consolidation-history-condition">{{
-                  CONSOLIDATION_CONDITION_LABELS[consolidation.condition]
-                }}</span>
                 ·
                 <span data-testid="consolidation-history-created-at">{{
                   formatDate(consolidation.createdAt)

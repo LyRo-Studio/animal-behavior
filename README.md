@@ -82,6 +82,8 @@ Deploy (`.github/workflows/deploy.yml`) triggers automatically once `ci.yml` suc
 2. Builds the backend, frontend, worker and nginx images and pushes them to GHCR, tagged both `sha-<short-commit>` and `latest`. The frontend is always built with `VITE_API_BASE_URL=/api` (same origin), and the `nginx` image is a config-only image (`nginx/`).
 3. Runs `docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile worker up -d --pull always --no-build --wait` on the production VM (`dogtrace-app`, the runner labelled `production-deploy`) against those published images, blocking until all services report healthy. Only `nginx` publishes host ports — 5173 (the port Mechatronics forwards to) and 8000 (an API-only listener for a Mechatronics `/api` route still pointed at the port the backend used to be on; see `nginx/default.conf`); backend and frontend are internal to the Docker network.
 
+**One-off step after the deploy that ships migration 0016** (ticket #149): run `docker compose exec backend python -m app.commands.remove_unreferenced_consolidation_results` on the production VM. It removes the stored results of the old per-Condition consolidations that 0016 deleted; re-running it is harmless. See `CONTEXT.md`'s "Consolidation: every level from one upload" decision.
+
 **Production configuration** lives in the repo's `production` GitHub Environment (Settings → Environments), not in a hand-edited file on the box. Each deploy regenerates `.env` from it (`chmod 600`, never logged), so rotating a secret means updating GitHub and redeploying.
 
 - Secrets: `POSTGRES_PASSWORD`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `MEDIA_TOKEN_SECRET_KEY`.

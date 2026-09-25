@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 import app.services.consolidation as consolidation_service
 from app.models.audit_log import AuditAction, AuditLog
-from app.models.consolidation import Consolidation, ConsolidationCondition, ConsolidationStatus
+from app.models.consolidation import Consolidation, ConsolidationStatus
 from app.services.consolidation import (
     ConsolidationInputError,
     list_consolidations,
@@ -40,10 +40,9 @@ def _workbook_bytes(title: str = "Results") -> bytes:
 _WORKBOOK_BYTES = _workbook_bytes()
 
 
-def _upload(client, *, condition="ME_ZE", filename="export.xlsx", content=_WORKBOOK_BYTES):
+def _upload(client, *, filename="export.xlsx", content=_WORKBOOK_BYTES):
     return client.post(
         "/api/consolidations",
-        data={"condition": condition},
         files={"file": (filename, BytesIO(content), "application/octet-stream")},
     )
 
@@ -59,7 +58,8 @@ def test_create_consolidation_succeeds_and_persists_the_result(
     body = response.json()
     assert body["status"] == "completed"
     assert body["original_filename"] == "export.xlsx"
-    assert body["condition"] == "ME_ZE"
+    # Ticket #149: one upload produces every Consolidation level.
+    assert "condition" not in body
     assert body["failure_reason"] is None
     assert body["input_size_bytes"] == len(_WORKBOOK_BYTES)
     assert body["result_size_bytes"] == len(b"consolidated-workbook-bytes")
@@ -70,18 +70,15 @@ def test_create_consolidation_succeeds_and_persists_the_result(
     assert s3_client.objects[row.result_storage_key] == b"consolidated-workbook-bytes"
 
 
-def test_create_consolidation_invokes_the_runner_with_the_uploaded_bytes_and_condition(
+def test_create_consolidation_invokes_the_runner_with_the_uploaded_bytes(
     client, consolidation_runner
 ):
     content = _workbook_bytes(title="the-uploaded-workbook")
 
-    response = _upload(client, condition="ZE", content=content)
+    response = _upload(client, content=content)
 
     assert response.status_code == 201, response.text
-    assert len(consolidation_runner.calls) == 1
-    input_bytes, condition = consolidation_runner.calls[0]
-    assert input_bytes == content
-    assert condition.value == "ZE"
+    assert consolidation_runner.calls == [content]
 
 
 def test_create_consolidation_removes_the_temp_workspace_after_success(
@@ -211,7 +208,6 @@ def test_create_consolidation_is_never_completed_if_storing_the_result_fails(
 def test_create_consolidation_rejects_a_non_xlsx_extension(client, db_session):
     response = client.post(
         "/api/consolidations",
-        data={"condition": "ME_ZE"},
         files={"file": ("export.csv", BytesIO(b"not-excel"), "text/csv")},
     )
 
@@ -286,7 +282,6 @@ def test_create_consolidation_writes_a_failed_audit_row(client, db_session, cons
 def test_create_consolidation_records_the_requesting_identity(client, db_session):
     response = client.post(
         "/api/consolidations",
-        data={"condition": "ME_ZE"},
         files={"file": ("export.xlsx", BytesIO(_WORKBOOK_BYTES), "application/octet-stream")},
         headers=identity_headers("researcher@vives.be"),
     )
@@ -350,7 +345,6 @@ def test_download_consolidation_still_processing_is_rejected(client, db_session)
         db_session,
         requested_by_identity=None,
         original_filename="running.xlsx",
-        condition=ConsolidationCondition.ME,
         input_size_bytes=1,
     ).id
 
@@ -375,7 +369,6 @@ def test_download_consolidation_created_by_another_identity_still_succeeds(clien
     /analyses precedent) — no ownership check on download."""
     create_response = client.post(
         "/api/consolidations",
-        data={"condition": "ME_ZE"},
         files={"file": ("export.xlsx", BytesIO(_WORKBOOK_BYTES), "application/octet-stream")},
         headers=identity_headers("owner@vives.be"),
     )
@@ -394,13 +387,11 @@ def test_list_consolidations_returns_every_identitys_consolidations(client):
     ticket #72) — no per-identity filtering of the history list."""
     client.post(
         "/api/consolidations",
-        data={"condition": "ME"},
         files={"file": ("mine.xlsx", BytesIO(_WORKBOOK_BYTES), "application/octet-stream")},
         headers=identity_headers("mine@vives.be"),
     )
     client.post(
         "/api/consolidations",
-        data={"condition": "ZE"},
         files={"file": ("theirs.xlsx", BytesIO(_WORKBOOK_BYTES), "application/octet-stream")},
         headers=identity_headers("other@vives.be"),
     )
@@ -415,9 +406,9 @@ def test_list_consolidations_returns_every_identitys_consolidations(client):
 def test_list_consolidations_includes_completed_and_failed_rows_newest_first(
     client, consolidation_runner
 ):
-    completed_id = _upload(client, filename="good.xlsx", condition="ME").json()["id"]
+    completed_id = _upload(client, filename="good.xlsx").json()["id"]
     consolidation_runner.error = ConsolidationInputError("fases: ontbrekende kolommen")
-    failed_id = _upload(client, filename="bad.xlsx", condition="ZE").json()["id"]
+    failed_id = _upload(client, filename="bad.xlsx").json()["id"]
 
     response = client.get("/api/consolidations")
 
@@ -428,13 +419,11 @@ def test_list_consolidations_includes_completed_and_failed_rows_newest_first(
     assert failed["status"] == "failed"
     assert failed["failure_reason"] == "fases: ontbrekende kolommen"
     assert failed["original_filename"] == "bad.xlsx"
-    assert failed["condition"] == "ZE"
     assert completed["status"] == "completed"
     assert completed["failure_reason"] is None
     for row in body:
-        assert {"original_filename", "display_name", "condition", "created_at", "status"} <= (
-            row.keys()
-        )
+        assert {"original_filename", "display_name", "created_at", "status"} <= row.keys()
+        assert "condition" not in row
 
 
 def test_list_consolidations_is_empty_when_there_are_none(client):
@@ -453,7 +442,6 @@ def test_list_consolidations_is_bounded_to_the_newest_rows(db_session):
             db_session,
             requested_by_identity=None,
             original_filename=f"export-{index}.xlsx",
-            condition=ConsolidationCondition.ME,
             input_size_bytes=1,
         ).id
         for index in range(3)
@@ -473,7 +461,7 @@ def _rename(client, consolidation_id, display_name, *, headers=None):
 
 
 def test_rename_consolidation_updates_display_name_only(client, db_session):
-    created = _upload(client, filename="export.xlsx", condition="ZE").json()
+    created = _upload(client, filename="export.xlsx").json()
 
     response = _rename(client, created["id"], "Pilot dogs, week 3")
 
@@ -612,7 +600,6 @@ def test_rename_consolidation_created_by_another_identity_still_succeeds(client)
     """Fully shared (issue #113, ADR-0004) — no ownership check on rename."""
     create_response = client.post(
         "/api/consolidations",
-        data={"condition": "ME_ZE"},
         files={"file": ("export.xlsx", BytesIO(_WORKBOOK_BYTES), "application/octet-stream")},
         headers=identity_headers("owner@vives.be"),
     )
@@ -775,7 +762,6 @@ def test_delete_a_processing_consolidation_is_rejected(client, db_session):
         db_session,
         requested_by_identity=None,
         original_filename="running.xlsx",
-        condition=ConsolidationCondition.ME,
         input_size_bytes=1,
     ).id
 
@@ -799,7 +785,6 @@ def test_delete_consolidation_created_by_another_identity_still_succeeds(client)
     """Fully shared (issue #113, ADR-0004) — no ownership check on delete."""
     create_response = client.post(
         "/api/consolidations",
-        data={"condition": "ME_ZE"},
         files={"file": ("export.xlsx", BytesIO(_WORKBOOK_BYTES), "application/octet-stream")},
         headers=identity_headers("owner@vives.be"),
     )

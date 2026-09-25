@@ -10,7 +10,7 @@ architecture", no worker/queue).
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -27,7 +27,6 @@ from app.models.audit_log import AuditAction
 from app.models.consolidation import (
     ORIGINAL_FILENAME_MAX_LENGTH,
     Consolidation,
-    ConsolidationCondition,
     ConsolidationStatus,
 )
 from app.schemas.consolidations import ConsolidationOut, RenameConsolidationRequest
@@ -104,7 +103,6 @@ def _record_verified_audit_event(
 def create_consolidation_endpoint(
     request: Request,
     file: UploadFile = File(...),
-    condition: ConsolidationCondition = Form(...),
     identity: str | None = Depends(get_identity),
     db: Session = Depends(get_db),
     s3: S3Client = Depends(get_s3_client),
@@ -112,8 +110,9 @@ def create_consolidation_endpoint(
     limiter: RateLimiter = Depends(get_rate_limiter),
     work_root: Path = Depends(get_consolidation_upload_root),
 ) -> Consolidation:
-    """Upload one Excel file and consolidate it for `condition`, entirely
-    within this request (issue #113's core flow).
+    """Upload one Excel file and consolidate it into one result holding
+    every Consolidation level (ticket #149), entirely within this request
+    (issue #113's core flow).
 
     Always returns 201 with the created Consolidation, whether its outcome
     is `completed` or `failed` — a failed *consolidation attempt* is still
@@ -164,7 +163,6 @@ def create_consolidation_endpoint(
         db,
         requested_by_identity=identity,
         original_filename=file.filename,
-        condition=condition,
         input_size_bytes=len(file_bytes),
     )
     _record_verified_audit_event(

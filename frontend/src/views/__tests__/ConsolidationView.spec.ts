@@ -51,7 +51,6 @@ function consolidation(overrides: Record<string, unknown> = {}) {
     id: 7,
     originalFilename: 'export.xlsx',
     displayName: null,
-    condition: 'ME_ZE',
     status: 'completed',
     requestedByIdentity: null,
     failureReason: null,
@@ -80,6 +79,13 @@ describe('ConsolidationView', () => {
     expect((button.element as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it('asks for no Condition: one upload produces every Consolidation level', async () => {
+    const wrapper = await mountView()
+
+    expect(wrapper.find('select').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Condition')
+  })
+
   it('shows the selected filename', async () => {
     const wrapper = await mountView()
 
@@ -88,7 +94,7 @@ describe('ConsolidationView', () => {
     expect(wrapper.text()).toContain('my-observer-export.xlsx')
   })
 
-  it('submits the file and selected condition, showing a processing state meanwhile', async () => {
+  it('submits the file, showing a processing state meanwhile', async () => {
     let resolveCreate: (value: unknown) => void = () => {}
     createConsolidationMock.mockReturnValue(
       new Promise((resolve) => {
@@ -98,12 +104,11 @@ describe('ConsolidationView', () => {
 
     const wrapper = await mountView()
     await selectFile(wrapper)
-    await wrapper.find('[data-testid="condition-select"]').setValue('ZE')
     await wrapper.find('[data-testid="consolidate"]').trigger('click')
     await flushPromises()
 
     expect(wrapper.find('[data-testid="status-processing"]').exists()).toBe(true)
-    expect(createConsolidationMock).toHaveBeenCalledWith(expect.any(File), 'ZE')
+    expect(createConsolidationMock).toHaveBeenCalledWith(expect.any(File))
 
     resolveCreate(consolidation())
     await flushPromises()

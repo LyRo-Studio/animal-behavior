@@ -13,7 +13,6 @@ from unittest.mock import patch
 import openpyxl
 import pytest
 
-from app.models.consolidation import ConsolidationCondition
 from app.services.consolidation import ConsolidationInputError, ObserverConsolidationRunner
 
 # Real Observer-export column layout, generated values only — see
@@ -23,21 +22,86 @@ _SYNTHETIC_EXPORT = (
 )
 
 
-@pytest.mark.parametrize("condition", list(ConsolidationCondition))
-def test_synthetic_observer_export_consolidates_for_every_condition(
-    tmp_path: Path, condition: ConsolidationCondition
+_RESULT_SHEETS = ["with_owner", "without_owner", "combined"]
+
+
+@pytest.fixture(scope="module")
+def synthetic_result(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The synthetic export's result workbook — consolidated once for every
+    test that only reads it (the real pipeline runs every level)."""
+    output_path = tmp_path_factory.mktemp("synthetic") / "result.xlsx"
+    ObserverConsolidationRunner().run(input_path=_SYNTHETIC_EXPORT, output_path=output_path)
+    return output_path
+
+
+def _sheet_rows(path: Path, sheet: str) -> list[dict[str, object]]:
+    """A sheet's rows as {header: value}."""
+    workbook = openpyxl.load_workbook(path, read_only=True)
+    header, *rows = workbook[sheet].iter_rows(values_only=True)
+    return [dict(zip(header, row, strict=True)) for row in rows]
+
+
+def _result_rows(path: Path, sheet: str) -> dict[str, dict[str, object]]:
+    """A result sheet as {test_id: {header: value}}."""
+    return {row["test_id"]: row for row in _sheet_rows(path, sheet)}
+
+
+def test_one_upload_produces_every_consolidation_level(synthetic_result: Path) -> None:
+    workbook = openpyxl.load_workbook(synthetic_result, read_only=True)
+    assert workbook.sheetnames == [
+        *_RESULT_SHEETS,
+        "README",
+        "details",
+        "phase_details",
+        "denominators",
+        "warnings",
+        "variables",
+        "phase_selection",
+        "excluded",
+    ]
+    for sheet in _RESULT_SHEETS:
+        assert list(_result_rows(synthetic_result, sheet)) == ["T901", "T902"]
+
+
+def test_each_level_matches_what_its_old_condition_produced(synthetic_result: Path) -> None:
+    """Literal values from the old per-Condition consolidations (ME, ZE and
+    ME_ZE) of this same fixture, captured before ticket #149 merged them
+    into one upload."""
+    tail_tucked = "Total duration Tail tucked <No Modifier>"
+    yawning = "Total number Yawning <No Modifier>"
+    expected = {
+        "with_owner": {"T901": (0.06071428571428571, 0.01168831168831169)},
+        "without_owner": {"T901": (0.04350649350649351, 0.005194805194805195)},
+        "combined": {"T901": (0.05211038961038961, 0.008441558441558441)},
+    }
+    for sheet, by_test in expected.items():
+        rows = _result_rows(synthetic_result, sheet)
+        for test_id, (duration_fraction, count_per_second) in by_test.items():
+            assert rows[test_id]["dog_id"] == "D901"
+            assert rows[test_id][tail_tucked] == pytest.approx(duration_fraction)
+            assert rows[test_id][yawning] == pytest.approx(count_per_second)
+        # Every exported behaviour/modifier column is kept, per level.
+        assert len(rows["T902"]) == 540
+
+
+def test_the_readme_is_english_and_names_the_source_file(synthetic_result: Path) -> None:
+    readme = "\n".join(str(row["README"]) for row in _sheet_rows(synthetic_result, "README"))
+    assert "with_owner: Observer phases 1-7" in readme
+    assert "without_owner: Observer phases 9-15" in readme
+    assert f"Source: {_SYNTHETIC_EXPORT.name}" in readme
+
+
+def test_phase_selection_lists_the_levels_each_source_row_was_used_in(
+    synthetic_result: Path,
 ) -> None:
-    output_path = tmp_path / "result.xlsx"
-
-    ObserverConsolidationRunner().run(
-        input_path=_SYNTHETIC_EXPORT, output_path=output_path, condition=condition
-    )
-
-    result_workbook = openpyxl.load_workbook(output_path, read_only=True)
-    assert "consolidatie" in result_workbook.sheetnames
-    per_test = result_workbook["per_test"]
-    test_ids = [row[0] for row in per_test.iter_rows(min_row=2, values_only=True)]
-    assert test_ids == ["T901", "T902"]
+    levels_by_phase = {
+        (row["test_id"], row["fase"]): row["levels"]
+        for row in _sheet_rows(synthetic_result, "phase_selection")
+    }
+    assert levels_by_phase[("T901", 1)] == "with_owner, combined"
+    assert levels_by_phase[("T901", 9)] == "without_owner, combined"
+    # Owner departure (F8) is listed, but never used.
+    assert levels_by_phase[("T901", 8)] is None
 
 
 def test_raw_and_edited_results_disagreeing_raises_the_domain_message(tmp_path: Path) -> None:
@@ -54,7 +118,6 @@ def test_raw_and_edited_results_disagreeing_raises_the_domain_message(tmp_path: 
         ObserverConsolidationRunner().run(
             input_path=input_path,
             output_path=tmp_path / "result.xlsx",
-            condition=ConsolidationCondition.ME,
         )
 
 
@@ -66,7 +129,6 @@ def test_not_a_workbook_raises_consolidation_input_error(tmp_path: Path) -> None
         ObserverConsolidationRunner().run(
             input_path=input_path,
             output_path=tmp_path / "result.xlsx",
-            condition=ConsolidationCondition.ME_ZE,
         )
 
 
@@ -86,7 +148,6 @@ def test_missing_required_sheet_raises_consolidation_input_error(tmp_path: Path)
         ObserverConsolidationRunner().run(
             input_path=input_path,
             output_path=tmp_path / "result.xlsx",
-            condition=ConsolidationCondition.ME_ZE,
         )
 
 
@@ -105,7 +166,6 @@ def test_corrupted_but_valid_zip_raises_consolidation_input_error(tmp_path: Path
         ObserverConsolidationRunner().run(
             input_path=input_path,
             output_path=tmp_path / "result.xlsx",
-            condition=ConsolidationCondition.ME_ZE,
         )
 
 
@@ -136,7 +196,6 @@ def test_a_bug_inside_bereken_observer_is_not_miscategorized_as_input_error(
         ObserverConsolidationRunner().run(
             input_path=input_path,
             output_path=tmp_path / "result.xlsx",
-            condition=ConsolidationCondition.ME_ZE,
         )
 
 
@@ -167,11 +226,9 @@ def test_real_observer_export_succeeds(tmp_path: Path) -> None:
     ObserverConsolidationRunner().run(
         input_path=Path(fixture_path),
         output_path=output_path,
-        condition=ConsolidationCondition.ME_ZE,
     )
 
     assert output_path.is_file()
     assert output_path.stat().st_size > 0
     result_workbook = openpyxl.load_workbook(output_path, read_only=True)
-    assert "consolidatie" in result_workbook.sheetnames
-    assert "per_test" in result_workbook.sheetnames
+    assert {"with_owner", "without_owner", "combined", "details"} <= set(result_workbook.sheetnames)
