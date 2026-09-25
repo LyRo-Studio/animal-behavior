@@ -356,6 +356,48 @@ def test_a_blank_duration_fails_naming_the_cell(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("cell", "header"),
+    [("C2", "Observations"), ("D2", "Aanwezigheid FP in fase"), ("H2", "Test ID")],
+)
+def test_a_blank_structural_cell_fails_naming_the_cell(
+    tmp_path: Path, cell: str, header: str
+) -> None:
+    input_path = write_observer_export(
+        tmp_path / "input.xlsx", {"Total duration Panting <No Modifier>": 20}
+    )
+    workbook = openpyxl.load_workbook(input_path)
+    workbook["Results"][cell] = None
+    workbook.save(input_path)
+
+    with pytest.raises(
+        ConsolidationInputError, match=f"^Blank cell Results!{cell} \\({re.escape(header)}\\)$"
+    ):
+        ObserverConsolidationRunner().run(
+            input_path=input_path, output_path=tmp_path / "result.xlsx"
+        )
+
+
+def test_an_empty_row_is_skipped_and_no_observations_at_all_fails(tmp_path: Path) -> None:
+    input_path = write_observer_export(
+        tmp_path / "input.xlsx", {"Total duration Panting <No Modifier>": 20}
+    )
+    workbook = openpyxl.load_workbook(input_path)
+    results = workbook["Results"]
+    results.insert_rows(3)
+    workbook.save(input_path)
+    output_path = tmp_path / "result.xlsx"
+
+    ObserverConsolidationRunner().run(input_path=input_path, output_path=output_path)
+    row = _result_rows(output_path, "with_owner")["T901"]
+    assert row["Total duration Panting <No Modifier>"] == pytest.approx(0.20)
+
+    results.delete_rows(2, results.max_row)
+    workbook.save(input_path)
+    with pytest.raises(ConsolidationInputError, match="^The Results sheet has no Observations"):
+        ObserverConsolidationRunner().run(input_path=input_path, output_path=output_path)
+
+
+@pytest.mark.parametrize(
     "column", ["Observations", "Test ID", "Dog ID", "Aanwezigheid FP in fase", "Duration"]
 )
 def test_a_missing_required_column_fails_naming_it(tmp_path: Path, column: str) -> None:
@@ -388,6 +430,7 @@ def test_columns_observer_adds_that_are_never_read_do_not_block_an_upload(
             "Total duration Out of sight tail <No Modifier>": 20,
             "Total number Out of sight tail <No Modifier>": "junk",
             "Total duration Out of sight attention <No Modifier>": None,
+            "Total duration Out of sight stress-related <No Modifier>": 5,
         },
     )
     workbook = openpyxl.load_workbook(input_path)
@@ -402,6 +445,11 @@ def test_columns_observer_adds_that_are_never_read_do_not_block_an_upload(
 
     row = _result_rows(output_path, "with_owner")["T901"]
     assert row["Total duration Tail tucked <No Modifier>"] == pytest.approx(0.25)
+    # A never-read column still counts towards availability when it holds
+    # a positive number.
+    status = {a["behaviour"]: a["status"] for a in _sheet_rows(output_path, "availability")}
+    assert status["Out of sight stress-related"] == "exported_nonzero"
+    assert status["Out of sight attention"] == "exported_all_zero"
 
 
 @pytest.mark.parametrize(

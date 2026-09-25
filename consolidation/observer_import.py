@@ -139,11 +139,11 @@ def _deel_kolommen_in(headers, source, definitie):
     for rij, groep, c in oos_kandidaten:
         if oos_kolommen.get(groep) != c:
             reden = "Out of Sight count or modifier column: never read."
+            ongelezen.add(c)
         elif groep in gebruikt:
             reden = "Out of Sight correction column: its duration corrects the group's denominator."
         else:
             reden = "Out of Sight column ignored: none of its group's behaviours were exported."
-        if not (oos_kolommen.get(groep) == c and groep in gebruikt):
             ongelezen.add(c)
         excluded.append({**rij, "reden": reden})
     for naam, fases in niet_ondersteund.items():
@@ -178,23 +178,38 @@ def _melding(soort, variabele, melding, test_id="", fase=""):
             "melding": melding}
 
 
+def _is_meetkolom(header):
+    return header == "Duration" or header.startswith(("Total duration ", "Total number "))
+
+
+def _plaats(cell, header):
+    return f"{BLAD}!{cell.coordinate} ({header})"
+
+
+def _ingevuld(cell, header):
+    """De waarde van een verplichte cel; een blanke cel faalt en noemt de cel."""
+    value = cell.value
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError(f"Blank cell {_plaats(cell, header)}")
+    return value
+
+
 def _meetwaarde(cell, header):
     """Een meetcel als seconden of aantal. Observers '-' is een gemeten nul.
 
     Een blanke of niet-numerieke cel faalt en noemt de cel.
     """
     value = cell.value
-    plaats = f"{BLAD}!{cell.coordinate} ({header})"
     if isinstance(value, str) and value.strip() == "-":
         return 0.0
     if value is None or (isinstance(value, str) and not value.strip()):
-        raise ValueError(f"Blank cell {plaats}: every exported cell must hold a number, "
-                         "or '-' for a measured zero.")
+        raise ValueError(f"Blank cell {_plaats(cell, header)}: every exported cell must hold "
+                         "a number, or '-' for a measured zero.")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"Not a number in cell {plaats}: {str(value)[:40]!r}.")
+        raise ValueError(f"Not a number in cell {_plaats(cell, header)}: {str(value)[:40]!r}.")
     if not math.isfinite(value) or value < 0:
-        raise ValueError(f"Invalid value in cell {plaats}: {value!r}; "
-                         "measurements are never negative.")
+        raise ValueError(f"Invalid value in cell {_plaats(cell, header)}: {value!r}; "
+                         "measurements are finite and never negative.")
     return float(value)
 
 
@@ -213,7 +228,7 @@ def _kolommen(blad):
     per_kop = {}
     for cell in blad[1]:
         header = "" if cell.value is None else str(cell.value)
-        if header in VERPLICHTE_KOLOMMEN or header.startswith(("Total duration ", "Total number ")):
+        if header in VERPLICHTE_KOLOMMEN or _is_meetkolom(header):
             per_kop.setdefault(header, []).append(cell)
     for header, cells in per_kop.items():
         if len(cells) > 1:
@@ -251,21 +266,19 @@ def lees_observer(path, deel="1"):
          ongelezen) = _deel_kolommen_in(headers, source, DEFINITIE)
         # Duration en iedere Total-kolom, behalve Out of Sight die niets corrigeert.
         te_lezen = {header: c for header, c in headers.items()
-                    if (header == "Duration" or header.startswith("Total ")) and c not in ongelezen}
+                    if _is_meetkolom(header) and c not in ongelezen}
         definitions = pd.DataFrame(mapping)
         phases, behaviors, invisibility, selection = [], [], [], []
         niet_nul = set()
         for row in range(2, source.max_row + 1):
             if all(cell.value is None for cell in source[row]):
                 continue  # Een lege rij is geen observatie.
-            observation = source.cell(row, headers["Observations"]).value
+            observation, test, owner_flag = (
+                _ingevuld(source.cell(row, headers[h]), h)
+                for h in ("Observations", "Test ID", EIGENAAR_AANWEZIG))
             label_test, phase = fase_uit_observatie(observation)
-            test_cell = source.cell(row, headers["Test ID"])
-            if test_cell.value is None or not str(test_cell.value).strip():
-                raise ValueError(f"Blank cell {BLAD}!{test_cell.coordinate} (Test ID)")
-            test = test_cell.value
             dog = source.cell(row, headers["Dog ID"]).value
-            owner_flag = str(source.cell(row, headers[EIGENAAR_AANWEZIG]).value).lower()
+            owner_flag = str(owner_flag).lower()
             if owner_flag not in {"true", "false"} or (owner_flag == "true") != (phase <= 7):
                 raise ValueError(
                     f"The owner-present flag ({EIGENAAR_AANWEZIG}) contradicts the phase of "

@@ -2697,7 +2697,9 @@ repair (`normaliseer_kop`, which only the copy needed) are gone.
   "Blank cell Results!J4 (<header>)" / "Not a number in cell Results!J4
   (<header>)". This applies to every other `Total …` column and Duration,
   including excluded protocol and First-contact columns, as before. A
-  fully empty row is skipped: it is not an Observation.
+  blank Observations, Test ID or owner-present flag cell fails the same
+  way ("Blank cell Results!C2 (Observations)"). A fully empty row is
+  skipped: it is not an Observation.
 - **Messages:** every `lees_observer` failure and warning is now English,
   and names the column, cell, test or phase. The calculation's own
   (`consolideer`) messages and `bereken_observer`'s notes stay Dutch; they
