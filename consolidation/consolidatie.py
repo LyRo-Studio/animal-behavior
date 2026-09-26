@@ -50,6 +50,11 @@ def fase_in_conditie(fase):
     return ("ME", f"F{fase}") if fase <= 7 else ("ZE", f"F{fase - 8}")
 
 
+def observer_fases(fase_in_conditie_nr):
+    """F3 -> Observer-fases (3, 11): dezelfde fase in ME en in ZE."""
+    return fase_in_conditie_nr, fase_in_conditie_nr + 8
+
+
 def fase_label(fase):
     """Observer-fase 12 -> 'ZE F4'."""
     return " ".join(fase_in_conditie(fase))
@@ -74,17 +79,18 @@ def _alleen_gescoord(frame):
     """`frame` met de meetwaarden van niet-gescoorde fases op leeg (duur 0), zodat
     ze in geen enkele som tellen; `gescoorde_fase` is de fase, of leeg."""
     frame = frame.copy()
-    niet = ~frame.gescoord
+    niet_gescoord = ~frame.gescoord
     for column in ["gedrag_s", "aantal"]:
         if column in frame:
-            frame[column] = frame[column].mask(niet)
-    frame[["fase_duur_s", "out_of_sight_s"]] = frame[["fase_duur_s", "out_of_sight_s"]].mask(niet, 0.0)
-    frame["gescoorde_fase"] = frame.fase.where(~niet)
+            frame[column] = frame[column].mask(niet_gescoord)
+    frame[["fase_duur_s", "out_of_sight_s"]] = frame[["fase_duur_s", "out_of_sight_s"]].mask(
+        niet_gescoord, 0.0)
+    frame["gescoorde_fase"] = frame.fase.where(frame.gescoord)
     return frame
 
 
-def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, tolerantie_s=1e-9,
-                gescoorde_fases=None):
+def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, gescoorde_fases,
+                tolerantie_s=1e-9):
     """Som gedrag / (som fase - som groeps-OOS), voor ieder niveau apart.
 
     `niveaus` koppelt ieder niveau aan zijn fases (`fases`); een niveau met
@@ -95,8 +101,7 @@ def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, toler
     no_visible_time, nooit 0. Een niveau zonder aanwezige fases heeft geen rijen.
 
     `gescoorde_fases` koppelt een groep aan de Observer-fases waarin hij
-    gescoord wordt (Scoring plan); een groep die er niet in staat, wordt in
-    iedere fase gescoord. Een niet-gescoorde fase telt in geen enkele som en
+    gescoord wordt (Scoring plan), voor iedere groep. Een niet-gescoorde fase telt in geen enkele som en
     wordt niet gecontroleerd; zonder gescoorde fase is de waarde leeg met
     status not_scored.
 
@@ -171,10 +176,9 @@ def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, toler
             f"Out of Sight exceeds Duration for test {r.test_id}, Observer phase {r.fase} "
             f"({fase_label(r.fase)}), {r.groep}: {r.out_of_sight_s} s against {r.fase_duur_s} s.")
     visibility["zichtbaar_s"] = visibility.zichtbaar_s.clip(lower=0)
-    gescoorde_fases = gescoorde_fases or {}
-    if not set(gescoorde_fases) <= set(m.groep):
-        raise ValueError("Scored phases for an unknown group.")
-    visibility["gescoord"] = [fase in gescoorde_fases.get(groep, alle_fases)
+    if missing := set(m.groep) - set(gescoorde_fases):
+        raise ValueError(f"No scored phases for group {sorted(missing)[0]}.")
+    visibility["gescoord"] = [fase in gescoorde_fases[groep]
                               for groep, fase in zip(visibility.groep, visibility.fase, strict=True)]
     detail = b.rename(columns={"duur_s": "gedrag_s"}).merge(
         visibility, on=phase_keys + ["groep"], validate="many_to_one")

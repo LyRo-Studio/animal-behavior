@@ -2791,9 +2791,9 @@ to TP, Distance to FP and Location (F1, F3, F6) and Dog following the TP
 (F2, F4, F7) are consolidated. They are no longer excluded as "not yet
 supported", and the `not_yet_supported` warning is gone.
 - **`consolideer` takes `gescoorde_fases`:** {group: Observer phases}.
-  The importer derives it from the definition's `scored_phases`: F3 is
-  Observer phase 3 (ME) and 11 (ZE). A group that isn't listed is scored
-  in every phase.
+  The importer derives it from the definition's `scored_phases` for every
+  dog group: F3 is Observer phase 3 (ME) and 11 (ZE). A consolidated group
+  missing from it is a bug and fails.
 - **An unscored phase enters no sum and is never validated.** A behaviour
   longer than its visible time, or a count without visible time, fails
   only in a scored phase. A nonzero duration or count there gives a

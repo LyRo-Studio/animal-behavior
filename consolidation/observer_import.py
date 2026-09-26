@@ -8,7 +8,8 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
 from consolidation import ethogram_definition
 from consolidation.ethogram_definition import normalise
-from consolidation.consolidatie import consolideer, fase_in_conditie, fase_label, fase_labels
+from consolidation.consolidatie import (consolideer, fase_in_conditie, fase_label, fase_labels,
+                                        observer_fases)
 
 # Welke Behaviour group en Out of Sight bij een kolom horen, komt uit de
 # definitie die uit het ethogram gegenereerd is (ticket #150), nooit uit de
@@ -36,7 +37,7 @@ GEBRUIKTE_FASES = {fase for niveau in NIVEAUS.values() for fase in niveau["fases
 def gescoorde_fases(definitie):
     """{groep: Observer-fases} volgens het Scoring plan: F1-F7 van beide
     Conditions, ME F3 = fase 3 en ZE F3 = fase 11."""
-    return {g["name"]: {f for fase in g["scored_phases"] for f in (fase, fase + 8)}
+    return {g["name"]: {f for fase in g["scored_phases"] for f in observer_fases(fase)}
             for g in definitie["groups"] if not g["excluded"]}
 
 
@@ -322,14 +323,11 @@ def lees_observer(path):
         fout = dogs[dogs.test_id.duplicated(keep=False) | dogs.dog_id.isna()].test_id.unique()
         if len(fout):
             raise ValueError(f"Missing or conflicting Dog ID for test {', '.join(map(str, fout))}.")
-        gebruikte_groepen = set(definitions.groep)
         return {"invoer": {"fases": pd.DataFrame(phases),
                            "gedrag_groepen": definitions[["gedrag", "groep", "meettype"]],
                            "gedragingen": pd.DataFrame(behaviors),
                            "out_of_sight": pd.DataFrame(invisibility),
-                           "gescoorde_fases": {groep: fases for groep, fases
-                                               in gescoorde_fases(DEFINITIE).items()
-                                               if groep in gebruikte_groepen}},
+                           "gescoorde_fases": gescoorde_fases(DEFINITIE)},
                 "definities": definitions, "honden": dogs, "selectie": selected,
                 "uitgesloten": pd.DataFrame(excluded), "meldingen": pd.DataFrame(notes),
                 "beschikbaarheid": _beschikbaarheid(per_gedrag, niet_nul, DEFINITIE)}

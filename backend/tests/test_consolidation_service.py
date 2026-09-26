@@ -969,7 +969,8 @@ def test_a_nonzero_value_in_an_unscored_phase_warns_and_changes_no_result(
             # F2 (unscored) holds more than the phase lasts: never checked,
             # since it never enters a result.
             _DISTANCE_TP: lambda p: 150 if p == 2 else 30 if p in _DISTANCE_SCORED else 0,
-            distance_count: lambda p: 4 if p == 12 else 0,
+            # Owner departure (F8) never counts, and so never warns.
+            distance_count: lambda p: {8: 5, 12: 4}.get(p, 0),
         },
     )
 
@@ -988,8 +989,10 @@ def test_a_nonzero_value_in_an_unscored_phase_warns_and_changes_no_result(
 
 def test_a_zero_state_is_an_ordinary_behaviour_never_subtracted(tmp_path: Path) -> None:
     distance_zero = "Total duration Distance TP zero <No Modifier>"
+    distance_fp_zero = "Total duration Distance FP zero <No Modifier>"
     square_zero = "Total duration Square zero <No Modifier>"
     inner = "Total duration Inner square <No Modifier>"
+    following_zero = "Total duration Following TP zero <No Modifier>"
     result = _consolidate(
         tmp_path,
         {
@@ -997,6 +1000,9 @@ def test_a_zero_state_is_an_ordinary_behaviour_never_subtracted(tmp_path: Path) 
             _DISTANCE_TP: lambda p: 30 if p in _DISTANCE_SCORED else 0,
             square_zero: lambda p: 40 if p in _DISTANCE_SCORED else 0,
             inner: lambda p: 60 if p in _DISTANCE_SCORED else 0,
+            distance_fp_zero: lambda p: 50 if p in _DISTANCE_SCORED else 0,
+            # Observer phases of ME and ZE F2, F4, F7.
+            following_zero: lambda p: 10 if p in (2, 4, 7, 10, 12, 15) else 0,
         },
     )
 
@@ -1006,10 +1012,17 @@ def test_a_zero_state_is_an_ordinary_behaviour_never_subtracted(tmp_path: Path) 
     assert row[_DISTANCE_TP] == pytest.approx(0.30)
     assert row[square_zero] == pytest.approx(0.40)
     assert row[inner] == pytest.approx(0.60)
+    assert row[distance_fp_zero] == pytest.approx(0.50)
+    assert row[following_zero] == pytest.approx(0.10)
     denominators = {
         r["group"]: r for r in _sheet_rows(result, "denominators") if r["level"] == "combined"
     }
-    for group in ("Distance of the dog to TP", "Location of the dog (inner/outer)"):
+    for group in (
+        "Distance of the dog to TP",
+        "Distance of the dog to FP",
+        "Location of the dog (inner/outer)",
+        "Dog following the TP",
+    ):
         assert (denominators[group]["duration_s"], denominators[group]["out_of_sight_s"]) == (
             600,
             0,
