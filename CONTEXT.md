@@ -2635,6 +2635,7 @@ group boundaries are gone, so any behaviour column may be missing.
   so they are not used. Until #153, a group whose scored phases aren't
   F1–F7 is "not yet supported": its columns go to `excluded` with one
   warning per group. None of those groups is in the real export.
+  (Done in #153: those groups are consolidated over their scored phases.)
 - **Header matching:** a header resolves to the longest known behaviour
   name (Ethogram name or alias) it starts with, ignoring case and
   whitespace. The rest is the modifier. A header matching no known name
@@ -2784,6 +2785,37 @@ without visibility at every level.
     and summed clipped per-phase visible times.
   - `details` keeps its Dutch column names until #154.
   - Result sheets freeze their five leading columns.
+
+**Consolidation: the Scoring plan (ticket #153, part of #143):** Distance
+to TP, Distance to FP and Location (F1, F3, F6) and Dog following the TP
+(F2, F4, F7) are consolidated. They are no longer excluded as "not yet
+supported", and the `not_yet_supported` warning is gone.
+- **`consolideer` takes `gescoorde_fases`:** {group: Observer phases}.
+  The importer derives it from the definition's `scored_phases`: F3 is
+  Observer phase 3 (ME) and 11 (ZE). A group that isn't listed is scored
+  in every phase.
+- **An unscored phase enters no sum and is never validated.** A behaviour
+  longer than its visible time, or a count without visible time, fails
+  only in a scored phase. A nonzero duration or count there gives a
+  `not_scored` warning per cell (test, Observer phase, column) and
+  changes no result.
+- **`not_scored` status:** on `per_phase` for an unscored phase. On
+  `with_owner`/`without_owner`/`combined` too, when a test has none of the
+  group's scored phases in that level (e.g. only ME F2 and F4 exported).
+  The value is blank. In `details` and `denominators` the numerator,
+  Duration, Out of Sight, visible time and `phases_used` are blank as well.
+  They describe only what was summed. `phases_used` in `denominators`
+  lists only the group's scored phases.
+- **Unchanged, per test:** `phases_used`, `missing_phases` and `status`
+  (`ok`/`incomplete`) on the aggregate sheets are still judged over all
+  of the level's phases, not per group. A test missing ME F2 is
+  `incomplete` even for Distance, which isn't scored there. `availability`
+  is still judged over every consolidated phase, unscored ones included:
+  it describes what the export holds.
+- **Zero states need no code:** as ordinary behaviours of groups without
+  Out of Sight, they get their own relative duration over Duration.
+- **Verified:** for the synthetic fixture and the real export (neither has
+  these groups' columns), every sheet but README is identical to #152's.
 
 **`assist` vendored (ticket #112) — approved deviation, supersedes Feature
 C's "pinned external dependency" decision:** the cutting-worker image used to

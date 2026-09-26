@@ -8,7 +8,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
 from consolidation import ethogram_definition
 from consolidation.ethogram_definition import normalise
-from consolidation.consolidatie import consolideer, fase_in_conditie, fase_labels
+from consolidation.consolidatie import consolideer, fase_in_conditie, fase_label, fase_labels
 
 # Welke Behaviour group en Out of Sight bij een kolom horen, komt uit de
 # definitie die uit het ethogram gegenereerd is (ticket #150), nooit uit de
@@ -31,6 +31,13 @@ NIVEAUS = {
     "combined": {"fases": ME + ZE},
 }
 GEBRUIKTE_FASES = {fase for niveau in NIVEAUS.values() for fase in niveau["fases"]}
+
+
+def gescoorde_fases(definitie):
+    """{groep: Observer-fases} volgens het Scoring plan: F1-F7 van beide
+    Conditions, ME F3 = fase 3 en ZE F3 = fase 11."""
+    return {g["name"]: {f for fase in g["scored_phases"] for f in (fase, fase + 8)}
+            for g in definitie["groups"] if not g["excluded"]}
 
 
 def fase_uit_observatie(value):
@@ -93,7 +100,6 @@ def _deel_kolommen_in(headers, source, definitie):
     groepen = {g["name"]: g for g in definitie["groups"]}
     mapping, excluded, notes = [], [], []
     oos_kolommen, oos_kandidaten, event_duur, per_gedrag = {}, [], [], {}
-    niet_ondersteund = {}
     for header, c in headers.items():
         if not header.startswith(("Total duration ", "Total number ")):
             continue
@@ -114,10 +120,6 @@ def _deel_kolommen_in(headers, source, definitie):
         elif groep["excluded"] or gedrag["name"] in definitie["excluded_behaviours"]:
             excluded.append({**rij, "reden": groep["excluded"]
                              or definitie["excluded_behaviours"][gedrag["name"]]})
-        elif groep["scored_phases"] != ethogram_definition.ALL_PHASES:
-            niet_ondersteund.setdefault(groep["name"], groep["scored_phases"])
-            excluded.append({**rij, "reden": "Not yet supported: this group is only scored in "
-                             "some phases (Scoring plan)."})
         elif gedrag["kind"] == "Event" and kind == "duur":
             event_duur.append((header, c))
             excluded.append({**rij, "reden": "Event duration: not a meaningful measure; "
@@ -152,10 +154,6 @@ def _deel_kolommen_in(headers, source, definitie):
         else:
             reden = "Out of Sight column ignored: none of its group's behaviours were exported."
         excluded.append({**rij, "reden": reden})
-    for naam, fases in niet_ondersteund.items():
-        notes.append(_melding("not_yet_supported", naam,
-                              f"{naam} is only scored in phases {fases} of each Condition. "
-                              "Its columns are excluded until the Scoring plan is supported."))
     oos_per_groep = {naam: oos_kolommen.get(naam) for naam in gebruikt}
     for m in mapping:
         oc = oos_per_groep[m["groep"]]
@@ -324,10 +322,14 @@ def lees_observer(path):
         fout = dogs[dogs.test_id.duplicated(keep=False) | dogs.dog_id.isna()].test_id.unique()
         if len(fout):
             raise ValueError(f"Missing or conflicting Dog ID for test {', '.join(map(str, fout))}.")
+        gebruikte_groepen = set(definitions.groep)
         return {"invoer": {"fases": pd.DataFrame(phases),
                            "gedrag_groepen": definitions[["gedrag", "groep", "meettype"]],
                            "gedragingen": pd.DataFrame(behaviors),
-                           "out_of_sight": pd.DataFrame(invisibility)},
+                           "out_of_sight": pd.DataFrame(invisibility),
+                           "gescoorde_fases": {groep: fases for groep, fases
+                                               in gescoorde_fases(DEFINITIE).items()
+                                               if groep in gebruikte_groepen}},
                 "definities": definitions, "honden": dogs, "selectie": selected,
                 "uitgesloten": pd.DataFrame(excluded), "meldingen": pd.DataFrame(notes),
                 "beschikbaarheid": _beschikbaarheid(per_gedrag, niet_nul, DEFINITIE)}
@@ -357,7 +359,15 @@ def bereken_observer(bron):
     resultaat["geconsolideerde_waarde"] = resultaat.fractie.where(
         resultaat.meettype == "duur", resultaat.frequentie_per_s)
     notes = bron["meldingen"].to_dict("records")
-    for row in detail[detail.gedrag_s > detail.zichtbaar_s].itertuples():
+    for row in detail[~detail.gescoord & ((detail.gedrag_s > 0) | (detail.aantal > 0))].itertuples():
+        waarde = f"{row.gedrag_s} s" if row.meettype == "duur" else f"{row.aantal:g} times"
+        notes.append(_melding("not_scored", row.gedrag,
+                              f"{row.groep} isn't scored in Observer phase {row.fase} "
+                              f"({fase_label(row.fase)}) under the Scoring plan, but the export "
+                              f"holds {waarde}; the value is left out of every result.",
+                              row.test_id, row.fase))
+    gescoord = detail[detail.gescoord]
+    for row in gescoord[gescoord.gedrag_s > gescoord.zichtbaar_s].itertuples():
         notes.append(_melding("rounding", row.gedrag,
                               f"Behaviour duration {row.gedrag_s} s against visible time "
                               f"{row.zichtbaar_s} s: within the {TOLERANTIE_S} s export tolerance; "
@@ -427,15 +437,19 @@ def schrijf_resultaat(path, bron, berekend, source_path):
         "Total number columns: sum of counts / the same denominator. Unit: occurrences per visible second.",
         "Sums first, then one division: never an average of phase values. combined is never an average of with_owner and without_owner.",
         "Modifier combinations are never summed into a base behaviour; each is only summed over phases.",
-        "A group without an Out of Sight behaviour (Vocalisation) uses the full phase Duration.",
+        "A group without an Out of Sight behaviour (Vocalisation, Distance to TP/FP, Location, Dog following the TP) "
+        "uses the full phase Duration. Zero states (Distance TP zero, Distance FP zero, Square zero, Following TP zero) "
+        "are ordinary behaviours with their own values, never subtracted from the denominator.",
         "Out of Sight counts are not time: only Out of Sight durations are subtracted.",
         "Behaviour groups and Out of Sight corrections come from the Ethogram definition, never from column positions. "
         "Stiffening up belongs to exploration/self-maintenance.",
         "A behaviour Observer didn't export has no result column; an exported column holding 0 is a measured zero.",
         "Events report only a frequency; their duration columns are listed in excluded.",
         "TP/FP protocol behaviours and First contact with TP (a separate F1 measure) are recognised by name and listed in excluded.",
-        "Distance to TP/FP, Location and Dog following are only scored in some phases: until the Scoring plan is supported, "
-        "their columns are listed in excluded, with a warning.",
+        "Scoring plan: Distance to TP/FP and Location are scored only in F1, F3 and F6 of each Condition, Dog following "
+        "the TP only in F2, F4 and F7; every other group in F1-F7. A group's sums use only its scored phases. In an "
+        "unscored phase, or a level without any scored phase, its value is blank with status not_scored (in details and "
+        "denominators); a nonzero exported value there only gives a warning and never enters a result.",
         f"No visible time: visible time of {TOLERANTIE_S} s or less, per phase or summed over a level, gives a blank "
         "value with status no_visible_time (in details and denominators); never 0 and never a division.",
         "Out of Sight above Duration by more than the tolerance fails the upload; within it, visible time is 0 and "
