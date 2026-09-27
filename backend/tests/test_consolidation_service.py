@@ -514,6 +514,7 @@ def test_denominators_explain_every_level_phase_and_group(tmp_path: Path) -> Non
         "out_of_sight_s",
         "visible_s",
         "phases_used",
+        "missing_phases",
         "status",
     ]
     by_key = {(r["level"], r["observer_phase"], r["group"]): r for r in rows}
@@ -528,6 +529,10 @@ def test_denominators_explain_every_level_phase_and_group(tmp_path: Path) -> Non
     vocalisation = by_key[("combined", None, "Vocalisation by the dog")]
     assert (vocalisation["duration_s"], vocalisation["out_of_sight_s"]) == (300, 0)
     assert vocalisation["phases_used"] == "ME F1, ME F2, ZE F1"
+    assert vocalisation["missing_phases"] == (
+        "ME F3, ME F4, ME F5, ME F6, ME F7, ZE F2, ZE F3, ZE F4, ZE F5, ZE F6, ZE F7"
+    )
+    assert by_key[("per_phase", 2, tail)]["missing_phases"] is None
 
 
 def test_stiffening_up_is_corrected_by_the_exploration_out_of_sight(tmp_path: Path) -> None:
@@ -946,13 +951,79 @@ def test_dog_following_uses_only_f2_f4_and_f7_of_each_condition(tmp_path: Path) 
     )
 
 
-def test_a_level_without_scored_phases_is_blank_and_not_scored(tmp_path: Path) -> None:
+def test_a_level_without_any_of_a_groups_scored_phases_is_blank_with_a_warning(
+    tmp_path: Path,
+) -> None:
+    """The group is scored in ME; only its phases are missing from the
+    export, so no_phases rather than not_scored."""
     result = _consolidate(tmp_path, {_DISTANCE_TP: 0, _PANTING: 20}, phases=[2, 4, 9])
 
     assert _result_rows(result, "with_owner")["T901"][_DISTANCE_TP] is None
-    assert _details(result, "with_owner", _DISTANCE_TP)[None]["status"] == "not_scored"
+    assert _details(result, "with_owner", _DISTANCE_TP)[None]["status"] == "no_phases"
+    denominator = next(
+        r
+        for r in _sheet_rows(result, "denominators")
+        if r["level"] == "with_owner" and r["group"] == "Distance of the dog to TP"
+    )
+    assert (denominator["status"], denominator["missing_phases"]) == (
+        "no_phases",
+        "ME F1, ME F3, ME F6",
+    )
     assert _result_rows(result, "with_owner")["T901"][_PANTING] == pytest.approx(0.20)
     assert _result_rows(result, "without_owner")["T901"][_DISTANCE_TP] == 0
+    no_phases = [w for w in _sheet_rows(result, "warnings") if w["type"] == "no_phases"]
+    assert [(w["test_id"], w["variabele"]) for w in no_phases] == [
+        ("T901", "Distance of the dog to TP")
+    ]
+    assert "with_owner" in str(no_phases[0]["melding"])
+
+
+def test_missing_phases_are_judged_against_each_groups_scored_phases(tmp_path: Path) -> None:
+    following = "Total duration Following TP greater than 1 dog length <No Modifier>"
+    # ME F3 is missing: Distance and Panting are scored there, Following isn't.
+    all_but_f3 = [1, 2, 4, 5, 6, 7]
+    result = _consolidate(
+        tmp_path, {_DISTANCE_TP: 0, following: 0, _PANTING: 20}, phases=all_but_f3
+    )
+
+    missing = {
+        r["group"]: r["missing_phases"]
+        for r in _sheet_rows(result, "denominators")
+        if r["level"] == "with_owner"
+    }
+    assert missing == {
+        "Distance of the dog to TP": "ME F3",
+        "Dog following the TP": None,
+        "Vocalisation by the dog": "ME F3",
+    }
+    row = _result_rows(result, "with_owner")["T901"]
+    assert (row["missing_phases"], row["status"]) == ("ME F3", "incomplete")
+
+    # With only Dog following exported, ME F3 counts for nothing.
+    (tmp_path / "following").mkdir()
+    only_following = _consolidate(tmp_path / "following", {following: 0}, phases=all_but_f3)
+    row = _result_rows(only_following, "with_owner")["T901"]
+    assert (row["phases_used"], row["missing_phases"], row["status"]) == (
+        "ME F2, ME F4, ME F7",
+        None,
+        "ok",
+    )
+
+
+def test_availability_ignores_values_in_unscored_phases(tmp_path: Path) -> None:
+    distance_far = "Total duration Distance TP ≥ 1 dog length <No Modifier>"
+    result = _consolidate(
+        tmp_path,
+        {
+            # Nonzero only in F2 and F4, where Distance isn't scored.
+            _DISTANCE_TP: lambda p: 10 if p in (2, 4) else 0,
+            distance_far: lambda p: 10 if p == 3 else 0,
+        },
+    )
+
+    status = {a["behaviour"]: a["status"] for a in _sheet_rows(result, "availability")}
+    assert status["Distance TP < 1 dog length"] == "exported_all_zero"
+    assert status["Distance TP ≥ 1 dog length"] == "exported_nonzero"
 
 
 def test_a_nonzero_value_in_an_unscored_phase_warns_and_changes_no_result(

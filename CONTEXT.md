@@ -2799,23 +2799,36 @@ supported", and the `not_yet_supported` warning is gone.
   only in a scored phase. A nonzero duration or count there gives a
   `not_scored` warning per cell (test, Observer phase, column) and
   changes no result.
-- **`not_scored` status:** on `per_phase` for an unscored phase. On
-  `with_owner`/`without_owner`/`combined` too, when a test has none of the
-  group's scored phases in that level (e.g. only ME F2 and F4 exported).
-  The value is blank. In `details` and `denominators` the numerator,
-  Duration, Out of Sight, visible time and `phases_used` are blank as well.
-  They describe only what was summed. `phases_used` in `denominators`
-  lists only the group's scored phases.
-- **Unchanged, per test:** `phases_used`, `missing_phases` and `status`
-  (`ok`/`incomplete`) on the aggregate sheets are still judged over all
-  of the level's phases, not per group. A test missing ME F2 is
-  `incomplete` even for Distance, which isn't scored there. `availability`
-  is still judged over every consolidated phase, unscored ones included:
-  it describes what the export holds.
+- **`not_scored` and `no_phases`:** an unscored phase on `per_phase` is
+  blank with status `not_scored`. On `with_owner`/`without_owner`/
+  `combined`, a test that has none of a group's scored phases in that
+  level (e.g. only ME F2 and F4 exported, for Distance) is blank with
+  status `no_phases` and gets a `no_phases` warning naming test, group and
+  level (decided with the user: the group *is* scored in that level, only
+  its phases are missing, so not `not_scored`; #143's two blank statuses
+  become three). In `details` and `denominators` the numerator, Duration,
+  Out of Sight, visible time and `phases_used` are blank as well. They
+  describe only what was summed. `phases_used` in `denominators` lists
+  only the group's scored phases.
+- **Missing phases per group** (decided with the user): `denominators`
+  has `missing_phases`: the group's scored phases of the level that the
+  test lacks (blank on `per_phase`). On `with_owner`/`without_owner`/
+  `combined`, the row's `phases_used`, `missing_phases` and `status` only
+  count phases in which at least one exported group is scored. Every
+  real export has groups scored in F1-F7, so this matters only for an
+  export of just Scoring plan groups. A test missing ME F2 with only
+  Distance exported is `ok`. Whether a test has a row at all is still
+  decided by any of the level's phases being present.
+- **`availability` is judged over each group's scored phases** (decided
+  with the user): a column that is nonzero only in unscored phases, so 0
+  in every result, is `exported_all_zero`. Its `not_scored` warnings still
+  list every such cell.
 - **Zero states need no code:** as ordinary behaviours of groups without
   Out of Sight, they get their own relative duration over Duration.
 - **Verified:** for the synthetic fixture and the real export (neither has
-  these groups' columns), every sheet but README is identical to #152's.
+  these groups' columns), every sheet but README is identical to #152's,
+  apart from `denominators`' new `missing_phases` column (empty: both
+  exports have every phase).
 
 **`assist` vendored (ticket #112) — approved deviation, supersedes Feature
 C's "pinned external dependency" decision:** the cutting-worker image used to
