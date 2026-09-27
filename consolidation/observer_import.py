@@ -197,12 +197,13 @@ def _beschikbaarheid(per_gedrag, niet_nul, definitie):
     return pd.DataFrame(rijen)
 
 
-MELDING_KOLOMMEN = ["type", "test_id", "observer_phase", "subject", "message"]
+MELDING_KOLOMMEN = ["type", "test_id", "fase", "variabele", "melding"]
 
 
 def _melding(soort, variabele, melding, test_id=None, fase=None):
-    """Een regel van het blad `warnings`: altijd met een uitleg (`message`)."""
-    return dict(zip(MELDING_KOLOMMEN, [soort, test_id, fase, variabele, melding], strict=True))
+    """Een regel van het blad `warnings`: altijd met een uitleg (`melding`)."""
+    return {"type": soort, "test_id": test_id, "fase": fase, "variabele": variabele,
+            "melding": melding}
 
 
 def _is_meetkolom(header):
@@ -282,6 +283,11 @@ def lees_observer(path):
         headers = _kolommen(source)
         (mapping, excluded, notes, oos_columns, event_duur, per_gedrag,
          ongelezen) = _deel_kolommen_in(headers, source, DEFINITIE)
+        # Ook de kolommen die nooit gelezen worden, staan in `excluded`.
+        excluded = [{"bronkolom": cell.column_letter, "bronkop": str(cell.value),
+                     "reden": "Never read: not needed for any result."}
+                    for cell in source[1]
+                    if cell.value is not None and str(cell.value) not in headers] + excluded
         # Duration en iedere Total-kolom, behalve de Out of Sight-aantallen.
         te_lezen = {header: c for header, c in headers.items()
                     if _is_meetkolom(header) and c not in ongelezen}
@@ -456,10 +462,41 @@ GROEPSKLEUREN = ["D9EAD3", "CFE2F3", "FFF2CC", "F4CCCC", "D9D2E9", "FCE5CD", "D0
 LEIDENDE_KOLOMMEN = 5  # test_id, dog_id en drie kolommen per niveau.
 STATISTIEK = {"duur": "duration", "aantal": "count"}
 WAARDE = {"duur": "fraction of visible time", "aantal": "frequency per visible second"}
+# De Engelse kolomnamen van de diagnostische bladen; intern blijven ze Nederlands.
+KOLOMNAMEN = {
+    "fase": "observer_phase", "groep": "group", "gedrag": "variable", "basisgedrag": "behaviour",
+    "meettype": "statistic", "gedrag_s": "behaviour_duration_s", "aantal": "count",
+    "totale_faseduur_s": "duration_s", "zichtbaar_s": "visible_s", "aanwezige_fases": "phases_used",
+    "ontbrekende_fases": "missing_phases", "fractie": "fraction",
+    "frequentie_per_s": "frequency_per_s", "frequentie_per_min": "frequency_per_min",
+    "gescoorde_fases": "scored_phases", "bronkolom": "source_column",
+    "oos_kolom": "out_of_sight_column", "bronkop": "header", "reden": "reason",
+    "observatie": "observation", "met_eigenaar": "owner_present", "bronrij": "source_row",
+    "variabele": "subject", "melding": "message",
+}
 
 
-def _readme(source_path):
+def _engels(frame, kolommen):
+    """`frame` met Engelse kolomnamen (KOLOMNAMEN), alleen `kolommen`, in die volgorde."""
+    return frame.rename(columns=KOLOMNAMEN).reindex(columns=kolommen)
+
+
+def _scoring_plan():
+    """'Distance of the dog to TP, ...: F1, F3, F6; Dog following the TP: F2, F4, F7'
+    uit de definitie: iedere groep die niet in iedere fase gescoord wordt."""
+    per_fases = {}
+    for g in DEFINITIE["groups"]:
+        if not g["excluded"] and g["scored_phases"] != ethogram_definition.ALL_PHASES:
+            per_fases.setdefault(_fase_reeks(g["scored_phases"]), []).append(g["name"])
+    return "; ".join(f"{', '.join(groepen)}: {fases}" for fases, groepen in per_fases.items())
+
+
+def _uitleg(source_path):
+    """De README: regels, formules, statussen, bron en definitieversie. Wat in de
+    definitie staat (groepen zonder Out of Sight, Scoring plan), komt eruit."""
     definitie_sha = hashlib.sha256(ethogram_definition.DEFINITION_PATH.read_bytes()).hexdigest()
+    zonder_oos = ", ".join(g["name"] for g in DEFINITIE["groups"]
+                           if not g["excluded"] and not g["out_of_sight"])
     return [
         "CONSOLIDATION RESULT: relative behaviour durations and frequencies per dog, at every level, from one "
         "Observer export.",
@@ -494,9 +531,8 @@ def _readme(source_path):
         "Event's duration is not reported.",
         "Visible time = summed Duration - summed Out of Sight duration of the behaviour's own Behaviour group. "
         "Everything is summed over the level's phases first and divided once, never an average of phase values.",
-        "Groups without an Out of Sight behaviour (Vocalisation, Distance to TP, Distance to FP, Location, Dog "
-        "following the TP) use the plain Duration. Zero states (Distance TP zero, Distance FP zero, Square zero, "
-        "Following TP zero) are ordinary behaviours, never subtracted from it.",
+        f"Groups without an Out of Sight behaviour use the plain Duration: {zonder_oos}. Zero states (such as "
+        "Distance TP zero) are ordinary behaviours, never subtracted from it.",
         "Behaviour groups, Out of Sight and State/Event come from the Ethogram definition, never from where a "
         "column sits in the export. Stiffening up belongs to exploration/self-maintenance.",
         "",
@@ -511,8 +547,8 @@ def _readme(source_path):
         "A result cell is blank only for no_visible_time, not_scored or no_phases; a 0 is always a measured zero.",
         "",
         "SCORING PLAN",
-        "Distance to TP, Distance to FP and Location are scored only in F1, F3 and F6 of each Condition; Dog "
-        "following the TP only in F2, F4 and F7; every other group in F1-F7 (see variables: scored_phases).",
+        f"Scored only in some phases of each Condition: {_scoring_plan()}. Every other group is scored in "
+        "F1-F7 (see variables: scored_phases).",
         "A group's sums use only its scored phases. A nonzero exported value in an unscored phase gives a "
         "not_scored warning and never enters a result.",
         "",
@@ -547,9 +583,9 @@ def _readme(source_path):
         "exported_nonzero.",
         "phase_selection: every source row of the export and the levels it was used in (none for phase 8).",
         "warnings: every warning, with its test, Observer phase, subject and message.",
-        "excluded: every column that never enters a result, with the reason: Out of Sight columns, Event "
-        "durations, First contact with TP and the TP/FP protocol behaviours.",
-        "Never read: Fase, Geslacht hond, Observer's container columns and Total number Out of sight columns.",
+        "excluded: every export column that never enters a result, with the reason: Out of Sight columns, Event "
+        "durations, First contact with TP, the TP/FP protocol behaviours, and the columns never read (Fase, "
+        "Geslacht hond, Observer's container columns and Total number Out of sight columns).",
     ]
 
 
@@ -585,51 +621,37 @@ def schrijf_resultaat(path, bron, berekend, source_path):
     definities = bron["definities"]
     volgorde = {gedrag: i for i, gedrag in enumerate(definities.gedrag)}
 
-    variabelen = pd.DataFrame({
-        "variable": definities.gedrag, "behaviour": definities.basisgedrag,
-        "modifier": definities.modifier, "code": definities.code, "group": definities.groep,
-        "out_of_sight": definities.out_of_sight, "state_event": definities.state_event,
-        "statistic": definities.meettype.map(STATISTIEK), "value": definities.meettype.map(WAARDE),
-        "scored_phases": definities.gescoorde_fases, "source_column": definities.bronkolom,
-        "out_of_sight_column": definities.oos_kolom})
-    details = berekend["details"].assign(
+    variabelen = _engels(definities.assign(value=definities.meettype.map(WAARDE),
+                                           meettype=definities.meettype.map(STATISTIEK)), [
+        "variable", "behaviour", "modifier", "code", "group", "out_of_sight", "state_event",
+        "statistic", "value", "scored_phases", "source_column", "out_of_sight_column"])
+    details = _engels(berekend["details"].assign(
         meettype=lambda d: d.meettype.map(STATISTIEK),
         _niveau=lambda d: d.level.map({n: i for i, n in enumerate(NIVEAUS)}),
         _volgorde=lambda d: d.gedrag.map(volgorde),
-    ).sort_values(["_niveau", "test_id", "fase", "_volgorde"], na_position="first").rename(columns={
-        "fase": "observer_phase", "groep": "group", "gedrag": "variable", "basisgedrag": "behaviour",
-        "meettype": "statistic", "gedrag_s": "behaviour_duration_s", "aantal": "count",
-        "totale_faseduur_s": "duration_s", "zichtbaar_s": "visible_s", "aanwezige_fases": "phases_used",
-        "fractie": "fraction", "frequentie_per_s": "frequency_per_s",
-        "frequentie_per_min": "frequency_per_min"})[[
+    ).sort_values(["_niveau", "test_id", "fase", "_volgorde"], na_position="first"), [
         "level", "test_id", "dog_id", "observer_phase", "group", "variable", "behaviour", "modifier",
         "statistic", "behaviour_duration_s", "count", "duration_s", "out_of_sight_s", "visible_s",
-        "phases_used", "fraction", "percentage", "frequency_per_s", "frequency_per_min", "status"]]
-    noemers = berekend["noemers"].rename(columns={
-        "fase": "observer_phase", "groep": "group", "totale_faseduur_s": "duration_s",
-        "zichtbaar_s": "visible_s", "aanwezige_fases": "phases_used",
-        "ontbrekende_fases": "missing_phases"})[[
+        "phases_used", "fraction", "percentage", "frequency_per_s", "frequency_per_min", "status"])
+    noemers = _engels(berekend["noemers"], [
         "level", "test_id", "observer_phase", "group", "duration_s", "out_of_sight_s",
-        "visible_s", "phases_used", "missing_phases", "status"]]
-    selectie = bron["selectie"].rename(columns={
-        "observatie": "observation", "fase": "observer_phase", "met_eigenaar": "owner_present",
-        "bronrij": "source_row"})
-    selectie["levels"] = [", ".join(n for n, c in NIVEAUS.items() if fase in c["fases"]) or None
-                          for fase in selectie.observer_phase]
-    selectie = selectie[["observation", "test_id", "dog_id", "observer_phase", "condition", "phase",
-                         "owner_present", "source_row", "levels"]]
-    uitgesloten = bron["uitgesloten"].rename(columns={
-        "bronkolom": "source_column", "bronkop": "header", "reden": "reason"})
+        "visible_s", "phases_used", "missing_phases", "status"])
+    selectie = bron["selectie"].assign(levels=[
+        ", ".join(n for n, c in NIVEAUS.items() if fase in c["fases"]) or None
+        for fase in bron["selectie"].fase])
+    selectie = _engels(selectie, ["observation", "test_id", "dog_id", "observer_phase", "condition",
+                                  "phase", "owner_present", "source_row", "levels"])
     tables = {
         **berekend["per_niveau"],
-        "README": pd.DataFrame({"README": _readme(source_path)}),
+        "README": pd.DataFrame({"README": _uitleg(source_path)}),
         "details": details,
         "denominators": noemers,
         "variables": variabelen,
         "availability": bron["beschikbaarheid"],
         "phase_selection": selectie,
-        "warnings": berekend["meldingen"],
-        "excluded": uitgesloten.reindex(columns=["source_column", "header", "reason"]),
+        "warnings": _engels(berekend["meldingen"],
+                            ["type", "test_id", "observer_phase", "subject", "message"]),
+        "excluded": _engels(bron["uitgesloten"], ["source_column", "header", "reason"]),
     }
     groep_per_variabele = dict(zip(definities.gedrag, definities.groep, strict=True))
     with pd.ExcelWriter(path, engine="openpyxl") as writer:

@@ -29,6 +29,19 @@ _SYNTHETIC_EXPORT = (
 _RESULT_SHEETS = ["with_owner", "without_owner", "combined"]
 # Every sheet holding result values: a Behaviour group row above the header.
 _LEVEL_SHEETS = ["per_phase", *_RESULT_SHEETS]
+# test_id, dog_id and three level-specific columns lead every result sheet.
+_LEADING_COLUMNS = 5
+_WORKBOOK_SHEETS = [
+    *_LEVEL_SHEETS,
+    "README",
+    "details",
+    "denominators",
+    "variables",
+    "availability",
+    "phase_selection",
+    "warnings",
+    "excluded",
+]
 _ETHOGRAM = Path(__file__).parents[2] / "consolidation" / "20241218_Printbaar ethogram.xlsx"
 _DEFINITION = Path(__file__).parents[2] / "consolidation" / "ethogram_definition.json"
 
@@ -65,18 +78,7 @@ def _phase_rows(path: Path) -> dict[tuple[str, int], dict[str, object]]:
 
 def test_one_upload_produces_every_consolidation_level(synthetic_result: Path) -> None:
     workbook = openpyxl.load_workbook(synthetic_result, read_only=True)
-    assert workbook.sheetnames == [
-        "per_phase",
-        *_RESULT_SHEETS,
-        "README",
-        "details",
-        "denominators",
-        "variables",
-        "availability",
-        "phase_selection",
-        "warnings",
-        "excluded",
-    ]
+    assert workbook.sheetnames == _WORKBOOK_SHEETS
     for sheet in _RESULT_SHEETS:
         assert list(_result_rows(synthetic_result, sheet)) == ["T901", "T902"]
     # One row per test and Observer phase, F8 never.
@@ -181,7 +183,11 @@ def test_every_header_in_the_real_export_layout_resolves_to_one_definition_entry
     ]
 
     used = [v["variable"] for v in _sheet_rows(synthetic_result, "variables")]
-    excluded = [e["header"] for e in _sheet_rows(synthetic_result, "excluded")]
+    excluded = [
+        e["header"]
+        for e in _sheet_rows(synthetic_result, "excluded")
+        if e["header"].startswith("Total ")
+    ]
     assert sorted(used + excluded) == sorted(headers)
     assert not [
         w for w in _sheet_rows(synthetic_result, "warnings") if w["type"] == "unknown_modifier"
@@ -1185,7 +1191,7 @@ def test_result_columns_follow_the_ethogram_then_modifiers_then_duration_before_
         "Total number Tail tucked <No Modifier>",
     ]
     for sheet in _LEVEL_SHEETS:
-        assert list(_sheet_rows(result, sheet)[0])[5:] == expected
+        assert list(_sheet_rows(result, sheet)[0])[_LEADING_COLUMNS:] == expected
     assert [v["variable"] for v in _sheet_rows(result, "variables")] == expected
 
     # A merged, coloured Behaviour group row above the headers.
@@ -1208,7 +1214,8 @@ def test_a_blank_stays_blank_and_a_zero_stays_zero_after_an_excel_round_trip(
     tmp_path: Path,
 ) -> None:
     result = _consolidate(
-        tmp_path, {_TAIL: 0, _OOS_TAIL: lambda p: 100 if p == 2 else 20, _PANTING: 0}
+        tmp_path,
+        {_TAIL: 0, _OOS_TAIL: lambda p: 100 if p == 2 else 20, _PANTING: 0, _DISTANCE_TP: 0},
     )
     workbook = openpyxl.load_workbook(result)
     workbook.save(tmp_path / "round_trip.xlsx")
@@ -1220,6 +1227,10 @@ def test_a_blank_stays_blank_and_a_zero_stays_zero_after_an_excel_round_trip(
     blank = sheet.cell(by_phase[2], tail)
     zero = sheet.cell(by_phase[2], panting)
     assert blank.value is None
+    # Distance to TP isn't scored in F2, but is in F1.
+    distance = header.index(_DISTANCE_TP) + 1
+    assert sheet.cell(by_phase[2], distance).value is None
+    assert sheet.cell(by_phase[1], distance).value == 0
     assert zero.value == 0 and zero.data_type == "n"
     assert sheet.cell(by_phase[1], tail).value == 0
     # Plain fractions: no percentage formatting on any value.
@@ -1230,7 +1241,7 @@ def test_variables_describe_every_result_column(tmp_path: Path) -> None:
     result = _consolidate(tmp_path, {_TAIL: 20, _TAIL_COUNT: 1, _OOS_TAIL: 20, _PANTING: 20})
 
     variables = {v["variable"]: v for v in _sheet_rows(result, "variables")}
-    assert list(variables) == list(_sheet_rows(result, "with_owner")[0])[5:]
+    assert list(variables) == list(_sheet_rows(result, "with_owner")[0])[_LEADING_COLUMNS:]
     assert list(variables[_TAIL]) == [
         "variable",
         "behaviour",
@@ -1339,6 +1350,14 @@ def test_every_warning_and_exclusion_gives_its_reason(synthetic_result: Path) ->
     assert list(excluded[0]) == ["source_column", "header", "reason"]
     assert all(w["type"] and w["subject"] and w["message"] for w in warnings)
     assert all(e["source_column"] and e["header"] and e["reason"] for e in excluded)
+    # Every export column that never enters a result is on record.
+    never_read = {e["header"]: e["reason"] for e in excluded if "Never read" in e["reason"]}
+    assert set(never_read) == {
+        "Independent Variables Statistics Behaviors Modifiers",
+        "Result Containers",
+        "Fase",
+        "Geslacht hond",
+    }
 
 
 @pytest.mark.real_consolidation_fixture
@@ -1373,4 +1392,4 @@ def test_real_observer_export_succeeds(tmp_path: Path) -> None:
     assert output_path.is_file()
     assert output_path.stat().st_size > 0
     result_workbook = openpyxl.load_workbook(output_path, read_only=True)
-    assert {"with_owner", "without_owner", "combined", "details"} <= set(result_workbook.sheetnames)
+    assert result_workbook.sheetnames == _WORKBOOK_SHEETS

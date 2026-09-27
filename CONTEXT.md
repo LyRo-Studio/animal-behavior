@@ -2713,7 +2713,9 @@ computes every level in one call.
     - The source file's name and SHA-256, and the definition version: the
       JSON's own SHA-256, plus the Ethogram it was generated from, with
       that file's SHA-256.
-    - The levels, the formulas, the Scoring plan and the checks.
+    - The levels, the formulas, the Scoring plan and the checks. The
+      groups without Out of Sight and the Scoring plan are written from the
+      definition, so a regenerated definition can't leave them stale.
     - One `<status>: …` line per status (`ok`, `incomplete`,
       `no_visible_time`, `not_scored`, `no_phases`, and `availability`'s
       `not_exported`, `exported_all_zero`, `exported_nonzero`).
@@ -2740,10 +2742,13 @@ computes every level in one call.
     `owner_present`, `source_row` and `levels`.
   - **`warnings`:** `type`, `test_id`, `observer_phase`, `subject`,
     `message`.
-  - **`excluded`:** `source_column`, `header`, `reason`. Every entry has
-    its reason.
+  - **`excluded`:** `source_column`, `header`, `reason`: every export
+    column that never enters a result, including the never-read ones
+    (Fase, Geslacht hond, the container columns). Every entry has its
+    reason.
   - The calculation's internal names (`fase`, `gedrag_s`, `duur`, …) never
-    reach the workbook: `schrijf_resultaat` renames them.
+    reach the workbook: `schrijf_resultaat` renames them through one map
+    (`KOLOMNAMEN`).
 - **Deploy note (#149):** migration 0016 deleted every Consolidation made
   before this format, and dropped the old `condition` column and its enum
   type, irreversibly (`downgrade()` restores only the column). The audit
