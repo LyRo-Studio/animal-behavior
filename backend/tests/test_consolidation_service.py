@@ -514,6 +514,7 @@ def test_denominators_explain_every_level_phase_and_group(tmp_path: Path) -> Non
         "out_of_sight_s",
         "visible_s",
         "phases_used",
+        "missing_phases",
         "status",
     ]
     by_key = {(r["level"], r["observer_phase"], r["group"]): r for r in rows}
@@ -528,6 +529,10 @@ def test_denominators_explain_every_level_phase_and_group(tmp_path: Path) -> Non
     vocalisation = by_key[("combined", None, "Vocalisation by the dog")]
     assert (vocalisation["duration_s"], vocalisation["out_of_sight_s"]) == (300, 0)
     assert vocalisation["phases_used"] == "ME F1, ME F2, ZE F1"
+    assert vocalisation["missing_phases"] == (
+        "ME F3, ME F4, ME F5, ME F6, ME F7, ZE F2, ZE F3, ZE F4, ZE F5, ZE F6, ZE F7"
+    )
+    assert by_key[("per_phase", 2, tail)]["missing_phases"] is None
 
 
 def test_stiffening_up_is_corrected_by_the_exploration_out_of_sight(tmp_path: Path) -> None:
@@ -874,25 +879,226 @@ def test_first_contact_and_protocol_behaviours_are_excluded_by_name(tmp_path: Pa
     assert "protocol" in reasons["Total duration Standing bij TP <No Modifier>"]
 
 
-def test_groups_needing_the_scoring_plan_are_excluded_with_a_warning(tmp_path: Path) -> None:
+# Scoring plan (ticket #153): Distance to TP/FP and Location are scored in
+# F1, F3 and F6 of each Condition, Dog following the TP in F2, F4 and F7.
+_DISTANCE_TP = "Total duration Distance TP < 1 dog length <No Modifier>"
+# Observer phases of ME and ZE F1, F3, F6.
+_DISTANCE_SCORED = (1, 3, 6, 9, 11, 14)
+
+
+def test_a_group_is_blank_and_not_scored_in_phases_its_scoring_plan_leaves_out(
+    tmp_path: Path,
+) -> None:
     result = _consolidate(
         tmp_path,
         {
-            "Total duration Distance TP zero <No Modifier>": 5,
-            "Total duration Panting <No Modifier>": 20,
+            _DISTANCE_TP: lambda p: {1: 10, 3: 20, 6: 30}.get(
+                p, 30 if p in _DISTANCE_SCORED else 0
+            ),
+            _PANTING: 20,
         },
     )
 
-    assert (
-        "Total duration Distance TP zero <No Modifier>"
-        not in (_result_rows(result, "with_owner")["T901"])
+    rows = _phase_rows(result)
+    assert rows[("T901", 2)][_DISTANCE_TP] is None
+    assert _details(result, "per_phase", _DISTANCE_TP)[2]["status"] == "not_scored"
+    assert rows[("T901", 3)][_DISTANCE_TP] == pytest.approx(0.20)
+    assert _details(result, "per_phase", _DISTANCE_TP)[3]["status"] == "ok"
+    # Only the scored phases are summed: ME 60 / 300, not 60 / 700.
+    assert _result_rows(result, "with_owner")["T901"][_DISTANCE_TP] == pytest.approx(0.20)
+    assert _result_rows(result, "without_owner")["T901"][_DISTANCE_TP] == pytest.approx(0.30)
+    assert _result_rows(result, "combined")["T901"][_DISTANCE_TP] == pytest.approx(150 / 600)
+    # Every other group is scored in every phase.
+    assert rows[("T901", 2)][_PANTING] == pytest.approx(0.20)
+    assert "Not yet supported" not in str(_sheet_rows(result, "excluded"))
+
+
+def test_dog_following_uses_only_f2_f4_and_f7_of_each_condition(tmp_path: Path) -> None:
+    following = "Total duration Following TP greater than 1 dog length <No Modifier>"
+    result = _consolidate(
+        tmp_path,
+        {following: lambda p: {2: 10, 4: 20, 7: 30, 10: 40, 12: 40, 15: 40}.get(p, 0)},
     )
-    reasons = {e["bronkop"]: e["reden"] for e in _sheet_rows(result, "excluded")}
-    assert "Not yet supported" in reasons["Total duration Distance TP zero <No Modifier>"]
-    warned = {
-        w["variabele"] for w in _sheet_rows(result, "warnings") if w["type"] == "not_yet_supported"
+
+    rows = _phase_rows(result)
+    assert [p for p in (*range(1, 8), *range(9, 16)) if rows[("T901", p)][following] is None] == [
+        1,
+        3,
+        5,
+        6,
+        9,
+        11,
+        13,
+        14,
+    ]
+    # ME 60 / 300, ZE 120 / 300, combined 180 / 600.
+    assert _result_rows(result, "with_owner")["T901"][following] == pytest.approx(0.20)
+    assert _result_rows(result, "without_owner")["T901"][following] == pytest.approx(0.40)
+    assert _result_rows(result, "combined")["T901"][following] == pytest.approx(0.30)
+    denominators = {
+        (r["level"], r["observer_phase"]): r
+        for r in _sheet_rows(result, "denominators")
+        if r["group"] == "Dog following the TP"
     }
-    assert warned == {"Distance of the dog to TP"}
+    with_owner = denominators[("with_owner", None)]
+    assert (with_owner["duration_s"], with_owner["visible_s"]) == (300, 300)
+    assert with_owner["phases_used"] == "ME F2, ME F4, ME F7"
+    not_scored = denominators[("per_phase", 1)]
+    assert (not_scored["status"], not_scored["visible_s"], not_scored["phases_used"]) == (
+        "not_scored",
+        None,
+        None,
+    )
+
+
+def test_a_level_without_any_of_a_groups_scored_phases_is_blank_with_a_warning(
+    tmp_path: Path,
+) -> None:
+    """The group is scored in ME; only its phases are missing from the
+    export, so no_phases rather than not_scored."""
+    result = _consolidate(tmp_path, {_DISTANCE_TP: 0, _PANTING: 20}, phases=[2, 4, 9])
+
+    assert _result_rows(result, "with_owner")["T901"][_DISTANCE_TP] is None
+    assert _details(result, "with_owner", _DISTANCE_TP)[None]["status"] == "no_phases"
+    denominator = next(
+        r
+        for r in _sheet_rows(result, "denominators")
+        if r["level"] == "with_owner" and r["group"] == "Distance of the dog to TP"
+    )
+    assert (denominator["status"], denominator["missing_phases"]) == (
+        "no_phases",
+        "ME F1, ME F3, ME F6",
+    )
+    assert _result_rows(result, "with_owner")["T901"][_PANTING] == pytest.approx(0.20)
+    assert _result_rows(result, "without_owner")["T901"][_DISTANCE_TP] == 0
+    no_phases = [w for w in _sheet_rows(result, "warnings") if w["type"] == "no_phases"]
+    assert [(w["test_id"], w["variabele"]) for w in no_phases] == [
+        ("T901", "Distance of the dog to TP")
+    ]
+    assert "with_owner" in str(no_phases[0]["melding"])
+
+
+def test_missing_phases_are_judged_against_each_groups_scored_phases(tmp_path: Path) -> None:
+    following = "Total duration Following TP greater than 1 dog length <No Modifier>"
+    # ME F3 is missing: Distance and Panting are scored there, Following isn't.
+    all_but_f3 = [1, 2, 4, 5, 6, 7]
+    result = _consolidate(
+        tmp_path, {_DISTANCE_TP: 0, following: 0, _PANTING: 20}, phases=all_but_f3
+    )
+
+    missing = {
+        r["group"]: r["missing_phases"]
+        for r in _sheet_rows(result, "denominators")
+        if r["level"] == "with_owner"
+    }
+    assert missing == {
+        "Distance of the dog to TP": "ME F3",
+        "Dog following the TP": None,
+        "Vocalisation by the dog": "ME F3",
+    }
+    row = _result_rows(result, "with_owner")["T901"]
+    assert (row["missing_phases"], row["status"]) == ("ME F3", "incomplete")
+
+    # With only Dog following exported, ME F3 counts for nothing.
+    (tmp_path / "following").mkdir()
+    only_following = _consolidate(tmp_path / "following", {following: 0}, phases=all_but_f3)
+    row = _result_rows(only_following, "with_owner")["T901"]
+    assert (row["phases_used"], row["missing_phases"], row["status"]) == (
+        "ME F2, ME F4, ME F7",
+        None,
+        "ok",
+    )
+
+
+def test_availability_ignores_values_in_unscored_phases(tmp_path: Path) -> None:
+    distance_far = "Total duration Distance TP ≥ 1 dog length <No Modifier>"
+    result = _consolidate(
+        tmp_path,
+        {
+            # Nonzero only in F2 and F4, where Distance isn't scored.
+            _DISTANCE_TP: lambda p: 10 if p in (2, 4) else 0,
+            distance_far: lambda p: 10 if p == 3 else 0,
+        },
+    )
+
+    status = {a["behaviour"]: a["status"] for a in _sheet_rows(result, "availability")}
+    assert status["Distance TP < 1 dog length"] == "exported_all_zero"
+    assert status["Distance TP ≥ 1 dog length"] == "exported_nonzero"
+
+
+def test_a_nonzero_value_in_an_unscored_phase_warns_and_changes_no_result(
+    tmp_path: Path,
+) -> None:
+    distance_count = "Total number Distance TP < 1 dog length <No Modifier>"
+    scored_only = {_DISTANCE_TP: lambda p: 30 if p in _DISTANCE_SCORED else 0, distance_count: 0}
+    (tmp_path / "clean").mkdir()
+    (tmp_path / "noisy").mkdir()
+    clean = _consolidate(tmp_path / "clean", scored_only)
+    noisy = _consolidate(
+        tmp_path / "noisy",
+        {
+            # F2 (unscored) holds more than the phase lasts: never checked,
+            # since it never enters a result.
+            _DISTANCE_TP: lambda p: 150 if p == 2 else 30 if p in _DISTANCE_SCORED else 0,
+            # Owner departure (F8) never counts, and so never warns.
+            distance_count: lambda p: {8: 5, 12: 4}.get(p, 0),
+        },
+    )
+
+    for sheet in _RESULT_SHEETS:
+        assert _result_rows(noisy, sheet) == _result_rows(clean, sheet)
+    assert _phase_rows(noisy) == _phase_rows(clean)
+    assert _sheet_rows(noisy, "denominators") == _sheet_rows(clean, "denominators")
+    warned = [w for w in _sheet_rows(noisy, "warnings") if w["type"] == "not_scored"]
+    assert [(w["test_id"], w["fase"], w["variabele"]) for w in warned] == [
+        ("T901", 2, _DISTANCE_TP),
+        ("T901", 12, distance_count),
+    ]
+    assert "ME F2" in str(warned[0]["melding"])
+    assert not [w for w in _sheet_rows(clean, "warnings") if w["type"] == "not_scored"]
+
+
+def test_a_zero_state_is_an_ordinary_behaviour_never_subtracted(tmp_path: Path) -> None:
+    distance_zero = "Total duration Distance TP zero <No Modifier>"
+    distance_fp_zero = "Total duration Distance FP zero <No Modifier>"
+    square_zero = "Total duration Square zero <No Modifier>"
+    inner = "Total duration Inner square <No Modifier>"
+    following_zero = "Total duration Following TP zero <No Modifier>"
+    result = _consolidate(
+        tmp_path,
+        {
+            distance_zero: lambda p: 20 if p in _DISTANCE_SCORED else 0,
+            _DISTANCE_TP: lambda p: 30 if p in _DISTANCE_SCORED else 0,
+            square_zero: lambda p: 40 if p in _DISTANCE_SCORED else 0,
+            inner: lambda p: 60 if p in _DISTANCE_SCORED else 0,
+            distance_fp_zero: lambda p: 50 if p in _DISTANCE_SCORED else 0,
+            # Observer phases of ME and ZE F2, F4, F7.
+            following_zero: lambda p: 10 if p in (2, 4, 7, 10, 12, 15) else 0,
+        },
+    )
+
+    row = _result_rows(result, "combined")["T901"]
+    # Divided by the full Duration, 100 s per scored phase, not by 100 - 20.
+    assert row[distance_zero] == pytest.approx(0.20)
+    assert row[_DISTANCE_TP] == pytest.approx(0.30)
+    assert row[square_zero] == pytest.approx(0.40)
+    assert row[inner] == pytest.approx(0.60)
+    assert row[distance_fp_zero] == pytest.approx(0.50)
+    assert row[following_zero] == pytest.approx(0.10)
+    denominators = {
+        r["group"]: r for r in _sheet_rows(result, "denominators") if r["level"] == "combined"
+    }
+    for group in (
+        "Distance of the dog to TP",
+        "Distance of the dog to FP",
+        "Location of the dog (inner/outer)",
+        "Dog following the TP",
+    ):
+        assert (denominators[group]["duration_s"], denominators[group]["out_of_sight_s"]) == (
+            600,
+            0,
+        )
+        assert denominators[group]["visible_s"] == 600
 
 
 def test_not_exported_and_measured_zero_are_told_apart(tmp_path: Path) -> None:

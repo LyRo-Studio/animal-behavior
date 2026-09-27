@@ -8,7 +8,8 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
 from consolidation import ethogram_definition
 from consolidation.ethogram_definition import normalise
-from consolidation.consolidatie import consolideer, fase_in_conditie, fase_labels
+from consolidation.consolidatie import (consolideer, fase_in_conditie, fase_label, fase_labels,
+                                        observer_fases)
 
 # Welke Behaviour group en Out of Sight bij een kolom horen, komt uit de
 # definitie die uit het ethogram gegenereerd is (ticket #150), nooit uit de
@@ -31,6 +32,13 @@ NIVEAUS = {
     "combined": {"fases": ME + ZE},
 }
 GEBRUIKTE_FASES = {fase for niveau in NIVEAUS.values() for fase in niveau["fases"]}
+
+
+def gescoorde_fases(definitie):
+    """{groep: Observer-fases} volgens het Scoring plan: F1-F7 van beide
+    Conditions, ME F3 = fase 3 en ZE F3 = fase 11."""
+    return {g["name"]: {f for fase in g["scored_phases"] for f in observer_fases(fase)}
+            for g in definitie["groups"] if not g["excluded"]}
 
 
 def fase_uit_observatie(value):
@@ -93,7 +101,6 @@ def _deel_kolommen_in(headers, source, definitie):
     groepen = {g["name"]: g for g in definitie["groups"]}
     mapping, excluded, notes = [], [], []
     oos_kolommen, oos_kandidaten, event_duur, per_gedrag = {}, [], [], {}
-    niet_ondersteund = {}
     for header, c in headers.items():
         if not header.startswith(("Total duration ", "Total number ")):
             continue
@@ -114,10 +121,6 @@ def _deel_kolommen_in(headers, source, definitie):
         elif groep["excluded"] or gedrag["name"] in definitie["excluded_behaviours"]:
             excluded.append({**rij, "reden": groep["excluded"]
                              or definitie["excluded_behaviours"][gedrag["name"]]})
-        elif groep["scored_phases"] != ethogram_definition.ALL_PHASES:
-            niet_ondersteund.setdefault(groep["name"], groep["scored_phases"])
-            excluded.append({**rij, "reden": "Not yet supported: this group is only scored in "
-                             "some phases (Scoring plan)."})
         elif gedrag["kind"] == "Event" and kind == "duur":
             event_duur.append((header, c))
             excluded.append({**rij, "reden": "Event duration: not a meaningful measure; "
@@ -152,10 +155,6 @@ def _deel_kolommen_in(headers, source, definitie):
         else:
             reden = "Out of Sight column ignored: none of its group's behaviours were exported."
         excluded.append({**rij, "reden": reden})
-    for naam, fases in niet_ondersteund.items():
-        notes.append(_melding("not_yet_supported", naam,
-                              f"{naam} is only scored in phases {fases} of each Condition. "
-                              "Its columns are excluded until the Scoring plan is supported."))
     oos_per_groep = {naam: oos_kolommen.get(naam) for naam in gebruikt}
     for m in mapping:
         oc = oos_per_groep[m["groep"]]
@@ -164,7 +163,8 @@ def _deel_kolommen_in(headers, source, definitie):
 
 
 def _beschikbaarheid(per_gedrag, niet_nul, definitie):
-    """Ieder hondgedrag uit het ethogram: niet, met alleen nullen of met waarden geexporteerd."""
+    """Ieder hondgedrag uit het ethogram: niet, met alleen nullen of met waarden
+    geexporteerd, beoordeeld over de gescoorde fases van zijn groep."""
     groepen = {g["name"]: g for g in definitie["groups"]}
     rijen = []
     for gedrag in definitie["behaviours"]:
@@ -266,6 +266,12 @@ def lees_observer(path):
                     if _is_meetkolom(header) and c not in ongelezen}
         definitions = pd.DataFrame(mapping)
         phases, behaviors, invisibility, selection = [], [], [], []
+        # Een waarde telt voor `availability` alleen in een gescoorde fase van de
+        # groep: daarbuiten komt hij in geen enkel resultaat.
+        gescoord = gescoorde_fases(DEFINITIE)
+        groep_van = {b["name"]: b["group"] for b in DEFINITIE["behaviours"]}
+        gescoord_per_kolom = {c: gescoord[groep_van[naam]] for naam, kolommen in per_gedrag.items()
+                              for c in kolommen if groep_van[naam] in gescoord}
         niet_nul = set()
         for row in range(2, source.max_row + 1):
             if all(cell.value is None for cell in source[row]):
@@ -295,7 +301,7 @@ def lees_observer(path):
             waarden = {}
             for header, c in te_lezen.items():
                 waarden[c] = _meetwaarde(source.cell(row, c), header)
-                if waarden[c] > 0:
+                if waarden[c] > 0 and phase in gescoord_per_kolom.get(c, GEBRUIKTE_FASES):
                     niet_nul.add(c)
             phases.append({"test_id": test, "fase": phase, "duur_s": waarden[headers["Duration"]]})
             for group, oc in oos_columns.items():
@@ -327,7 +333,8 @@ def lees_observer(path):
         return {"invoer": {"fases": pd.DataFrame(phases),
                            "gedrag_groepen": definitions[["gedrag", "groep", "meettype"]],
                            "gedragingen": pd.DataFrame(behaviors),
-                           "out_of_sight": pd.DataFrame(invisibility)},
+                           "out_of_sight": pd.DataFrame(invisibility),
+                           "gescoorde_fases": gescoorde_fases(DEFINITIE)},
                 "definities": definitions, "honden": dogs, "selectie": selected,
                 "uitgesloten": pd.DataFrame(excluded), "meldingen": pd.DataFrame(notes),
                 "beschikbaarheid": _beschikbaarheid(per_gedrag, niet_nul, DEFINITIE)}
@@ -357,7 +364,15 @@ def bereken_observer(bron):
     resultaat["geconsolideerde_waarde"] = resultaat.fractie.where(
         resultaat.meettype == "duur", resultaat.frequentie_per_s)
     notes = bron["meldingen"].to_dict("records")
-    for row in detail[detail.gedrag_s > detail.zichtbaar_s].itertuples():
+    for row in detail[~detail.gescoord & ((detail.gedrag_s > 0) | (detail.aantal > 0))].itertuples():
+        waarde = f"{row.gedrag_s} s" if row.meettype == "duur" else f"{row.aantal:g} times"
+        notes.append(_melding("not_scored", row.gedrag,
+                              f"{row.groep} isn't scored in Observer phase {row.fase} "
+                              f"({fase_label(row.fase)}) under the Scoring plan, but the export "
+                              f"holds {waarde}; the value is left out of every result.",
+                              row.test_id, row.fase))
+    gescoord = detail[detail.gescoord]
+    for row in gescoord[gescoord.gedrag_s > gescoord.zichtbaar_s].itertuples():
         notes.append(_melding("rounding", row.gedrag,
                               f"Behaviour duration {row.gedrag_s} s against visible time "
                               f"{row.zichtbaar_s} s: within the {TOLERANTIE_S} s export tolerance; "
@@ -368,8 +383,17 @@ def bereken_observer(bron):
                               f"Out of Sight {row.out_of_sight_s} s against Duration "
                               f"{row.fase_duur_s} s: within the {TOLERANTIE_S} s export tolerance, "
                               "so no visible time.", row.test_id, row.fase))
+    for row in noemers[noemers.status == "no_phases"].itertuples():
+        notes.append(_melding("no_phases", row.groep,
+                              f"{row.test_id} has none of the phases in which {row.groep} is "
+                              f"scored on {row.level} ({row.ontbrekende_fases}), so its values "
+                              "there are blank.", row.test_id))
     variabelen = list(bron["definities"].gedrag)
     aanwezig = bron["invoer"]["fases"].groupby("test_id").fase.agg(set)
+    # Alleen een fase waarin minstens een geexporteerde groep gescoord wordt, telt
+    # voor phases_used, missing_phases en status.
+    relevante_fases = set().union(*(bron["invoer"]["gescoorde_fases"][groep]
+                                    for groep in set(bron["definities"].groep)))
     per_niveau = {}
     for niveau, config in NIVEAUS.items():
         van_niveau = resultaat[resultaat.level == niveau]
@@ -390,9 +414,9 @@ def bereken_observer(bron):
                                       f"{test.test_id} has none of the {niveau} phases, so it has "
                                       f"no row on {niveau}.", test.test_id))
                 continue
-            ontbrekend = set(config["fases"]) - gebruikt
+            ontbrekend = set(config["fases"]) & relevante_fases - gebruikt
             rijen.append({"test_id": test.test_id, "dog_id": test.dog_id,
-                          "phases_used": fase_labels(gebruikt),
+                          "phases_used": fase_labels(gebruikt & relevante_fases) or None,
                           "missing_phases": fase_labels(ontbrekend) or None,
                           "status": "incomplete" if ontbrekend else "ok"})
         kop = pd.DataFrame(rijen, columns=["test_id", "dog_id", "phases_used",
@@ -421,21 +445,27 @@ def schrijf_resultaat(path, bron, berekend, source_path):
         "Phases come from the Observation name; the owner-present flag is checked against them.",
         "with_owner, without_owner, combined: one row per test that has at least one of the level's phases, with "
         "phases_used, missing_phases and status: ok (every phase present) or incomplete (calculated from the phases "
-        "present; the missing ones are listed). A test with none of a level's phases has no row there, with a warning.",
+        "present; the missing ones are listed). Only phases in which at least one exported group is scored count here. "
+        "A test with none of a level's phases has no row there, with a warning.",
         "Every original behaviour and modifier column is kept separately, on every result sheet.",
         "Total duration columns: sum of behaviour duration / (sum of phase Duration - sum of the group's Out of Sight duration). Fractions, not percentages.",
         "Total number columns: sum of counts / the same denominator. Unit: occurrences per visible second.",
         "Sums first, then one division: never an average of phase values. combined is never an average of with_owner and without_owner.",
         "Modifier combinations are never summed into a base behaviour; each is only summed over phases.",
-        "A group without an Out of Sight behaviour (Vocalisation) uses the full phase Duration.",
+        "A group without an Out of Sight behaviour (Vocalisation, Distance to TP/FP, Location, Dog following the TP) "
+        "uses the full phase Duration. Zero states (Distance TP zero, Distance FP zero, Square zero, Following TP zero) "
+        "are ordinary behaviours with their own values, never subtracted from the denominator.",
         "Out of Sight counts are not time: only Out of Sight durations are subtracted.",
         "Behaviour groups and Out of Sight corrections come from the Ethogram definition, never from column positions. "
         "Stiffening up belongs to exploration/self-maintenance.",
         "A behaviour Observer didn't export has no result column; an exported column holding 0 is a measured zero.",
         "Events report only a frequency; their duration columns are listed in excluded.",
         "TP/FP protocol behaviours and First contact with TP (a separate F1 measure) are recognised by name and listed in excluded.",
-        "Distance to TP/FP, Location and Dog following are only scored in some phases: until the Scoring plan is supported, "
-        "their columns are listed in excluded, with a warning.",
+        "Scoring plan: Distance to TP/FP and Location are scored only in F1, F3 and F6 of each Condition, Dog following "
+        "the TP only in F2, F4 and F7; every other group in F1-F7. A group's sums use only its scored phases. In an "
+        "unscored phase its per_phase value is blank with status not_scored (in details and denominators); a nonzero "
+        "exported value there only gives a warning and never enters a result. A test with none of a group's scored "
+        "phases in a level has a blank value there with status no_phases, and a warning.",
         f"No visible time: visible time of {TOLERANTIE_S} s or less, per phase or summed over a level, gives a blank "
         "value with status no_visible_time (in details and denominators); never 0 and never a division.",
         "Out of Sight above Duration by more than the tolerance fails the upload; within it, visible time is 0 and "
@@ -448,10 +478,11 @@ def schrijf_resultaat(path, bron, berekend, source_path):
         "details: every numerator, denominator, percentage, frequency per second and per minute, and status, per level "
         "(fase is the Observer phase, on per_phase rows only).",
         "denominators: Duration, Out of Sight and visible time per level, test, phase (per_phase only) and group, "
-        "with the phases used and the status, so every blank can be explained.",
+        "with the phases used, the group's scored phases missing from the export (missing_phases) and the status, "
+        "so every blank can be explained.",
         "phase_selection: every source row and the levels it was used in; variables: every result column; excluded: columns left out, with the reason.",
         "availability: every dog behaviour in the Ethogram, as not_exported (absent from the export, so absent from the results), "
-        "exported_all_zero (a measured zero) or exported_nonzero.",
+        "exported_all_zero (a measured zero) or exported_nonzero, judged over the phases in which its group is scored.",
         "Diagnostic sheets keep the calculation's own column names: fase = Observer phase number, groep = Behaviour group, "
         "gedrag = result column, basisgedrag = behaviour, duur = duration, aantal = count, zichtbaar = visible time, "
         "fractie = fraction, frequentie = frequency.",
@@ -467,9 +498,10 @@ def schrijf_resultaat(path, bron, berekend, source_path):
                        *(c for c in details.columns if c not in {"level", "test_id", "fase"})]]
     noemers = berekend["noemers"].rename(columns={
         "fase": "observer_phase", "groep": "group", "totale_faseduur_s": "duration_s",
-        "zichtbaar_s": "visible_s", "aanwezige_fases": "phases_used"})[[
+        "zichtbaar_s": "visible_s", "aanwezige_fases": "phases_used",
+        "ontbrekende_fases": "missing_phases"})[[
         "level", "test_id", "observer_phase", "group", "duration_s", "out_of_sight_s",
-        "visible_s", "phases_used", "status"]]
+        "visible_s", "phases_used", "missing_phases", "status"]]
     tables = {
         **berekend["per_niveau"],
         "README": pd.DataFrame({"README": uitleg}),

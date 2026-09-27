@@ -50,6 +50,11 @@ def fase_in_conditie(fase):
     return ("ME", f"F{fase}") if fase <= 7 else ("ZE", f"F{fase - 8}")
 
 
+def observer_fases(fase_in_conditie_nr):
+    """F3 -> Observer-fases (3, 11): dezelfde fase in ME en in ZE."""
+    return fase_in_conditie_nr, fase_in_conditie_nr + 8
+
+
 def fase_label(fase):
     """Observer-fase 12 -> 'ZE F4'."""
     return " ".join(fase_in_conditie(fase))
@@ -65,7 +70,27 @@ def _eerste(frame):
     return next(frame.itertuples(), None)
 
 
-def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, tolerantie_s=1e-9):
+def _gescoorde_labels(fases):
+    """De gescoorde Observer-fases van een groep (NaN = niet gescoord) als labels, of None."""
+    return fase_labels(int(x) for x in fases.dropna()) or None
+
+
+def _alleen_gescoord(frame):
+    """`frame` met de meetwaarden van niet-gescoorde fases op leeg (duur 0), zodat
+    ze in geen enkele som tellen; `gescoorde_fase` is de fase, of leeg."""
+    frame = frame.copy()
+    niet_gescoord = ~frame.gescoord
+    for column in ["gedrag_s", "aantal"]:
+        if column in frame:
+            frame[column] = frame[column].mask(niet_gescoord)
+    frame[["fase_duur_s", "out_of_sight_s"]] = frame[["fase_duur_s", "out_of_sight_s"]].mask(
+        niet_gescoord, 0.0)
+    frame["gescoorde_fase"] = frame.fase.where(frame.gescoord)
+    return frame
+
+
+def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, gescoorde_fases,
+                tolerantie_s=1e-9):
     """Som gedrag / (som fase - som groeps-OOS), voor ieder niveau apart.
 
     `niveaus` koppelt ieder niveau aan zijn fases (`fases`); een niveau met
@@ -74,6 +99,13 @@ def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, toler
     gedrag/groep moet expliciet aanwezig zijn. Zichtbare tijd van hoogstens
     `tolerantie_s` is geen zichtbare tijd: lege waarde met status
     no_visible_time, nooit 0. Een niveau zonder aanwezige fases heeft geen rijen.
+
+    `gescoorde_fases` koppelt een groep aan de Observer-fases waarin hij
+    gescoord wordt (Scoring plan), voor iedere groep. Een niet-gescoorde fase telt in geen enkele som en
+    wordt niet gecontroleerd; zonder gescoorde fase is de waarde leeg met
+    status not_scored (per fase) of no_phases (de gescoorde fases van de
+    groep ontbreken in dat niveau). De noemers noemen per groep de
+    ontbrekende gescoorde fases.
 
     Geeft de sommen (per niveau, test[, fase] en gedrag), de invoer per fase
     en de noemers (per niveau, test[, fase] en groep).
@@ -146,34 +178,47 @@ def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, toler
             f"Out of Sight exceeds Duration for test {r.test_id}, Observer phase {r.fase} "
             f"({fase_label(r.fase)}), {r.groep}: {r.out_of_sight_s} s against {r.fase_duur_s} s.")
     visibility["zichtbaar_s"] = visibility.zichtbaar_s.clip(lower=0)
+    if missing := set(m.groep) - set(gescoorde_fases):
+        raise ValueError(f"No scored phases for group {sorted(missing)[0]}.")
+    visibility["gescoord"] = [fase in gescoorde_fases[groep]
+                              for groep, fase in zip(visibility.groep, visibility.fase, strict=True)]
     detail = b.rename(columns={"duur_s": "gedrag_s"}).merge(
         visibility, on=phase_keys + ["groep"], validate="many_to_one")
-    if (r := _eerste(detail[detail.gedrag_s > detail.zichtbaar_s + tolerantie_s])) is not None:
+    gescoord = detail[detail.gescoord]
+    if (r := _eerste(gescoord[gescoord.gedrag_s > gescoord.zichtbaar_s + tolerantie_s])) is not None:
         raise ValueError(
             f"{r.gedrag} lasts longer than its visible time for test {r.test_id}, Observer phase "
             f"{r.fase} ({fase_label(r.fase)}): {r.gedrag_s} s against {r.zichtbaar_s} s visible.")
-    if (r := _eerste(detail[(detail.zichtbaar_s <= tolerantie_s) & (detail.aantal > 0)])) is not None:
+    if (r := _eerste(gescoord[(gescoord.zichtbaar_s <= tolerantie_s) & (gescoord.aantal > 0)])) is not None:
         raise ValueError(
             f"{r.gedrag} is above 0 without visible time for test {r.test_id}, Observer phase "
             f"{r.fase} ({fase_label(r.fase)}): {r.groep} was out of sight the whole phase.")
+    aanwezig = f.groupby("test_id").fase.agg(set)
     sommen, noemers = [], []
     for naam, niveau in niveaus.items():
         sleutel = phase_keys if niveau.get("per_fase") else ["test_id"]
-        d = detail[detail.fase.isin(niveau["fases"])]
-        v = visibility[visibility.fase.isin(niveau["fases"])]
+        # Alleen gescoorde fases tellen mee; per fase blijft een niet-gescoorde
+        # fase een (lege) rij, zodat not_scored zichtbaar is.
+        d = _alleen_gescoord(detail[detail.fase.isin(niveau["fases"])])
+        v = _alleen_gescoord(visibility[visibility.fase.isin(niveau["fases"])])
         som = d.groupby(sleutel + ["groep", "gedrag", "meettype"], as_index=False).agg(
             gedrag_s=("gedrag_s", lambda x: x.sum(min_count=1)),
             aantal=("aantal", lambda x: x.sum(min_count=1)),
             totale_faseduur_s=("fase_duur_s", "sum"),
             out_of_sight_s=("out_of_sight_s", "sum"),
-            aantal_fases=("fase", "nunique"),
-            aanwezige_fases=("fase", fase_labels),
+            aantal_fases=("gescoorde_fase", "nunique"),
+            aanwezige_fases=("gescoorde_fase", _gescoorde_labels),
         )
         noemer = v.groupby(sleutel + ["groep"], as_index=False).agg(
             totale_faseduur_s=("fase_duur_s", "sum"),
             out_of_sight_s=("out_of_sight_s", "sum"),
-            aanwezige_fases=("fase", fase_labels),
+            aantal_fases=("gescoorde_fase", "nunique"),
+            aanwezige_fases=("gescoorde_fase", _gescoorde_labels),
         )
+        # De gescoorde fases van de groep in dit niveau die de test mist.
+        noemer["ontbrekende_fases"] = None if niveau.get("per_fase") else [
+            fase_labels(set(niveau["fases"]) & gescoorde_fases[groep] - aanwezig[test]) or None
+            for test, groep in zip(noemer.test_id, noemer.groep, strict=True)]
         for frame, lijst in [(som, sommen), (noemer, noemers)]:
             frame.insert(0, "level", naam)
             lijst.append(frame)
@@ -185,6 +230,13 @@ def consolideer(fases, gedrag_groepen, gedragingen, out_of_sight, niveaus, toler
         frame["zichtbaar_s"] = (frame.totale_faseduur_s - frame.out_of_sight_s).clip(lower=0)
         frame["status"] = frame.zichtbaar_s.map(
             lambda x: "ok" if x > tolerantie_s else "no_visible_time")
+        # Geen gescoorde fase: per fase niet gescoord; in een ander niveau
+        # ontbreken de gescoorde fases van de groep in de export.
+        niet_gescoord = frame.aantal_fases == 0
+        frame.loc[niet_gescoord, "status"] = frame.level[niet_gescoord].map(
+            lambda n: "not_scored" if niveaus[n].get("per_fase") else "no_phases")
+        frame.loc[niet_gescoord, ["totale_faseduur_s", "out_of_sight_s", "zichtbaar_s"]] = float("nan")
+    noemers = noemers.drop(columns="aantal_fases")
     zichtbaar = sums.zichtbaar_s.where(sums.status == "ok")
     sums["fractie"] = sums.gedrag_s / zichtbaar
     sums["percentage"] = 100 * sums.fractie
