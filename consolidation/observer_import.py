@@ -5,7 +5,8 @@ import math
 import re
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from consolidation import ethogram_definition
 from consolidation.ethogram_definition import normalise
 from consolidation.consolidatie import (consolideer, fase_in_conditie, fase_label, fase_labels,
@@ -133,7 +134,9 @@ def _deel_kolommen_in(headers, source, definitie):
             mapping.append({"gedrag": header, "basisgedrag": gedrag["name"],
                             "modifier": modifier, "groep": groep["name"], "meettype": kind,
                             "code": gedrag["code"], "state_event": gedrag["kind"],
-                            "bronkolom": letter, "kolomnummer": c})
+                            "out_of_sight": groep["out_of_sight"],
+                            "gescoorde_fases": _fase_reeks(groep["scored_phases"]),
+                            "volgorde": gedrag["order"], "bronkolom": letter, "kolomnummer": c})
     if not mapping:
         raise ValueError("The export has no dog behaviour columns to consolidate.")
     gebruikt = {m["groep"] for m in mapping}
@@ -158,8 +161,23 @@ def _deel_kolommen_in(headers, source, definitie):
     oos_per_groep = {naam: oos_kolommen.get(naam) for naam in gebruikt}
     for m in mapping:
         oc = oos_per_groep[m["groep"]]
-        m["oos_kolom"] = source.cell(1, oc).column_letter if oc else "geen"
+        m["oos_kolom"] = source.cell(1, oc).column_letter if oc else None
+    # Ethogramvolgorde, dan de volgorde waarin de modifiers geexporteerd zijn,
+    # dan duur voor aantal (ticket #154).
+    eerste_kolom = {}
+    for m in mapping:
+        sleutel = (m["basisgedrag"], m["modifier"])
+        eerste_kolom[sleutel] = min(eerste_kolom.get(sleutel, m["kolomnummer"]), m["kolomnummer"])
+    mapping.sort(key=lambda m: (m["volgorde"], eerste_kolom[(m["basisgedrag"], m["modifier"])],
+                                m["meettype"] != "duur"))
     return mapping, excluded, notes, oos_per_groep, event_duur, per_gedrag, ongelezen
+
+
+def _fase_reeks(fases):
+    """[1, 2, ..., 7] -> 'F1-F7'; [1, 3, 6] -> 'F1, F3, F6'."""
+    if fases == ethogram_definition.ALL_PHASES:
+        return "F1-F7"
+    return ", ".join(f"F{fase}" for fase in fases)
 
 
 def _beschikbaarheid(per_gedrag, niet_nul, definitie):
@@ -179,7 +197,11 @@ def _beschikbaarheid(per_gedrag, niet_nul, definitie):
     return pd.DataFrame(rijen)
 
 
-def _melding(soort, variabele, melding, test_id="", fase=""):
+MELDING_KOLOMMEN = ["type", "test_id", "fase", "variabele", "melding"]
+
+
+def _melding(soort, variabele, melding, test_id=None, fase=None):
+    """Een regel van het blad `warnings`: altijd met een uitleg (`melding`)."""
     return {"type": soort, "test_id": test_id, "fase": fase, "variabele": variabele,
             "melding": melding}
 
@@ -261,6 +283,11 @@ def lees_observer(path):
         headers = _kolommen(source)
         (mapping, excluded, notes, oos_columns, event_duur, per_gedrag,
          ongelezen) = _deel_kolommen_in(headers, source, DEFINITIE)
+        # Ook de kolommen die nooit gelezen worden, staan in `excluded`.
+        excluded = [{"bronkolom": cell.column_letter, "bronkop": str(cell.value),
+                     "reden": "Never read: not needed for any result."}
+                    for cell in source[1]
+                    if cell.value is not None and str(cell.value) not in headers] + excluded
         # Duration en iedere Total-kolom, behalve de Out of Sight-aantallen.
         te_lezen = {header: c for header, c in headers.items()
                     if _is_meetkolom(header) and c not in ongelezen}
@@ -336,7 +363,8 @@ def lees_observer(path):
                            "out_of_sight": pd.DataFrame(invisibility),
                            "gescoorde_fases": gescoorde_fases(DEFINITIE)},
                 "definities": definitions, "honden": dogs, "selectie": selected,
-                "uitgesloten": pd.DataFrame(excluded), "meldingen": pd.DataFrame(notes),
+                "uitgesloten": pd.DataFrame(excluded),
+                "meldingen": pd.DataFrame(notes, columns=MELDING_KOLOMMEN),
                 "beschikbaarheid": _beschikbaarheid(per_gedrag, niet_nul, DEFINITIE)}
     finally:
         wb.close()
@@ -425,7 +453,162 @@ def bereken_observer(bron):
                                        how="left", validate="one_to_one")
     noemers = noemers.merge(bron["honden"], on="test_id", validate="many_to_one")
     return {"per_niveau": per_niveau, "details": resultaat, "noemers": noemers,
-            "meldingen": pd.DataFrame(notes)}
+            "meldingen": pd.DataFrame(notes, columns=MELDING_KOLOMMEN)}
+
+
+# Iedere Behaviour group krijgt een eigen kleur in de groepsrij van de resultaatbladen.
+GROEPSKLEUREN = ["D9EAD3", "CFE2F3", "FFF2CC", "F4CCCC", "D9D2E9", "FCE5CD", "D0E0E3",
+                 "EAD1DC", "C9DAF8", "F9CB9C", "E6E6E6"]
+LEIDENDE_KOLOMMEN = 5  # test_id, dog_id en drie kolommen per niveau.
+STATISTIEK = {"duur": "duration", "aantal": "count"}
+WAARDE = {"duur": "fraction of visible time", "aantal": "frequency per visible second"}
+# De Engelse kolomnamen van de diagnostische bladen; intern blijven ze Nederlands.
+KOLOMNAMEN = {
+    "fase": "observer_phase", "groep": "group", "gedrag": "variable", "basisgedrag": "behaviour",
+    "meettype": "statistic", "gedrag_s": "behaviour_duration_s", "aantal": "count",
+    "totale_faseduur_s": "duration_s", "zichtbaar_s": "visible_s", "aanwezige_fases": "phases_used",
+    "ontbrekende_fases": "missing_phases", "fractie": "fraction",
+    "frequentie_per_s": "frequency_per_s", "frequentie_per_min": "frequency_per_min",
+    "gescoorde_fases": "scored_phases", "bronkolom": "source_column",
+    "oos_kolom": "out_of_sight_column", "bronkop": "header", "reden": "reason",
+    "observatie": "observation", "met_eigenaar": "owner_present", "bronrij": "source_row",
+    "variabele": "subject", "melding": "message",
+}
+
+
+def _engels(frame, kolommen):
+    """`frame` met Engelse kolomnamen (KOLOMNAMEN), alleen `kolommen`, in die volgorde."""
+    return frame.rename(columns=KOLOMNAMEN).reindex(columns=kolommen)
+
+
+def _scoring_plan():
+    """'Distance of the dog to TP, ...: F1, F3, F6; Dog following the TP: F2, F4, F7'
+    uit de definitie: iedere groep die niet in iedere fase gescoord wordt."""
+    per_fases = {}
+    for g in DEFINITIE["groups"]:
+        if not g["excluded"] and g["scored_phases"] != ethogram_definition.ALL_PHASES:
+            per_fases.setdefault(_fase_reeks(g["scored_phases"]), []).append(g["name"])
+    return "; ".join(f"{', '.join(groepen)}: {fases}" for fases, groepen in per_fases.items())
+
+
+def _uitleg(source_path):
+    """De README: regels, formules, statussen, bron en definitieversie. Wat in de
+    definitie staat (groepen zonder Out of Sight, Scoring plan), komt eruit."""
+    definitie_sha = hashlib.sha256(ethogram_definition.DEFINITION_PATH.read_bytes()).hexdigest()
+    zonder_oos = ", ".join(g["name"] for g in DEFINITIE["groups"]
+                           if not g["excluded"] and not g["out_of_sight"])
+    return [
+        "CONSOLIDATION RESULT: relative behaviour durations and frequencies per dog, at every level, from one "
+        "Observer export.",
+        f"Source file: {Path(source_path).name}",
+        f"Source SHA-256: {hashlib.sha256(Path(source_path).read_bytes()).hexdigest()}",
+        f"Ethogram definition: {ethogram_definition.DEFINITION_PATH.name} (SHA-256 {definitie_sha}), generated "
+        f"from {DEFINITIE['ethogram']} (SHA-256 {DEFINITIE['ethogram_sha256']}).",
+        "Only the export's raw Results sheet is read, exactly as Observer produces it. The source file is never "
+        "changed.",
+        "",
+        "LEVELS",
+        "per_phase: every Observer phase on its own: 1-7 (ME F1-F7) and 9-15 (ZE F1-F7).",
+        "with_owner: Observer phases 1-7 together (ME, the owner is present).",
+        "without_owner: Observer phases 9-15 together (ZE, the owner is absent).",
+        "combined: Observer phases 1-7 and 9-15 together. Never an average of with_owner and without_owner.",
+        "Owner departure (Observer phase 8) never counts. The phase comes from the Observation name "
+        "(..._F12); the owner-present flag must be True exactly for phases 1-7.",
+        "",
+        "RESULT SHEETS (per_phase, with_owner, without_owner, combined)",
+        "per_phase: one row per test and Observer phase, led by test_id, dog_id, observer_phase, condition (ME/ZE) "
+        "and phase (F1-F7).",
+        "with_owner, without_owner, combined: one row per test, led by test_id, dog_id, phases_used, missing_phases "
+        "and status (ok or incomplete). Only phases in which at least one exported group is scored count there. A "
+        "test with none of a level's phases has no row on that level, with a no_phases warning.",
+        "Row 1 names each column's Behaviour group; row 2 holds the exact Observer headers. Columns follow the "
+        "Ethogram's order, then the export's modifier order, then duration before count.",
+        "Every exported behaviour and modifier combination is its own column; none is summed into a base "
+        "behaviour, and <No Modifier> is not a total.",
+        "Total duration columns: relative duration = summed behaviour duration / visible time, as a fraction "
+        "(0.25, not 25%). States only.",
+        "Total number columns: frequency = summed count / visible time, per visible second. States and Events; an "
+        "Event's duration is not reported.",
+        "Visible time = summed Duration - summed Out of Sight duration of the behaviour's own Behaviour group. "
+        "Everything is summed over the level's phases first and divided once, never an average of phase values.",
+        f"Groups without an Out of Sight behaviour use the plain Duration: {zonder_oos}. Zero states (such as "
+        "Distance TP zero) are ordinary behaviours, never subtracted from it.",
+        "Behaviour groups, Out of Sight and State/Event come from the Ethogram definition, never from where a "
+        "column sits in the export. Stiffening up belongs to exploration/self-maintenance.",
+        "",
+        "STATUS (row status on the result sheets; value status in details and denominators)",
+        "ok: calculated from every phase that counts.",
+        "incomplete: calculated from the phases present; missing_phases lists the others.",
+        f"no_visible_time: visible time of {TOLERANTIE_S} s or less. The value is blank: never 0 and never a "
+        "division.",
+        "not_scored: the Scoring plan doesn't score the group in this phase (per_phase only). The value is blank.",
+        "no_phases: the test has none of the phases in which the group is scored on this level. The value is "
+        "blank.",
+        "A result cell is blank only for no_visible_time, not_scored or no_phases; a 0 is always a measured zero.",
+        "",
+        "SCORING PLAN",
+        f"Scored only in some phases of each Condition: {_scoring_plan()}. Every other group is scored in "
+        "F1-F7 (see variables: scored_phases).",
+        "A group's sums use only its scored phases. A nonzero exported value in an unscored phase gives a "
+        "not_scored warning and never enters a result.",
+        "",
+        "NOT EXPORTED, MEASURED ZERO AND BLANK",
+        "A behaviour Observer didn't export has no result column. An exported cell holding 0 or Observer's '-' is "
+        "a measured zero, and a result of 0 shows 0.",
+        "not_exported: (availability) absent from the export, so absent from the results.",
+        "exported_all_zero: (availability) exported, and 0 in every phase in which its group is scored.",
+        "exported_nonzero: (availability) exported, with a value above 0 in a scored phase.",
+        "",
+        "CHECKS",
+        "The upload fails, naming the column, cell, test or phase, for: a missing required column or sheet, a "
+        "blank or non-numeric cell, an unknown behaviour, a missing Out of Sight column for an exported group, a "
+        "duplicate test and phase, a malformed Observation name or a phase outside 1-15, an owner-present flag "
+        "that contradicts the phase, a missing or conflicting Dog ID, Out of Sight above Duration, a behaviour "
+        "longer than its visible time, or a count without visible time (the last two in scored phases only).",
+        f"Observer rounds to {TOLERANTIE_S} s: a difference within that tolerance keeps the values and gives a "
+        "rounding warning.",
+        "Only a warning: rounding, a Test ID typo in the Observation name (the Test ID column is used), an "
+        "unknown modifier (its values are kept), a nonzero Event duration, a nonzero value in an unscored phase, "
+        "and a test or group without phases on a level.",
+        "",
+        "DIAGNOSTIC SHEETS",
+        "details: every value of every level (level column): numerator (behaviour_duration_s or count), "
+        "duration_s, out_of_sight_s, visible_s, fraction, percentage, frequency_per_s, frequency_per_min and "
+        "status. observer_phase is set on per_phase rows only.",
+        "denominators: duration_s, out_of_sight_s and visible_s per level, test, phase (per_phase only) and "
+        "group, with the phases used, the group's scored phases the test lacks (missing_phases) and the status.",
+        "variables: every result column: exact Observer header, behaviour, modifier, code, group, its Out of "
+        "Sight, State/Event, statistic, what the value measures, scored phases and source columns.",
+        "availability: every dog behaviour in the Ethogram, as not_exported, exported_all_zero or "
+        "exported_nonzero.",
+        "phase_selection: every source row of the export and the levels it was used in (none for phase 8).",
+        "warnings: every warning, with its test, Observer phase, subject and message.",
+        "excluded: every export column that never enters a result, with the reason: Out of Sight columns, Event "
+        "durations, First contact with TP, the TP/FP protocol behaviours, and the columns never read (Fase, "
+        "Geslacht hond, Observer's container columns and Total number Out of sight columns).",
+    ]
+
+
+def _groepsrij(ws, kolommen, groep_per_variabele):
+    """Rij 1 van een resultaatblad: de Behaviour group boven zijn kolommen,
+    samengevoegd en gekleurd."""
+    kleuren = {g["name"]: GROEPSKLEUREN[i % len(GROEPSKLEUREN)]
+               for i, g in enumerate(DEFINITIE["groups"])}
+    start = LEIDENDE_KOLOMMEN + 1
+    variabelen = list(kolommen)[LEIDENDE_KOLOMMEN:] + [None]
+    for i in range(1, len(variabelen)):
+        groep = groep_per_variabele[variabelen[i - 1]]
+        if variabelen[i] is not None and groep_per_variabele[variabelen[i]] == groep:
+            continue
+        einde = LEIDENDE_KOLOMMEN + i
+        cell = ws.cell(1, start, groep)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center")
+        for c in range(start, einde + 1):
+            ws.cell(1, c).fill = PatternFill("solid", fgColor=kleuren[groep])
+        if einde > start:
+            ws.merge_cells(start_row=1, start_column=start, end_row=1, end_column=einde)
+        start = einde + 1
 
 
 def schrijf_resultaat(path, bron, berekend, source_path):
@@ -435,95 +618,59 @@ def schrijf_resultaat(path, bron, berekend, source_path):
     """
     path = Path(path)
     path.parent.mkdir(exist_ok=True)
-    uitleg = [
-        "CONSOLIDATION RESULT - every level from one Observer export.",
-        "per_phase: every Observer phase 1-7 and 9-15 on its own; one row per test and phase, with observer_phase, "
-        "condition (ME/ZE) and phase (F1-F7).",
-        "with_owner: Observer phases 1-7 (ME, the owner is present).",
-        "without_owner: Observer phases 9-15 (ZE, the owner is absent).",
-        "combined: Observer phases 1-7 and 9-15 together. Owner departure (phase 8) never counts.",
-        "Phases come from the Observation name; the owner-present flag is checked against them.",
-        "with_owner, without_owner, combined: one row per test that has at least one of the level's phases, with "
-        "phases_used, missing_phases and status: ok (every phase present) or incomplete (calculated from the phases "
-        "present; the missing ones are listed). Only phases in which at least one exported group is scored count here. "
-        "A test with none of a level's phases has no row there, with a warning.",
-        "Every original behaviour and modifier column is kept separately, on every result sheet.",
-        "Total duration columns: sum of behaviour duration / (sum of phase Duration - sum of the group's Out of Sight duration). Fractions, not percentages.",
-        "Total number columns: sum of counts / the same denominator. Unit: occurrences per visible second.",
-        "Sums first, then one division: never an average of phase values. combined is never an average of with_owner and without_owner.",
-        "Modifier combinations are never summed into a base behaviour; each is only summed over phases.",
-        "A group without an Out of Sight behaviour (Vocalisation, Distance to TP/FP, Location, Dog following the TP) "
-        "uses the full phase Duration. Zero states (Distance TP zero, Distance FP zero, Square zero, Following TP zero) "
-        "are ordinary behaviours with their own values, never subtracted from the denominator.",
-        "Out of Sight counts are not time: only Out of Sight durations are subtracted.",
-        "Behaviour groups and Out of Sight corrections come from the Ethogram definition, never from column positions. "
-        "Stiffening up belongs to exploration/self-maintenance.",
-        "A behaviour Observer didn't export has no result column; an exported column holding 0 is a measured zero.",
-        "Events report only a frequency; their duration columns are listed in excluded.",
-        "TP/FP protocol behaviours and First contact with TP (a separate F1 measure) are recognised by name and listed in excluded.",
-        "Scoring plan: Distance to TP/FP and Location are scored only in F1, F3 and F6 of each Condition, Dog following "
-        "the TP only in F2, F4 and F7; every other group in F1-F7. A group's sums use only its scored phases. In an "
-        "unscored phase its per_phase value is blank with status not_scored (in details and denominators); a nonzero "
-        "exported value there only gives a warning and never enters a result. A test with none of a group's scored "
-        "phases in a level has a blank value there with status no_phases, and a warning.",
-        f"No visible time: visible time of {TOLERANTIE_S} s or less, per phase or summed over a level, gives a blank "
-        "value with status no_visible_time (in details and denominators); never 0 and never a division.",
-        "Out of Sight above Duration by more than the tolerance fails the upload; within it, visible time is 0 and "
-        "there is a rounding warning.",
-        "Only the export's raw Results sheet is read, exactly as Observer produces it. The source file is not changed.",
-        "Observer's '-' is a measured 0. A blank or non-numeric cell in an exported column fails the upload.",
-        "Never read: Fase, Geslacht hond, Observer's container columns, Total number Out of sight columns "
-        "and the owner-departure (phase 8) rows. Every other exported cell is checked, used or not.",
-        f"Maximum tolerance on individual times: {TOLERANTIE_S} s for export rounding; deviations are listed in warnings.",
-        "details: every numerator, denominator, percentage, frequency per second and per minute, and status, per level "
-        "(fase is the Observer phase, on per_phase rows only).",
-        "denominators: Duration, Out of Sight and visible time per level, test, phase (per_phase only) and group, "
-        "with the phases used, the group's scored phases missing from the export (missing_phases) and the status, "
-        "so every blank can be explained.",
-        "phase_selection: every source row and the levels it was used in; variables: every result column; excluded: columns left out, with the reason.",
-        "availability: every dog behaviour in the Ethogram, as not_exported (absent from the export, so absent from the results), "
-        "exported_all_zero (a measured zero) or exported_nonzero, judged over the phases in which its group is scored.",
-        "Diagnostic sheets keep the calculation's own column names: fase = Observer phase number, groep = Behaviour group, "
-        "gedrag = result column, basisgedrag = behaviour, duur = duration, aantal = count, zichtbaar = visible time, "
-        "fractie = fraction, frequentie = frequency.",
-        f"Source: {Path(source_path).name}",
-        f"SHA256 source: {hashlib.sha256(Path(source_path).read_bytes()).hexdigest()}",
-    ]
+    definities = bron["definities"]
+    volgorde = {gedrag: i for i, gedrag in enumerate(definities.gedrag)}
 
-    selectie = bron["selectie"].drop(columns="opgenomen")
-    selectie["levels"] = [", ".join(n for n, c in NIVEAUS.items() if fase in c["fases"]) or None
-                          for fase in selectie.fase]
-    details = berekend["details"]
-    details = details[["level", "test_id", "fase",
-                       *(c for c in details.columns if c not in {"level", "test_id", "fase"})]]
-    noemers = berekend["noemers"].rename(columns={
-        "fase": "observer_phase", "groep": "group", "totale_faseduur_s": "duration_s",
-        "zichtbaar_s": "visible_s", "aanwezige_fases": "phases_used",
-        "ontbrekende_fases": "missing_phases"})[[
+    variabelen = _engels(definities.assign(value=definities.meettype.map(WAARDE),
+                                           meettype=definities.meettype.map(STATISTIEK)), [
+        "variable", "behaviour", "modifier", "code", "group", "out_of_sight", "state_event",
+        "statistic", "value", "scored_phases", "source_column", "out_of_sight_column"])
+    details = _engels(berekend["details"].assign(
+        meettype=lambda d: d.meettype.map(STATISTIEK),
+        _niveau=lambda d: d.level.map({n: i for i, n in enumerate(NIVEAUS)}),
+        _volgorde=lambda d: d.gedrag.map(volgorde),
+    ).sort_values(["_niveau", "test_id", "fase", "_volgorde"], na_position="first"), [
+        "level", "test_id", "dog_id", "observer_phase", "group", "variable", "behaviour", "modifier",
+        "statistic", "behaviour_duration_s", "count", "duration_s", "out_of_sight_s", "visible_s",
+        "phases_used", "fraction", "percentage", "frequency_per_s", "frequency_per_min", "status"])
+    noemers = _engels(berekend["noemers"], [
         "level", "test_id", "observer_phase", "group", "duration_s", "out_of_sight_s",
-        "visible_s", "phases_used", "missing_phases", "status"]]
+        "visible_s", "phases_used", "missing_phases", "status"])
+    selectie = bron["selectie"].assign(levels=[
+        ", ".join(n for n, c in NIVEAUS.items() if fase in c["fases"]) or None
+        for fase in bron["selectie"].fase])
+    selectie = _engels(selectie, ["observation", "test_id", "dog_id", "observer_phase", "condition",
+                                  "phase", "owner_present", "source_row", "levels"])
     tables = {
         **berekend["per_niveau"],
-        "README": pd.DataFrame({"README": uitleg}),
+        "README": pd.DataFrame({"README": _uitleg(source_path)}),
         "details": details,
         "denominators": noemers,
-        "warnings": berekend["meldingen"],
-        "variables": bron["definities"].drop(columns="kolomnummer"),
+        "variables": variabelen,
         "availability": bron["beschikbaarheid"],
         "phase_selection": selectie,
-        "excluded": bron["uitgesloten"],
+        "warnings": _engels(berekend["meldingen"],
+                            ["type", "test_id", "observer_phase", "subject", "message"]),
+        "excluded": _engels(bron["uitgesloten"], ["source_column", "header", "reason"]),
     }
+    groep_per_variabele = dict(zip(definities.gedrag, definities.groep, strict=True))
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for name, table in tables.items():
-            table.to_excel(writer, sheet_name=name, index=False)
+            # Een resultaatblad heeft de groepsrij boven zijn kopregel.
+            kopregel = 2 if name in NIVEAUS else 1
+            table.to_excel(writer, sheet_name=name, index=False, startrow=kopregel - 1)
             ws = writer.book[name]
-            # De vijf leidende kolommen van ieder resultaatblad blijven zichtbaar.
-            ws.freeze_panes = "F2" if name in NIVEAUS else "A2"
-            ws.auto_filter.ref = ws.dimensions
-            for cell in ws[1]:
+            # De leidende kolommen van ieder resultaatblad blijven zichtbaar.
+            ws.freeze_panes = (f"{get_column_letter(LEIDENDE_KOLOMMEN + 1)}{kopregel + 1}"
+                               if name in NIVEAUS else "A2")
+            ws.auto_filter.ref = (f"A{kopregel}:{get_column_letter(ws.max_column)}"
+                                  f"{max(ws.max_row, kopregel)}")
+            for cell in ws[kopregel]:
                 cell.font = Font(bold=True, color="FFFFFF")
                 cell.fill = PatternFill("solid", fgColor="245447")
                 ws.column_dimensions[cell.column_letter].width = 24
+            if name in NIVEAUS:
+                _groepsrij(ws, table.columns, groep_per_variabele)
             if name == "README":
                 ws.column_dimensions["A"].width = 140
     return path
