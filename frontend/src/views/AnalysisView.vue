@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
+import { usePolledJob } from '@/composables/usePolledJob'
 import {
   AnalysisNotFoundError,
   cancelAnalysis,
@@ -13,72 +14,22 @@ import { triggerBrowserDownload } from '@/utils/download'
 import { breakdownByTest, hasTestBreakdown } from '@/utils/testBreakdown'
 
 const route = useRoute()
-const analysisId = Number(route.params.id)
-
-const job = ref<AnalysisJob | null>(null)
-const isLoading = ref(true)
-const loadError = ref<string | null>(null)
-const notFound = ref(false)
+const analysisId = computed(() => Number(route.params.id))
 
 // Frequent enough that "2/5 videos, current: ..." feels live (issue #52's
-// acceptance criteria) without hammering the backend — same shape as
-// StatusView.vue's own setTimeout-based poll/retry loop.
-const POLL_INTERVAL_MS = 2000
-let pollTimer: ReturnType<typeof setTimeout> | undefined
-
-// Bumped whenever a *newer* request should make any earlier one's eventual
-// resolution irrelevant: the component unmounting mid-fetch (an in-flight
-// loadJob() otherwise has no timer yet for onUnmounted to clear, and would
-// schedule an uncancellable next poll once it resolves), or cancel()
-// succeeding while a poll happens to be in flight (which would otherwise
-// overwrite the just-cancelled job with a stale queued/running snapshot and
-// revive polling). Same purpose as MediaBrowserView.vue's
-// analysisToken/searchToken guards against out-of-order responses.
-let requestGeneration = 0
-
-async function loadJob() {
-  const generation = requestGeneration
-
-  try {
-    const result = await getAnalysis(analysisId)
-    if (generation !== requestGeneration) return
-    job.value = result
-    loadError.value = null
-    // Only reschedule while there's still something to watch for — a
-    // terminal or cancelled job never changes again, so polling it forever
-    // would just be wasted requests.
-    if (result.status === 'queued' || result.status === 'running') {
-      pollTimer = setTimeout(loadJob, POLL_INTERVAL_MS)
-    }
-  } catch (err) {
-    if (generation !== requestGeneration) return
-    if (err instanceof AnalysisNotFoundError) {
-      // Non-transient — there is no such job id, so there's nothing to
-      // retry (unlike the generic-error branch below).
-      notFound.value = true
-    } else {
-      loadError.value = err instanceof Error ? err.message : 'Failed to load analysis.'
-      pollTimer = setTimeout(loadJob, POLL_INTERVAL_MS)
-    }
-  } finally {
-    if (generation === requestGeneration) {
-      isLoading.value = false
-    }
-  }
-}
-
-onMounted(() => {
-  if (Number.isNaN(analysisId)) {
-    notFound.value = true
-    isLoading.value = false
-    return
-  }
-  loadJob()
-})
-
-onUnmounted(() => {
-  requestGeneration++
-  clearTimeout(pollTimer)
+// acceptance criteria) without hammering the backend.
+const {
+  job,
+  isLoading,
+  loadError,
+  notFound,
+  replace: showJob,
+} = usePolledJob<AnalysisJob>({
+  id: () => analysisId.value,
+  load: getAnalysis,
+  isActive: (current) => current.status === 'queued' || current.status === 'running',
+  isNotFound: (err) => err instanceof AnalysisNotFoundError,
+  fallbackError: 'Failed to load analysis.',
 })
 
 // "Processed" (not just succeeded) so the counter reads as "how far
@@ -124,12 +75,9 @@ async function cancel() {
   isCancelling.value = true
   cancelError.value = null
   try {
-    job.value = await cancelAnalysis(job.value.id)
-    // The job just left {queued, running} for good — no more polling
-    // needed, and any poll response still in flight from before this
-    // resolved must not be allowed to overwrite it (see requestGeneration).
-    requestGeneration++
-    clearTimeout(pollTimer)
+    // The job just left {queued, running} for good: no more polling, and a
+    // poll still in flight from before this resolved mustn't overwrite it.
+    showJob(await cancelAnalysis(job.value.id))
   } catch (err) {
     cancelError.value = err instanceof Error ? err.message : 'Failed to cancel analysis.'
   } finally {
@@ -139,6 +87,12 @@ async function cancel() {
 
 const isDownloading = ref(false)
 const downloadError = ref<string | null>(null)
+
+// A cancel/download error belongs to the analysis it was about.
+watch(analysisId, () => {
+  cancelError.value = null
+  downloadError.value = null
+})
 
 async function downloadReport() {
   if (!job.value || isDownloading.value) return

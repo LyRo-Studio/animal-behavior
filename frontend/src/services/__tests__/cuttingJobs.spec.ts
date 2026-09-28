@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  CuttingJobNotFoundError,
   forgetSourceVideoUpload,
   getCuttingJob,
+  listCuttingJobs,
   submitCuttingJobBatch,
   uploadSourceVideo,
 } from '../cuttingJobs'
@@ -345,8 +347,8 @@ describe('submitting a batch of cutting jobs', () => {
     const body = init.body as FormData
     expect(body.get('excel')).toBeInstanceOf(File)
     expect(JSON.parse(body.get('tests') as string)).toEqual([
-      { test_id: 'T001', c1_upload_id: 'a', c2_upload_id: null },
-      { test_id: 'T002', c1_upload_id: null, c2_upload_id: 'b' },
+      { test_id: 'T001', c1_upload_id: 'a', c2_upload_id: null, confirm_overwrite: false },
+      { test_id: 'T002', c1_upload_id: null, c2_upload_id: 'b', confirm_overwrite: false },
     ])
     expect(results[0]).toMatchObject({
       testId: 'T001',
@@ -360,6 +362,20 @@ describe('submitting a batch of cutting jobs', () => {
     })
   })
 
+  // Ticket #101: the follow-up to a "Cuts already exist" rejection (#96).
+  it('confirms overwriting existing Cuts for the Tests that ask for it', async () => {
+    fetchMock.mockResolvedValue(json(200, { results: [] }))
+
+    await submitCuttingJobBatch(new File(['x'], 't.xlsx'), [
+      { testId: 'T001', c1UploadId: 'a', c2UploadId: null, confirmOverwrite: true },
+    ])
+
+    const body = fetchMock.mock.calls[0]![1].body as FormData
+    expect(JSON.parse(body.get('tests') as string)).toEqual([
+      { test_id: 'T001', c1_upload_id: 'a', c2_upload_id: null, confirm_overwrite: true },
+    ])
+  })
+
   it("surfaces the backend's reason when the whole batch is refused", async () => {
     fetchMock.mockResolvedValue(json(400, { detail: 'The same Test appears twice.' }))
 
@@ -368,6 +384,43 @@ describe('submitting a batch of cutting jobs', () => {
         { testId: 'T001', c1UploadId: 'a', c2UploadId: null },
       ]),
     ).rejects.toThrow('The same Test appears twice.')
+  })
+})
+
+describe('listing cutting jobs', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('returns every job the backend lists, in its order', async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, [
+        { ...JOB_RESPONSE, id: 13 },
+        { ...JOB_RESPONSE, id: 12 },
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const jobs = await listCuttingJobs()
+
+    expect(fetchMock.mock.calls[0]).toEqual([expect.stringMatching(/\/cutting-jobs$/)])
+    expect(jobs.map((job) => job.id)).toEqual([13, 12])
+    expect(jobs[0]!.outputs[0]).toEqual({
+      camera: 'C1',
+      condition: 'ME',
+      phase: 'F1',
+      status: 'pending',
+      failureReason: null,
+    })
+  })
+
+  it("surfaces the backend's reason when listing fails", async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => json(500, { detail: 'Database unavailable.' })),
+    )
+
+    await expect(listCuttingJobs()).rejects.toThrow('Database unavailable.')
   })
 })
 
@@ -397,5 +450,14 @@ describe('fetching a cutting job', () => {
         { camera: 'C1', condition: 'ME', phase: 'F1', status: 'pending', failureReason: null },
       ],
     })
+  })
+
+  it('says so distinctly when there is no such job', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => json(404, { detail: 'Cutting job not found.' })),
+    )
+
+    await expect(getCuttingJob(999)).rejects.toBeInstanceOf(CuttingJobNotFoundError)
   })
 })
