@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { usePolledJob } from '@/composables/usePolledJob'
@@ -7,6 +7,7 @@ import {
   CAMERAS,
   CUTTING_JOB_STATUS_LABELS,
   CuttingJobNotFoundError,
+  cancelCuttingJob,
   cutsDone,
   getCuttingJob,
   type Camera,
@@ -27,12 +28,41 @@ function isActive(current: CuttingJob): boolean {
   return current.status === 'queued' || current.status === 'running'
 }
 
-const { job, loadError, notFound } = usePolledJob<CuttingJob>({
-  id: () => Number(route.params.id),
+const jobId = computed(() => Number(route.params.id))
+
+const { job, loadError, notFound, replace } = usePolledJob<CuttingJob>({
+  id: () => jobId.value,
   load: getCuttingJob,
   isActive,
   isNotFound: (err) => err instanceof CuttingJobNotFoundError,
   fallbackError: 'Failed to load the cutting job.',
+})
+
+// Issue #168: a queued job can be cancelled, by anyone; the backend deletes
+// its uploaded source. No confirmation, like AnalysisView's Cancel: nothing
+// has run yet, so nothing is lost.
+const isCancelling = ref(false)
+const cancelError = ref<string | null>(null)
+
+async function cancel() {
+  if (!job.value || isCancelling.value) return
+
+  isCancelling.value = true
+  cancelError.value = null
+  try {
+    // The job just left {queued, running} for good: no more polling, and a
+    // poll still in flight from before this resolved mustn't overwrite it.
+    replace(await cancelCuttingJob(job.value.id))
+  } catch (err) {
+    cancelError.value = err instanceof Error ? err.message : 'Failed to cancel the cutting job.'
+  } finally {
+    isCancelling.value = false
+  }
+}
+
+// A cancel error belongs to the job it was about.
+watch(jobId, () => {
+  cancelError.value = null
 })
 
 const OUTPUT_STATUS_LABELS: Record<CuttingJobOutputStatus, string> = {
@@ -110,10 +140,13 @@ const failedOutputs = computed(
           <dd class="text-foreground" data-testid="job-status">
             {{ CUTTING_JOB_STATUS_LABELS[job.status] }}
           </dd>
-          <dt class="text-muted">Cuts</dt>
-          <dd class="text-foreground" data-testid="cuts-done">
-            {{ cutsDone(job) }} of {{ job.outputs.length }} done
-          </dd>
+          <!-- A cancelled job never ran a phase (issue #168). -->
+          <template v-if="job.status !== 'cancelled'">
+            <dt class="text-muted">Cuts</dt>
+            <dd class="text-foreground" data-testid="cuts-done">
+              {{ cutsDone(job) }} of {{ job.outputs.length }} done
+            </dd>
+          </template>
           <dt class="text-muted">Submitted</dt>
           <dd class="text-foreground">{{ formatDate(job.createdAt) }}</dd>
           <template v-if="job.finishedAt">
@@ -127,6 +160,26 @@ const failedOutputs = computed(
         </dl>
 
         <p v-if="loadError" class="mt-4 text-sm text-danger" role="alert">{{ loadError }}</p>
+
+        <div v-if="job.status === 'queued'" class="mt-6">
+          <button
+            type="button"
+            data-testid="cancel"
+            :disabled="isCancelling"
+            class="rounded-md border border-border px-4 py-2 font-medium text-danger hover:bg-background disabled:cursor-not-allowed disabled:opacity-50"
+            @click="cancel"
+          >
+            {{ isCancelling ? 'Cancelling…' : 'Cancel' }}
+          </button>
+        </div>
+        <p
+          v-if="cancelError"
+          data-testid="cancel-error"
+          class="mt-4 text-sm text-danger"
+          role="alert"
+        >
+          {{ cancelError }}
+        </p>
 
         <div
           v-if="isActive(job)"
@@ -143,7 +196,7 @@ const failedOutputs = computed(
           />
         </div>
 
-        <table class="mt-6 w-full text-left text-sm">
+        <table v-if="job.status !== 'cancelled'" class="mt-6 w-full text-left text-sm">
           <caption class="sr-only">
             Cuts per phase
           </caption>

@@ -2601,8 +2601,8 @@ time judgment calls:
 - **"Already used" means a job row still holds the path**, in either
   column, whatever that job's status. A succeeded job's upload directory is
   deleted by the cutting-worker, so resubmitting that upload is reported as
-  unknown before this check runs. Once #172 lands (PR #176), every delete
-  also clears the path, so a deleted source never counts as used.
+  unknown before this check runs. Since #172 (PR #176), every delete also
+  clears the path, so a deleted source never counts as used.
 - **409, naming the camera, the filename and the other job**
   ("The C1 upload T001_C1_source.mp4 is already used by cutting job 12.
   Upload the video again to cut it again."). It's a conflict with existing
@@ -2615,6 +2615,33 @@ time judgment calls:
   partial unique index on each source-path column would close it for good,
   but that needs a migration and wasn't asked for. Revisit if it's ever
   seen.
+
+**Cancel a queued cutting job, implemented (issue #168).** Part of #167:
+`POST /cutting-jobs/{id}/cancel`, `cancel_cutting_job`, the
+`CUTTING_CANCELLED` audit action (migration 0018) and the Cancel button on
+`CuttingJobView`. Implementation-time judgment calls:
+
+- **The source is deleted after the cancel commits, and its errors are
+  swallowed.** `cancel_cutting_job` commits the status and the audit row
+  first, then calls `delete_cutting_job_sources` (#172). Anything that goes
+  wrong there, including its own commit, is logged and never undoes or fails
+  the cancel. The job is refreshed and returned as it now stands, with
+  `source_retained` true if the delete didn't finish.
+- **Same 404/409 shape as the analysis cancel**, with "Cutting job not
+  found." and "Only a queued cutting job can be cancelled." A cancelled job
+  can't be cancelled again (409).
+- **Tests live in `test_cutting_jobs_api.py`**, as a new section, rather
+  than a separate file like `test_analyses_cancel.py`, so they reuse that
+  file's upload/submit/audit helpers. The claim/cancel race is tested in
+  sequence, per #167's testing decisions.
+- **No dedicated test for migration 0018,** like 0011–0015. The API test
+  covers it: the audit write is best-effort, so without the enum value the
+  `CUTTING_CANCELLED` row would be silently dropped and the test would fail.
+- **The job page hides the Cuts count as well as the phase table** for a
+  cancelled job. "0 of 15 done" would suggest the phases are still to come.
+  The Cancel button, its "Cancelling…" state and its error mirror
+  `AnalysisView`; the returned job replaces the displayed one through
+  `usePolledJob`'s `replace`, which also stops polling.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`

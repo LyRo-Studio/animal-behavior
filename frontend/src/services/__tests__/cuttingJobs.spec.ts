@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  cancelCuttingJob,
   CuttingJobNotFoundError,
   forgetSourceVideoUpload,
   getCuttingJob,
@@ -461,5 +462,45 @@ describe('fetching a cutting job', () => {
     )
 
     await expect(getCuttingJob(999)).rejects.toBeInstanceOf(CuttingJobNotFoundError)
+  })
+})
+
+// Issue #168: POST /cutting-jobs/{id}/cancel answers with the cancelled job,
+// or a 409 when the job has already started or finished.
+describe('cancelling a cutting job', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('posts the cancel and returns the cancelled job', async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, {
+        ...JOB_RESPONSE,
+        status: 'cancelled',
+        finished_at: '2026-09-28T12:00:00Z',
+        source_retained: false,
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const job = await cancelCuttingJob(12)
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/cutting-jobs\/12\/cancel$/), {
+      method: 'POST',
+    })
+    expect(job.status).toBe('cancelled')
+    expect(job.finishedAt).toBe('2026-09-28T12:00:00Z')
+    expect(job.sourceRetained).toBe(false)
+  })
+
+  it("passes on the backend's reason when the job can't be cancelled", async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => json(409, { detail: 'Only a queued cutting job can be cancelled.' })),
+    )
+
+    await expect(cancelCuttingJob(12)).rejects.toThrow(
+      'Only a queued cutting job can be cancelled.',
+    )
   })
 })

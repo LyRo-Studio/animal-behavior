@@ -11,12 +11,14 @@ import json
 from datetime import time
 from io import BytesIO
 
+import pytest
 from openpyxl import Workbook
 from sqlalchemy import select
 
 from app.core.config import settings
 from app.models.audit_log import AuditAction, AuditLog
 from app.models.cutting_job import CuttingJob, CuttingJobOutputStatus, CuttingJobStatus
+from app.services.cutting_jobs import claim_next_queued_cutting_job
 from tests.helpers import identity_headers
 
 _CONDITIONS = ("ME", "ZE")
@@ -904,3 +906,125 @@ def test_list_cutting_jobs_is_empty_without_any_jobs(client):
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+# --- POST /cutting-jobs/{id}/cancel (issue #168) ---
+
+
+def _cancelled_rows(db_session) -> list[AuditLog]:
+    return [
+        row
+        for row in _cutting_audit_rows(db_session)
+        if row.action == AuditAction.CUTTING_CANCELLED
+    ]
+
+
+def test_cancelling_a_queued_job_stops_it_and_deletes_its_source(
+    client, db_session, cutting_upload_root
+):
+    upload_id = _completed_upload_id(client, test_id="T001")
+    created = _submit_single(client, c1_upload_id=upload_id).json()
+
+    response = client.post(
+        f"/api/cutting-jobs/{created['id']}/cancel",
+        headers={"X-authentik-email": "jan.peeters@vives.be"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "cancelled"
+    assert body["finished_at"] is not None
+    assert body["source_retained"] is False
+    assert not (cutting_upload_root / upload_id).exists()
+    assert client.get(f"/api/cutting-jobs/{created['id']}").json()["status"] == "cancelled"
+    (row,) = _cancelled_rows(db_session)
+    assert row.target_type == "cutting_job"
+    assert row.target == str(created["id"])
+    assert row.identity == "jan.peeters@vives.be"
+    assert row.identity_verified is False
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        CuttingJobStatus.RUNNING,
+        CuttingJobStatus.SUCCEEDED,
+        CuttingJobStatus.FAILED,
+        CuttingJobStatus.CANCELLED,
+    ],
+)
+def test_only_a_queued_job_can_be_cancelled(client, db_session, cutting_upload_root, status):
+    upload_id = _completed_upload_id(client, test_id="T001")
+    created = _submit_single(client, c1_upload_id=upload_id).json()
+    job = db_session.get(CuttingJob, created["id"])
+    job.status = status
+    db_session.commit()
+
+    response = client.post(f"/api/cutting-jobs/{created['id']}/cancel")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Only a queued cutting job can be cancelled."
+    body = client.get(f"/api/cutting-jobs/{created['id']}").json()
+    assert body["status"] == status.value
+    assert body["finished_at"] is None
+    assert body["source_retained"] is True
+    assert (cutting_upload_root / upload_id).exists()
+    assert _cancelled_rows(db_session) == []
+
+
+def test_cancelling_an_unknown_job_is_not_found(client):
+    response = client.post("/api/cutting-jobs/999999/cancel")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Cutting job not found."
+
+
+def test_anyone_can_cancel_a_job_someone_else_started(client):
+    """The cutting history is shared (#101), with no per-person
+    authorization (ADR-0004)."""
+    created = _create_job(client, identity="owner@vives.be")
+
+    response = client.post(
+        f"/api/cutting-jobs/{created['id']}/cancel", headers=identity_headers("other@vives.be")
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+
+
+def test_a_job_the_worker_already_claimed_cant_be_cancelled(client, db_session):
+    """Claim, then cancel: the worker won. Tested in sequence; a real
+    two-connection race can't run inside the per-test transaction, and
+    correctness rests on the row lock (issue #167's testing decisions)."""
+    created = _create_job(client, identity="alice@example.com")
+    claimed = claim_next_queued_cutting_job(db_session)
+    assert claimed is not None and claimed.id == created["id"]
+
+    response = client.post(f"/api/cutting-jobs/{created['id']}/cancel")
+
+    assert response.status_code == 409
+    assert client.get(f"/api/cutting-jobs/{created['id']}").json()["status"] == "running"
+
+
+def test_a_cancelled_job_is_never_claimed(client, db_session):
+    """Cancel, then claim: the cancel won, and the worker finds nothing."""
+    created = _create_job(client, identity="alice@example.com")
+    assert client.post(f"/api/cutting-jobs/{created['id']}/cancel").status_code == 200
+
+    assert claim_next_queued_cutting_job(db_session) is None
+
+
+def test_a_cancel_whose_source_delete_fails_still_cancels_and_keeps_the_source(
+    client, db_session, cutting_upload_root, monkeypatch
+):
+    upload_id = _completed_upload_id(client, test_id="T001")
+    created = _submit_single(client, c1_upload_id=upload_id).json()
+    monkeypatch.setattr("app.services.cutting_jobs.delete_source_upload", lambda source_path: False)
+
+    response = client.post(f"/api/cutting-jobs/{created['id']}/cancel")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["source_retained"] is True
+    assert (cutting_upload_root / upload_id).exists()
+    assert len(_cancelled_rows(db_session)) == 1

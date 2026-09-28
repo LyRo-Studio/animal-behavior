@@ -430,6 +430,17 @@ export async function getCuttingJob(id: number): Promise<CuttingJob> {
   return toCuttingJob(await response.json())
 }
 
+// Issue #168: cancel a job that hasn't started yet; the backend deletes its
+// uploaded source. A job that's already running or finished gets a 409, whose
+// detail says so.
+export async function cancelCuttingJob(id: number): Promise<CuttingJob> {
+  const response = await fetch(`${API_BASE_URL}/cutting-jobs/${id}/cancel`, { method: 'POST' })
+  if (!response.ok) {
+    throw await errorFromResponse(response, 'Failed to cancel the cutting job.')
+  }
+  return toCuttingJob(await response.json())
+}
+
 // Ticket #101's history: every cutting job, whoever ran it, newest first —
 // shared like analysis history since ticket #72. The backend bounds the list.
 export async function listCuttingJobs(): Promise<CuttingJob[]> {

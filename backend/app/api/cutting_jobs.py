@@ -36,6 +36,7 @@ from app.services.audit_log import AuditIdentity
 from app.services.cutting_jobs import (
     CUTTING_JOB_VALIDATION_ERRORS,
     CutsAlreadyExistError,
+    CuttingJobNotCancellableError,
     CuttingJobNotFoundError,
     CuttingJobSubmission,
     DuplicateCameraUploadError,
@@ -49,6 +50,7 @@ from app.services.cutting_jobs import (
     SourceVideoCollisionError,
     SourceVideoNotDecodableError,
     UnknownSourceUploadError,
+    cancel_cutting_job,
     get_cutting_job,
     list_cutting_jobs,
     submit_cutting_job,
@@ -421,6 +423,29 @@ def list_cutting_jobs_endpoint(db: Session = Depends(get_db)) -> list[CuttingJob
     """Ticket #101: every cutting job, whoever ran it, newest first and
     bounded — shared history like `GET /analyses` (ticket #72)."""
     return list_cutting_jobs(db)
+
+
+@router.post("/{cutting_job_id}/cancel", response_model=CuttingJobOut)
+def cancel_cutting_job_endpoint(
+    cutting_job_id: int, request: Request, db: Session = Depends(get_db)
+) -> CuttingJob:
+    """Issue #168: only a queued job can be cancelled, by anyone. Not rate
+    limited, like `POST /analyses/{id}/cancel`: one small row update."""
+    try:
+        return cancel_cutting_job(
+            db,
+            cutting_job_id=cutting_job_id,
+            cancelled_by=AuditIdentity(*get_verified_identity(request)),
+        )
+    except CuttingJobNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Cutting job not found."
+        ) from None
+    except CuttingJobNotCancellableError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only a queued cutting job can be cancelled.",
+        ) from None
 
 
 @router.get("/{cutting_job_id}", response_model=CuttingJobOut)
