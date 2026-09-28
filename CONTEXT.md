@@ -2310,6 +2310,49 @@ uploads through #94's chunked protocol and submits through #97's
   `_C1_`/`_C2_`) when the field is still empty. The backend still validates
   the filename against the Test/camera at upload start.
 
+**Cutting status, progress, history and re-cut confirmation (ticket #101)
+— shipped.** Completes Feature C's frontend on top of #96/#98/#100.
+Implementation-time judgment calls:
+
+- **Approved deviation: the history is shared, not "the current identity's
+  own" (confirmed by the user, 2026-09-28).** #101's acceptance criterion
+  says "own past cutting jobs", but Identity is attribution-only with no
+  per-person visibility (ADR-0004), and analysis and consolidation history
+  have been fully shared since #72. Issue #93's user story 15 ("mirroring
+  analysis history, so that shared history stays consistent") points the
+  same way. So `CuttingJobsHistoryView` (`/cutting-jobs`, route
+  `cutting-jobs-history`) lists every job and shows who ran each one.
+- **New `GET /cutting-jobs`, backed by `list_cutting_jobs`.** No list
+  endpoint existed; #101's third "blocked by" was an unfilled placeholder.
+  Newest first, bounded to `MAX_LISTED_CUTTING_JOBS` (500) like
+  `list_analysis_jobs`, outputs loaded up front. No filters, since nothing
+  needs one yet.
+- **`CuttingJobView` now polls** every 2 s while the job is `queued` or
+  `running`, the same way `AnalysisView` does, and stops at a terminal
+  status or on unmount. It shows a progress bar (Cuts done ÷ expected) and
+  a phase × camera table (Done/Pending/Failed), plus each failed output's
+  reason. A 404 is `CuttingJobNotFoundError` and stops polling; any other
+  error is shown and retried. There's no "currently cutting" phase: the
+  backend has no such status, and a failed or skipped phase is only known
+  once the job ends (#98).
+- **Re-cut confirmation is one dialog per submit, not one per Test.** Every
+  Test a submit finds already cut is listed in a single `ConfirmDialog`.
+  "Re-cut and overwrite" resubmits just those Tests with
+  `confirm_overwrite`, reusing their finished uploads (the refused attempt
+  consumed nothing, #96). "Keep existing Cuts" creates nothing and leaves
+  "<Test> already has Cuts; it wasn't re-cut." on each Test. To re-cut only
+  some of them, cancel, remove the others and submit again. The follow-up
+  is one more `create-cutting-job` rate-limit attempt, as #96 already
+  accepted. This replaces #100's "isn't possible from this page yet"
+  message.
+- **`ConfirmDialog` is a reusable component** (`frontend/src/components/`),
+  a plain `role="dialog"` overlay rather than native `<dialog>`, whose
+  `showModal()` jsdom doesn't implement. Focus starts on Cancel so a stray
+  Enter never overwrites anything; Escape cancels; Tab cycles between the
+  two buttons.
+- **Links:** the Video Cutting page and each job page link to the history.
+  Home keeps its single "Video Cutting" entry.
+
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
 (`consolidatie.py`, `observer_import.py`) is pre-existing Observer XT

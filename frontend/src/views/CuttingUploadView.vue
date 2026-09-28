@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import {
   CUTS_ALREADY_EXIST_CODE,
   forgetSourceVideoUpload,
@@ -10,6 +11,7 @@ import {
   type Camera,
   type CuttingJob,
   type CuttingJobBatchError,
+  type CuttingJobBatchResult,
 } from '@/services/cuttingJobs'
 
 // Ticket #100, part of issue #93's Feature C: select up to 5 Tests, each
@@ -34,6 +36,9 @@ interface TestEntry {
   error: string | null
   // Once set, the Test is done: it's locked and left out of later submits.
   job: CuttingJob | null
+  // The backend refused it because it already has Cuts (#96): the re-cut
+  // dialog is asking whether to overwrite them (ticket #101).
+  awaitingRecutConfirmation: boolean
 }
 
 let nextKey = 0
@@ -49,6 +54,7 @@ function newEntry(): TestEntry {
     videos: { C1: emptyVideo(), C2: emptyVideo() },
     error: null,
     job: null,
+    awaitingRecutConfirmation: false,
   }
 }
 
@@ -138,12 +144,39 @@ async function uploadVideos(entry: TestEntry): Promise<boolean> {
   return true
 }
 
-// Until ticket #101's confirmation dialog exists, there's no way to confirm
-// overwriting, so don't show the backend's "Confirm to overwrite them".
-function describeRejection(entry: TestEntry, error: CuttingJobBatchError | null): string {
-  if (error?.code === CUTS_ALREADY_EXIST_CODE) {
-    return `${testIdOf(entry)} already has Cuts. Re-cutting a Test isn't possible from this page yet.`
+// Submits `uploaded` as one batch and records each Test's outcome on it. A
+// Test that already has Cuts waits for the re-cut dialog instead of showing
+// an error; `confirmOverwrite` is that dialog's follow-up.
+async function submitBatch(uploaded: TestEntry[], confirmOverwrite: boolean) {
+  const results = await submitCuttingJobBatch(
+    excel.value!,
+    uploaded.map((entry) => ({
+      testId: testIdOf(entry),
+      c1UploadId: entry.videos.C1.uploadId,
+      c2UploadId: entry.videos.C2.uploadId,
+      ...(confirmOverwrite ? { confirmOverwrite: true } : {}),
+    })),
+  )
+  // One result per submitted Test, in submission order (#97).
+  results.forEach((result, index) => applyResult(uploaded[index]!, result))
+}
+
+function applyResult(entry: TestEntry, result: CuttingJobBatchResult) {
+  if (result.job === null) {
+    if (result.error?.code === CUTS_ALREADY_EXIST_CODE) {
+      entry.awaitingRecutConfirmation = true
+    } else {
+      entry.error = describeRejection(result.error)
+    }
+    return
   }
+  entry.job = result.job
+  for (const camera of chosenCameras(entry)) {
+    forgetSourceVideoUpload(entry.videos[camera].file!, { testId: testIdOf(entry), camera })
+  }
+}
+
+function describeRejection(error: CuttingJobBatchError | null): string {
   return error?.detail ?? 'The cutting job could not be created.'
 }
 
@@ -162,32 +195,42 @@ async function submit() {
       entry.error = null
       if (await uploadVideos(entry)) uploaded.push(entry)
     }
-    if (uploaded.length === 0) return
-
-    const results = await submitCuttingJobBatch(
-      excel.value,
-      uploaded.map((entry) => ({
-        testId: testIdOf(entry),
-        c1UploadId: entry.videos.C1.uploadId,
-        c2UploadId: entry.videos.C2.uploadId,
-      })),
-    )
-    // One result per submitted Test, in submission order (#97).
-    results.forEach((result, index) => {
-      const entry = uploaded[index]!
-      if (result.job === null) {
-        entry.error = describeRejection(entry, result.error)
-        return
-      }
-      entry.job = result.job
-      for (const camera of chosenCameras(entry)) {
-        forgetSourceVideoUpload(entry.videos[camera].file!, { testId: testIdOf(entry), camera })
-      }
-    })
+    if (uploaded.length > 0) await submitBatch(uploaded, false)
   } catch (err) {
     batchError.value = err instanceof Error ? err.message : 'Failed to submit the cutting jobs.'
   } finally {
     isSubmitting.value = false
+  }
+}
+
+// Ticket #101: every Test the last submit found already cut, confirmed or
+// cancelled together in one dialog.
+const recutEntries = computed(() =>
+  entries.value.filter((entry) => entry.awaitingRecutConfirmation),
+)
+const recutTestIds = computed(() => recutEntries.value.map(testIdOf).join(', '))
+
+// Resubmits just those Tests with `confirm_overwrite`. Their uploads weren't
+// consumed by the refused attempt (#96), so nothing is uploaded again.
+async function confirmRecut() {
+  const confirmed = recutEntries.value
+  for (const entry of confirmed) entry.awaitingRecutConfirmation = false
+
+  isSubmitting.value = true
+  batchError.value = null
+  try {
+    await submitBatch(confirmed, true)
+  } catch (err) {
+    batchError.value = err instanceof Error ? err.message : 'Failed to submit the cutting jobs.'
+  } finally {
+    isSubmitting.value = false
+  }
+}
+
+function cancelRecut() {
+  for (const entry of recutEntries.value) {
+    entry.awaitingRecutConfirmation = false
+    entry.error = `${testIdOf(entry)} already has Cuts; it wasn't re-cut.`
   }
 }
 </script>
@@ -196,9 +239,17 @@ async function submit() {
   <main class="min-h-screen bg-background font-sans text-foreground">
     <header class="flex items-center justify-between border-b border-border bg-surface px-6 py-4">
       <h1 class="font-serif text-xl text-primary">Video Cutting</h1>
-      <RouterLink :to="{ name: 'home' }" class="text-sm font-medium text-primary hover:underline">
-        Back to Home
-      </RouterLink>
+      <div class="flex items-center gap-4">
+        <RouterLink
+          :to="{ name: 'cutting-jobs-history' }"
+          class="text-sm font-medium text-primary hover:underline"
+        >
+          Cutting history
+        </RouterLink>
+        <RouterLink :to="{ name: 'home' }" class="text-sm font-medium text-primary hover:underline">
+          Back to Home
+        </RouterLink>
+      </div>
     </header>
 
     <section class="mx-auto max-w-3xl px-6 py-10">
@@ -349,5 +400,19 @@ async function submit() {
         {{ batchError }}
       </p>
     </section>
+
+    <ConfirmDialog
+      v-if="recutEntries.length > 0"
+      title="Cuts already exist"
+      confirm-label="Re-cut and overwrite"
+      cancel-label="Keep existing Cuts"
+      @confirm="confirmRecut"
+      @cancel="cancelRecut"
+    >
+      <p>
+        {{ recutTestIds }} already {{ recutEntries.length === 1 ? 'has' : 'have' }} Cuts. Re-cutting
+        overwrites every existing Cut it produces again.
+      </p>
+    </ConfirmDialog>
   </main>
 </template>

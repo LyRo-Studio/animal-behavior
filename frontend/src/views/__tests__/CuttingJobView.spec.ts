@@ -1,5 +1,5 @@
-import { flushPromises, mount } from '@vue/test-utils'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRouter, createWebHistory } from 'vue-router'
 
 import CuttingJobView from '../CuttingJobView.vue'
@@ -11,12 +11,20 @@ vi.mock('@/services/cuttingJobs', async (importOriginal) => ({
   getCuttingJob: getCuttingJobMock,
 }))
 
+// The real class, so the view's `instanceof` check sees the same constructor.
+const { CuttingJobNotFoundError } = await import('@/services/cuttingJobs')
+
 async function mountView(id = '31') {
   const router = createRouter({
     history: createWebHistory(),
     routes: [
       { path: '/cutting-jobs/:id', name: 'cutting-job-detail', component: CuttingJobView },
       { path: '/cutting', name: 'cutting-upload', component: { template: '<div />' } },
+      {
+        path: '/cutting-jobs',
+        name: 'cutting-jobs-history',
+        component: { template: '<div />' },
+      },
     ],
   })
   router.push(`/cutting-jobs/${id}`)
@@ -27,42 +35,193 @@ async function mountView(id = '31') {
   return wrapper
 }
 
-function output(status: string) {
-  return { camera: 'C1', condition: 'ME', phase: 'F1', status, failureReason: null }
+function output(
+  condition: string,
+  phase: string,
+  status = 'pending',
+  overrides: Record<string, unknown> = {},
+) {
+  return { camera: 'C1', condition, phase, status, failureReason: null, ...overrides }
+}
+
+function job(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 31,
+    testId: 'T001',
+    requestedByIdentity: 'researcher@example.com',
+    status: 'running',
+    referenceCamera: 'C1',
+    createdAt: '2026-09-24T10:00:00Z',
+    startedAt: '2026-09-24T10:01:00Z',
+    finishedAt: null,
+    outputs: [output('ME', 'F1', 'succeeded'), output('ME', 'F2'), output('ME', 'F3')],
+    ...overrides,
+  }
+}
+
+function cutsDone(wrapper: VueWrapper) {
+  return wrapper.find('[data-testid="cuts-done"]').text()
+}
+
+// Each phase row's cells, as "<phase>: <status per camera>".
+function phaseRows(wrapper: VueWrapper) {
+  return wrapper
+    .findAll('[data-testid="phase-row"]')
+    .map((row) =>
+      [row.find('th').text(), ...row.findAll('td').map((cell) => cell.text())].join(' | '),
+    )
 }
 
 describe('CuttingJobView', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
   afterEach(() => {
+    vi.useRealTimers()
     getCuttingJobMock.mockReset()
   })
 
-  it("shows the job's Test, status, and how many of its Cuts are done", async () => {
-    getCuttingJobMock.mockResolvedValue({
-      id: 31,
-      testId: 'T001',
-      requestedByIdentity: 'researcher@example.com',
-      status: 'running',
-      referenceCamera: 'C1',
-      createdAt: '2026-09-24T10:00:00Z',
-      startedAt: '2026-09-24T10:01:00Z',
-      finishedAt: null,
-      outputs: [output('succeeded'), output('pending'), output('pending')],
-    })
+  it("shows the job's Test, status, requester, and how many of its Cuts are done", async () => {
+    getCuttingJobMock.mockResolvedValue(job())
 
     const wrapper = await mountView('31')
 
     expect(getCuttingJobMock).toHaveBeenCalledWith(31)
     expect(wrapper.find('h1').text()).toContain('Cutting job #31')
     expect(wrapper.text()).toContain('T001')
+    expect(wrapper.text()).toContain('researcher@example.com')
     expect(wrapper.find('[data-testid="job-status"]').text()).toBe('Running')
-    expect(wrapper.find('[data-testid="cuts-done"]').text()).toContain('1 of 3')
+    expect(cutsDone(wrapper)).toContain('1 of 3')
   })
 
-  it('shows why the job could not be loaded', async () => {
-    getCuttingJobMock.mockRejectedValue(new Error('Cutting job not found.'))
+  it('shows live per-phase progress while the job runs, without a manual refresh', async () => {
+    getCuttingJobMock.mockResolvedValueOnce(job()).mockResolvedValueOnce(
+      job({
+        outputs: [
+          output('ME', 'F1', 'succeeded'),
+          output('ME', 'F2', 'succeeded'),
+          output('ME', 'F3'),
+        ],
+      }),
+    )
+
+    const wrapper = await mountView()
+    expect(phaseRows(wrapper)).toEqual(['ME F1 | Done', 'ME F2 | Pending', 'ME F3 | Pending'])
+
+    await vi.advanceTimersByTimeAsync(2000)
+
+    expect(getCuttingJobMock).toHaveBeenCalledTimes(2)
+    expect(cutsDone(wrapper)).toContain('2 of 3')
+    expect(phaseRows(wrapper)).toEqual(['ME F1 | Done', 'ME F2 | Done', 'ME F3 | Pending'])
+    const bar = wrapper.find('[role="progressbar"]')
+    expect(bar.attributes('aria-valuenow')).toBe('67')
+  })
+
+  it('shows one column per camera when both were cut', async () => {
+    getCuttingJobMock.mockResolvedValue(
+      job({
+        outputs: [output('ME', 'F1', 'succeeded'), output('ME', 'F1', 'pending', { camera: 'C2' })],
+      }),
+    )
+
+    const wrapper = await mountView()
+
+    const headers = wrapper.findAll('thead th').map((th) => th.text())
+    expect(headers).toEqual(['Phase', 'C1', 'C2'])
+    expect(phaseRows(wrapper)).toEqual(['ME F1 | Done | Pending'])
+  })
+
+  it('keeps polling a queued job until it starts', async () => {
+    getCuttingJobMock
+      .mockResolvedValueOnce(job({ status: 'queued', startedAt: null }))
+      .mockResolvedValueOnce(job({ status: 'running' }))
+
+    const wrapper = await mountView()
+    expect(wrapper.find('[data-testid="job-status"]').text()).toBe('Queued')
+
+    await vi.advanceTimersByTimeAsync(2000)
+
+    expect(wrapper.find('[data-testid="job-status"]').text()).toBe('Running')
+  })
+
+  it('stops polling once the job has finished', async () => {
+    getCuttingJobMock.mockResolvedValue(
+      job({
+        status: 'succeeded',
+        finishedAt: '2026-09-24T10:05:00Z',
+        outputs: [output('ME', 'F1', 'succeeded')],
+      }),
+    )
+
+    const wrapper = await mountView()
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    expect(getCuttingJobMock).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[role="progressbar"]').exists()).toBe(false)
+    expect(cutsDone(wrapper)).toContain('1 of 1')
+  })
+
+  it("shows each failed phase's reason", async () => {
+    getCuttingJobMock.mockResolvedValue(
+      job({
+        status: 'failed',
+        outputs: [
+          output('ME', 'F1', 'succeeded'),
+          output('ME', 'F2', 'failed', { failureReason: 'No output file was produced.' }),
+        ],
+      }),
+    )
+
+    const wrapper = await mountView()
+
+    expect(phaseRows(wrapper)).toEqual(['ME F1 | Done', 'ME F2 | Failed'])
+    const failures = wrapper.find('[data-testid="failed-outputs"]').text()
+    expect(failures).toContain('C1 ME F2')
+    expect(failures).toContain('No output file was produced.')
+  })
+
+  it('stops polling when the view is left', async () => {
+    getCuttingJobMock.mockResolvedValue(job())
+
+    const wrapper = await mountView()
+    wrapper.unmount()
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    expect(getCuttingJobMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps retrying after a failed poll, showing why meanwhile', async () => {
+    getCuttingJobMock
+      .mockResolvedValueOnce(job())
+      .mockRejectedValueOnce(new Error('Failed to load the cutting job.'))
+      .mockResolvedValueOnce(job({ status: 'succeeded' }))
+
+    const wrapper = await mountView()
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(wrapper.find('[role="alert"]').text()).toBe('Failed to load the cutting job.')
+    expect(wrapper.find('[data-testid="job-status"]').text()).toBe('Running')
+
+    await vi.advanceTimersByTimeAsync(2000)
+
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="job-status"]').text()).toBe('Succeeded')
+  })
+
+  it('says the job was not found, without retrying', async () => {
+    getCuttingJobMock.mockRejectedValue(new CuttingJobNotFoundError('Cutting job not found.'))
 
     const wrapper = await mountView('999')
+    await vi.advanceTimersByTimeAsync(10_000)
 
     expect(wrapper.find('[role="alert"]').text()).toBe('Cutting job not found.')
+    expect(getCuttingJobMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('says a non-numeric id was not found without asking the backend', async () => {
+    const wrapper = await mountView('abc')
+
+    expect(wrapper.find('[role="alert"]').text()).toBe('Cutting job not found.')
+    expect(getCuttingJobMock).not.toHaveBeenCalled()
   })
 })

@@ -21,6 +21,11 @@ function createTestRouter() {
     routes: [
       { path: '/cutting', name: 'cutting-upload', component: CuttingUploadView },
       {
+        path: '/cutting-jobs',
+        name: 'cutting-jobs-history',
+        component: { template: '<div>history</div>' },
+      },
+      {
         path: '/cutting-jobs/:id',
         name: 'cutting-job-detail',
         component: { template: '<div>job</div>' },
@@ -243,28 +248,76 @@ describe('CuttingUploadView', () => {
     expect(testEntries(wrapper)[1]!.find('[data-testid="job-link"]').exists()).toBe(false)
   })
 
-  it("doesn't ask for a confirmation it can't take when a Test already has Cuts", async () => {
-    uploadSourceVideoMock.mockImplementation(async (file: File) => `id-${file.name}`)
-    submitCuttingJobBatchMock.mockResolvedValue([
-      {
-        testId: 'T001',
-        job: null,
-        error: {
-          detail: 'Cuts already exist for T001. Confirm to overwrite them.',
-          code: 'cuts_already_exist',
-        },
-      },
-    ])
-    const wrapper = await mountView()
-    await chooseFile(wrapper, 'excel-input', 'timestamps.xlsx')
-    await chooseFile(wrapper, 'c1-input', 'T001_C1_a.mp4')
+  // Ticket #101: #96's "Cuts already exist" rejection, surfaced as a dialog.
+  const CUTS_ALREADY_EXIST = {
+    detail: 'Cuts already exist for T002. Confirm to overwrite them.',
+    code: 'cuts_already_exist',
+  }
 
+  async function submitWithT002AlreadyCut(wrapper: VueWrapper) {
+    uploadSourceVideoMock.mockImplementation(async (file: File) => `id-${file.name}`)
+    submitCuttingJobBatchMock.mockResolvedValueOnce([
+      { testId: 'T001', job: job(31, 'T001'), error: null },
+      { testId: 'T002', job: null, error: CUTS_ALREADY_EXIST },
+    ])
+    await fillTwoTests(wrapper)
     await wrapper.find('[data-testid="submit-batch"]').trigger('click')
     await flushPromises()
+  }
 
-    const alert = testEntries(wrapper)[0]!.find('[role="alert"]').text()
-    expect(alert).toContain('T001 already has Cuts')
-    expect(alert).not.toContain('Confirm')
+  it('asks before re-cutting a Test that already has Cuts', async () => {
+    const wrapper = await mountView()
+
+    await submitWithT002AlreadyCut(wrapper)
+
+    const dialog = wrapper.find('[role="dialog"]')
+    expect(dialog.exists()).toBe(true)
+    expect(dialog.text()).toContain('T002')
+    expect(dialog.text()).not.toContain('T001')
+    expect(testEntries(wrapper)[1]!.find('[data-testid="job-link"]').exists()).toBe(false)
+    expect(submitCuttingJobBatchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('re-cuts once confirmed, reusing the finished uploads', async () => {
+    const wrapper = await mountView()
+    await submitWithT002AlreadyCut(wrapper)
+    uploadSourceVideoMock.mockClear()
+    submitCuttingJobBatchMock.mockResolvedValueOnce([
+      { testId: 'T002', job: job(32, 'T002'), error: null },
+    ])
+
+    await wrapper.find('[data-testid="confirm-dialog-confirm"]').trigger('click')
+    await flushPromises()
+
+    expect(uploadSourceVideoMock).not.toHaveBeenCalled()
+    expect(submitCuttingJobBatchMock).toHaveBeenLastCalledWith(expect.any(File), [
+      {
+        testId: 'T002',
+        c1UploadId: 'id-T002_C1_b.mp4',
+        c2UploadId: 'id-T002_C2_b.mp4',
+        confirmOverwrite: true,
+      },
+    ])
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(testEntries(wrapper)[1]!.find('[data-testid="job-link"]').attributes('href')).toBe(
+      '/cutting-jobs/32',
+    )
+  })
+
+  it('leaves the existing Cuts alone when the re-cut is cancelled', async () => {
+    const wrapper = await mountView()
+    await submitWithT002AlreadyCut(wrapper)
+
+    await wrapper.find('[data-testid="confirm-dialog-cancel"]').trigger('click')
+    await flushPromises()
+
+    expect(submitCuttingJobBatchMock).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    const second = testEntries(wrapper)[1]!
+    expect(second.find('[data-testid="job-link"]').exists()).toBe(false)
+    expect(second.find('[role="alert"]').text()).toContain(
+      "T002 already has Cuts; it wasn't re-cut.",
+    )
   })
 
   it('on a second submit, retries only the Tests that got no job, resuming their uploads', async () => {
