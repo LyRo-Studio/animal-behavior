@@ -46,6 +46,25 @@ def test_claim_next_queued_job_claims_oldest_and_sets_running(db_session):
     assert claimed.dogtrace_version == "1.0.0"
 
 
+def test_claim_next_queued_job_breaks_created_at_ties_by_id(db_session):
+    # Regression test: Postgres `now()` is the transaction's start time, so two
+    # jobs created in one transaction share a `created_at`, and `ORDER BY
+    # created_at` alone returned whichever row the scan met first. Rewriting
+    # the older row moves its tuple behind the newer one, which makes that
+    # wrong pick reproducible.
+    older = _create_job(db_session, test_id="T001", cut="cuts/T001/T001_C2_ME_F1.mp4")
+    newer = _create_job(db_session, test_id="T002", cut="cuts/T002/T002_C2_ME_F1.mp4")
+    assert older.created_at == newer.created_at
+    older.requested_by_identity = "an.janssens@vives.be"
+    db_session.add(older)
+    db_session.commit()
+
+    claimed = claim_next_queued_job(db_session, dogtrace_version="1.0.0")
+
+    assert claimed is not None
+    assert claimed.id == older.id
+
+
 def test_claim_next_queued_job_returns_none_when_queue_empty(db_session):
     assert claim_next_queued_job(db_session, dogtrace_version="1.0.0") is None
 

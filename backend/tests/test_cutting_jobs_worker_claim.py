@@ -70,6 +70,27 @@ def test_claim_next_queued_cutting_job_claims_oldest_and_sets_running(
     assert claimed.started_at is not None
 
 
+def test_claim_next_queued_cutting_job_breaks_created_at_ties_by_id(
+    db_session, s3_client, media_prober, tmp_path
+):
+    # Regression test: Postgres `now()` is the transaction's start time, so two
+    # jobs created in one transaction (as in every db_session test) share a
+    # `created_at`, and `ORDER BY created_at` alone returned whichever row the
+    # scan met first — flaky in CI. Rewriting the older row moves its tuple
+    # behind the newer one, which makes that wrong pick reproducible.
+    older = _create_job(db_session, s3_client, media_prober, tmp_path, test_id="T001")
+    newer = _create_job(db_session, s3_client, media_prober, tmp_path, test_id="T002")
+    assert older.created_at == newer.created_at
+    older.requested_by_identity = "an.janssens@vives.be"
+    db_session.add(older)
+    db_session.commit()
+
+    claimed = claim_next_queued_cutting_job(db_session)
+
+    assert claimed is not None
+    assert claimed.id == older.id
+
+
 def test_claim_next_queued_cutting_job_returns_none_when_queue_empty(db_session):
     assert claim_next_queued_cutting_job(db_session) is None
 
