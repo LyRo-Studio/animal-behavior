@@ -2310,6 +2310,18 @@ uploads through #94's chunked protocol and submits through #97's
   `_C1_`/`_C2_`) when the field is still empty. The backend still validates
   the filename against the Test/camera at upload start.
 
+**Cutting-worker image missing backend modules (bug fix, 2026-09-28).**
+`cutting-worker/Dockerfile` copies a hand-picked slice of `backend/app`.
+#96 (`media_browser.has_cuts`) and #99 (`audit_log`) added imports to
+`app/services/cutting_jobs.py` without adding those files to the list, so
+the real container crash-looped on `ModuleNotFoundError` at startup and
+every cutting job stayed `queued`. The tests missed it because they run
+against the whole backend. Both files are now copied, and
+`cutting-worker/tests/test_dockerfile.py` follows every `app…` import
+reachable from `cutting_worker/` and fails if the Dockerfile's `COPY` list
+doesn't cover it. That runs in CI with no Docker build needed.
+`worker/Dockerfile` uses the same kind of list and has no such guard yet.
+
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
 (`consolidatie.py`, `observer_import.py`) is pre-existing Observer XT
