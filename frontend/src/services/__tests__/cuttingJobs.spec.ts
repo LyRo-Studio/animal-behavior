@@ -298,6 +298,7 @@ const JOB_RESPONSE = {
   created_at: '2026-09-24T10:00:00Z',
   started_at: null,
   finished_at: null,
+  source_retained: true,
   outputs: [
     { camera: 'C1', condition: 'ME', phase: 'F1', status: 'pending', failure_reason: null },
   ],
@@ -446,6 +447,7 @@ describe('fetching a cutting job', () => {
       createdAt: '2026-09-24T10:00:00Z',
       startedAt: null,
       finishedAt: null,
+      sourceRetained: true,
       outputs: [
         { camera: 'C1', condition: 'ME', phase: 'F1', status: 'pending', failureReason: null },
       ],

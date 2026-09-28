@@ -13,6 +13,7 @@ module is the entire storage layer for them.
 
 import asyncio
 import json
+import logging
 import re
 import shutil
 import uuid
@@ -22,6 +23,8 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.services.timestamp_excel import normalize_test_id
+
+logger = logging.getLogger(__name__)
 
 _META_FILENAME = "meta.json"
 _BLOB_FILENAME = "blob"
@@ -300,18 +303,27 @@ async def append_upload_chunk(
     return result
 
 
-def discard_upload(root: Path, upload_id: str) -> None:
-    """Delete `upload_id`'s local temp storage entirely. A no-op if it's
-    already gone, or if `upload_id` isn't even shaped like a real id.
-    Called once a CuttingJob has consumed the upload (no caller does this
-    yet in this ticket — there's no cutting-worker to discard a succeeded
-    job's source, and a failed job is meant to retain it until explicitly
-    retried or cancelled, neither of which this ticket builds); exposed now
-    so that future step has the seam ready.
+def discard_source_upload(source_path: str) -> bool:
+    """Delete the whole upload directory (meta.json + blob) holding
+    `source_path`, a CuttingJob's `c1_source_path`/`c2_source_path`, and
+    report whether it's now gone (issue #172). A directory that was already
+    missing counts as gone.
+
+    The one delete the backend and the cutting-worker share, so "deleted"
+    means the same everywhere. A directory not shaped like an upload
+    (`<root>/<upload id>/blob`) is never touched: the path comes from a
+    database row, and `rmtree` on anything else would be far worse than a
+    source left behind.
     """
+    upload_dir = Path(source_path).parent
+    if not _UPLOAD_ID_RE.match(upload_dir.name):
+        logger.error("Refusing to delete %s: not an upload directory", upload_dir)
+        return False
     try:
-        upload_dir = _upload_dir(root, upload_id)
-    except UploadNotFoundError:
-        return
-    shutil.rmtree(upload_dir, ignore_errors=True)
-    _upload_locks.pop(upload_id, None)
+        shutil.rmtree(upload_dir)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.exception("Could not delete source upload %s", upload_dir)
+    _upload_locks.pop(upload_dir.name, None)
+    return not upload_dir.exists()

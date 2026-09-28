@@ -6,6 +6,7 @@ is a regular package, so same-named modules in both would otherwise shadow
 each other unpredictably. Mirrors worker/tests/doubles.py's own reasoning.
 """
 
+import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
@@ -154,11 +155,10 @@ def _workbook_bytes(test_id: str, *, reference_camera: str, phases: list[str]) -
 def _source_video(uploads_root: Path, *, camera: str, test_id: str) -> SourceVideoUpload:
     """A fake uploaded source video, laid out the same way
     app/services/cutting_uploads.py's real chunked-upload intake would leave
-    one on disk: its own directory, holding just the video bytes (`blob`
-    isn't needed as a filename here — `create_cutting_job` only cares about
-    `SourceVideoUpload.local_path`/`.filename`, not the directory shape
-    around it)."""
-    upload_dir = uploads_root / f"{camera}-{test_id}"
+    one on disk: its own directory, named like a real upload id, holding the
+    video bytes as `blob`. The real id shape matters: the shared source
+    delete (issue #172) refuses any other directory."""
+    upload_dir = uploads_root / uuid.uuid4().hex
     upload_dir.mkdir(parents=True, exist_ok=True)
     path = upload_dir / "blob"
     path.write_bytes(b"not a real video, just needs to exist")
