@@ -5,10 +5,12 @@ import { createRouter, createWebHistory } from 'vue-router'
 import CuttingJobView from '../CuttingJobView.vue'
 
 const getCuttingJobMock = vi.hoisted(() => vi.fn())
+const cancelCuttingJobMock = vi.hoisted(() => vi.fn())
 
 vi.mock('@/services/cuttingJobs', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/cuttingJobs')>()),
   getCuttingJob: getCuttingJobMock,
+  cancelCuttingJob: cancelCuttingJobMock,
 }))
 
 // The real class, so the view's `instanceof` check sees the same constructor.
@@ -81,6 +83,7 @@ describe('CuttingJobView', () => {
   afterEach(() => {
     vi.useRealTimers()
     getCuttingJobMock.mockReset()
+    cancelCuttingJobMock.mockReset()
   })
 
   it("shows the job's Test, status, requester, and how many of its Cuts are done", async () => {
@@ -246,5 +249,63 @@ describe('CuttingJobView', () => {
 
     expect(wrapper.find('[role="alert"]').text()).toBe('Cutting job not found.')
     expect(getCuttingJobMock).not.toHaveBeenCalled()
+  })
+  // Issue #168.
+  it.each(['running', 'succeeded', 'failed', 'cancelled'])(
+    'offers Cancel only while the job is queued, not when %s',
+    async (status) => {
+      getCuttingJobMock.mockResolvedValue(job({ status }))
+
+      const wrapper = await mountView('31')
+
+      expect(wrapper.find('[data-testid="cancel"]').exists()).toBe(false)
+    },
+  )
+
+  it('cancels a queued job straight away and shows it as cancelled without polling', async () => {
+    getCuttingJobMock.mockResolvedValue(job({ status: 'queued', outputs: [output('ME', 'F1')] }))
+    cancelCuttingJobMock.mockResolvedValue(
+      job({
+        status: 'cancelled',
+        finishedAt: '2026-09-28T12:00:00Z',
+        sourceRetained: false,
+        outputs: [output('ME', 'F1')],
+      }),
+    )
+    const wrapper = await mountView('31')
+
+    await wrapper.find('[data-testid="cancel"]').trigger('click')
+    await flushPromises()
+
+    expect(cancelCuttingJobMock).toHaveBeenCalledWith(31)
+    expect(wrapper.find('[data-testid="job-status"]').text()).toBe('Cancelled')
+    expect(wrapper.find('[data-testid="cancel"]').exists()).toBe(false)
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(getCuttingJobMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("shows why a cancel was refused and keeps the job's page usable", async () => {
+    getCuttingJobMock.mockResolvedValue(job({ status: 'queued' }))
+    cancelCuttingJobMock.mockRejectedValue(new Error('Only a queued cutting job can be cancelled.'))
+    const wrapper = await mountView('31')
+
+    await wrapper.find('[data-testid="cancel"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="cancel-error"]').text()).toBe(
+      'Only a queued cutting job can be cancelled.',
+    )
+  })
+
+  it("hides a cancelled job's per-phase progress, since none of its phases ran", async () => {
+    getCuttingJobMock.mockResolvedValue(
+      job({ status: 'cancelled', finishedAt: '2026-09-28T12:00:00Z' }),
+    )
+
+    const wrapper = await mountView('31')
+
+    expect(wrapper.find('[data-testid="job-status"]').text()).toBe('Cancelled')
+    expect(phaseRows(wrapper)).toEqual([])
+    expect(wrapper.find('[data-testid="cuts-done"]').exists()).toBe(false)
   })
 })

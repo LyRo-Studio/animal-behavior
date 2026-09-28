@@ -34,6 +34,8 @@ class AuditAction(str, enum.Enum):
     CUTTING_STARTED = "cutting_started"
     CUTTING_COMPLETED = "cutting_completed"
     CUTTING_FAILED = "cutting_failed"
+    # Issue #168.
+    CUTTING_CANCELLED = "cutting_cancelled"
 
 
 class AuditLog(Base):

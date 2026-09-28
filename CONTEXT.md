@@ -2587,6 +2587,77 @@ time judgment calls:
 - **Frontend:** `CuttingJob` gains `sourceRetained`, with no visible change
   yet; #169's Discard source button is the first thing to read it.
 
+**One upload feeds exactly one job, implemented (issue #173).** Part of
+#167. `create_cutting_job` now rejects a job whose source upload another
+CuttingJob already points at. Until now only the frontend avoided sharing
+(#100 forgets an upload id once a job is created from it). Implementation-
+time judgment calls:
+
+- **Checked in `create_cutting_job`, not `submit_cutting_job`:** it's the one
+  place a job's source paths are written, so every caller is covered,
+  including direct ones such as the cutting-worker's test doubles. It runs
+  per upload, right after the filename check and before the ffprobe and S3
+  checks, since it's a single cheap query.
+- **"Already used" means a job row still holds the path**, in either
+  column, whatever that job's status. A succeeded job's upload directory is
+  deleted by the cutting-worker, so resubmitting that upload is reported as
+  unknown before this check runs. Since #172 (PR #176), every delete also
+  clears the path, so a deleted source never counts as used.
+- **409, naming the camera, the filename and the other job**
+  ("The C1 upload T001_C1_source.mp4 is already used by cutting job 12.
+  Upload the video again to cut it again."). It's a conflict with existing
+  state, like the source-collision 409, not a malformed request. It has no
+  `code`, so the frontend shows it as-is. A batch reports it in that Test's
+  own result; the other Tests are unaffected.
+- **Known gap: two concurrent submissions of the same upload can both get
+  through**, since each checks before either commits. Only a client that
+  deliberately reuses an upload id can hit it; the frontend never does. A
+  partial unique index on each source-path column would close it for good,
+  but that needs a migration and wasn't asked for. Revisit if it's ever
+  seen.
+
+**Cancel a queued cutting job, implemented (issue #168).** Part of #167:
+`POST /cutting-jobs/{id}/cancel`, `cancel_cutting_job`, the
+`CUTTING_CANCELLED` audit action (migration 0018) and the Cancel button on
+`CuttingJobView`. Implementation-time judgment calls:
+
+- **The source is deleted after the cancel commits, and its errors are
+  swallowed.** `cancel_cutting_job` commits the status and the audit row
+  first, then calls `delete_cutting_job_sources` (#172). Anything that goes
+  wrong there is logged and never undoes or fails the cancel. The job is
+  refreshed and returned as it now stands, with `source_retained` true if
+  the delete didn't finish.
+  - If the delete's own commit fails, the session needs a rollback before
+    that refresh (caught in review: without it the endpoint answered 500
+    for a cancel that had succeeded). The rollback runs only when
+    `db.is_active` is false. Unconditionally it would be harmless in
+    production, but inside the tests' outer transaction it undoes the whole
+    test. For the same reason that one path is untested; a delete that
+    raises (the session still usable) is tested.
+  - If the delete fails partway, a path already cleared in memory is
+    restored by the refresh, although its directory may be gone. The job
+    then reports a Retained source it partly lacks; Discard source (#169)
+    treats a missing directory as gone, so it's cleaned up there.
+- **Same 404/409 shape as the analysis cancel**, with "Cutting job not
+  found." and "Only a queued cutting job can be cancelled." A cancelled job
+  can't be cancelled again (409).
+- **Tests live in `test_cutting_jobs_api.py`**, as a new section, rather
+  than a separate file like `test_analyses_cancel.py`, so they reuse that
+  file's upload/submit/audit helpers. The claim/cancel race is tested in
+  sequence, per #167's testing decisions.
+- **No dedicated test for migration 0018,** like 0011–0015. The API test
+  covers it: the audit write is best-effort, so without the enum value the
+  `CUTTING_CANCELLED` row would be silently dropped and the test would fail.
+- **The job page hides the Cuts count as well as the phase table** for a
+  cancelled job. "0 of 15 done" would suggest the phases are still to come.
+  The Cancel button, its "Cancelling…" state and its error mirror
+  `AnalysisView`; the returned job replaces the displayed one through
+  `usePolledJob`'s `replace`, which also stops polling.
+- **One request helper in the frontend service:** `getCuttingJob` and
+  `cancelCuttingJob` share `requestCuttingJob`, like `analyses.ts`'s
+  `requestAnalysisJob`, so a 404 on cancel is a `CuttingJobNotFoundError`
+  too (caught in review).
+
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
 (`consolidatie.py`, `observer_import.py`) is pre-existing Observer XT

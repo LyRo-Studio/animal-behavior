@@ -5,6 +5,7 @@ ticket #45's own scoping for AnalysisJob ("data model and request/status
 API before the worker exists").
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +41,8 @@ from app.services.timestamp_excel import (
     normalize_test_id,
     read_test_row,
 )
+
+logger = logging.getLogger(__name__)
 
 # One (condition, phase) slot per expected CuttingJobOutput, per uploaded
 # camera — ZE_F8 deliberately excluded: every phase is sliced [this
@@ -136,6 +139,16 @@ class CutsAlreadyExistError(Exception):
 
 class CuttingJobNotFoundError(Exception):
     """Raised for a nonexistent CuttingJob id."""
+
+
+class CuttingJobNotCancellableError(Exception):
+    """Raised when cancelling a CuttingJob that isn't `queued` (issue
+    #168): a running job is never interrupted, and a finished one's history
+    is never rewritten."""
+
+    def __init__(self, status: CuttingJobStatus) -> None:
+        self.status = status
+        super().__init__(status)
 
 
 class SourceUploadNotUsableError(Exception):
@@ -622,6 +635,56 @@ def delete_cutting_job_sources(db: Session, job: CuttingJob) -> bool:
     db.add(job)
     db.commit()
     return not job.source_retained
+
+
+def cancel_cutting_job(
+    db: Session, *, cutting_job_id: int, cancelled_by: AuditIdentity = AuditIdentity()
+) -> CuttingJob:
+    """Cancel the `queued` CuttingJob `cutting_job_id`, whoever requested it
+    (issue #168), then delete its source.
+
+    Raises CuttingJobNotFoundError for an unknown id and
+    CuttingJobNotCancellableError for any other status. `SELECT ... FOR
+    UPDATE` for the same reason as `cancel_analysis_job`: the cutting-worker
+    claims with `SKIP LOCKED`, so a cancel and a claim can never both win.
+
+    The CUTTING_CANCELLED audit row goes in the same commit as the status,
+    like CUTTING_STARTED in `create_cutting_job`. The source is deleted only
+    after that commit, and a delete that fails never undoes the cancel: the
+    job then keeps a Retained source, which Discard source (#169) accepts.
+    The outputs are left `pending`; they never ran.
+    """
+    job = db.scalar(select(CuttingJob).where(CuttingJob.id == cutting_job_id).with_for_update())
+    if job is None:
+        raise CuttingJobNotFoundError(cutting_job_id)
+    if job.status != CuttingJobStatus.QUEUED:
+        raise CuttingJobNotCancellableError(job.status)
+
+    job.status = CuttingJobStatus.CANCELLED
+    job.finished_at = datetime.now(UTC)
+    db.add(job)
+    record_audit_event(
+        db,
+        identity=cancelled_by.identity,
+        identity_verified=cancelled_by.verified,
+        action=AuditAction.CUTTING_CANCELLED,
+        target_type=AUDIT_TARGET_TYPE,
+        target=str(job.id),
+    )
+    db.commit()
+
+    try:
+        delete_cutting_job_sources(db, job)
+    except Exception:
+        logger.exception("cutting_job_id=%s cancelled, but deleting its source failed", job.id)
+        # A failed commit inside the delete leaves the session unusable until
+        # it's rolled back; the cancel itself is already committed. Only then:
+        # a rollback with nothing to undo would be harmless in production, but
+        # inside the tests' outer transaction it would undo the whole test.
+        if not db.is_active:
+            db.rollback()
+    db.refresh(job)
+    return job
 
 
 def requeue_stuck_running_cutting_jobs(db: Session) -> list[CuttingJob]:
