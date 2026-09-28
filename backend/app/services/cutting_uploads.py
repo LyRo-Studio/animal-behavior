@@ -303,17 +303,20 @@ async def append_upload_chunk(
     return result
 
 
-def discard_source_upload(source_path: str) -> bool:
+def delete_source_upload(source_path: str) -> bool:
     """Delete the whole upload directory (meta.json + blob) holding
     `source_path`, a CuttingJob's `c1_source_path`/`c2_source_path`, and
     report whether it's now gone (issue #172). A directory that was already
     missing counts as gone.
 
     The one delete the backend and the cutting-worker share, so "deleted"
-    means the same everywhere. A directory not shaped like an upload
-    (`<root>/<upload id>/blob`) is never touched: the path comes from a
-    database row, and `rmtree` on anything else would be far worse than a
-    source left behind.
+    means the same everywhere; the user-facing Discard source (#169) is one
+    of its callers. A directory whose name isn't an upload id is never
+    touched: the path comes from a database row, and `rmtree` on anything
+    else would be far worse than a source left behind. Only the name is
+    checked, not that the directory sits under the upload root: the backend
+    wrote the path itself, so this is a guard against a corrupt row, not
+    validation of outside input.
     """
     upload_dir = Path(source_path).parent
     if not _UPLOAD_ID_RE.match(upload_dir.name):

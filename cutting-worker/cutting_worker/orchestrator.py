@@ -25,7 +25,7 @@ from app.services.audit_log import record_audit_event
 from app.services.cutting_jobs import (
     AUDIT_TARGET_TYPE,
     claim_next_queued_cutting_job,
-    discard_cutting_job_sources,
+    delete_cutting_job_sources,
     finalize_cutting_job,
 )
 from app.services.s3_client import S3Client
@@ -174,7 +174,7 @@ def _run_claimed_job(
 
     finalized = _finalize_and_audit_job(db, job)
     if finalized.status == CuttingJobStatus.SUCCEEDED:
-        _discard_source_uploads(db, job)
+        _delete_source_uploads(db, job)
 
 
 def _finalize_and_audit_job(db: Session, job: CuttingJob) -> CuttingJob:
@@ -285,14 +285,27 @@ def _expected_output_filename(job: CuttingJob, output: CuttingJobOutput) -> str:
     )
 
 
-def _discard_source_uploads(db: Session, job: CuttingJob) -> None:
+def _delete_source_uploads(db: Session, job: CuttingJob) -> None:
     """Delete `job`'s local source upload(s) (CONTEXT.md's Feature C
     decision: "on success the local upload is discarded immediately") and
     clear each path whose directory is really gone (issue #172). A delete
     that fails is logged and its path stays set, so the job still reports a
     Retained source; the job itself stays `succeeded` regardless.
+
+    Never raises. The delete commits, so it can fail, but the job's outcome
+    and its audit row are already committed by then; an error reaching
+    `process_next_job`'s catch-all recovery would finalize it a second time.
     """
-    if not discard_cutting_job_sources(db, job):
+    try:
+        retained = not delete_cutting_job_sources(db, job)
+    except Exception:
+        logger.exception(
+            "cutting_job_id=%s test_id=%s error while deleting its source after success",
+            job.id,
+            job.test_id,
+        )
+        return
+    if retained:
         logger.warning(
             "cutting_job_id=%s test_id=%s succeeded but its source upload is still on disk",
             job.id,
