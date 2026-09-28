@@ -420,8 +420,8 @@ export async function submitCuttingJobBatch(
 export class CuttingJobNotFoundError extends Error {}
 
 // One cutting job from `url`: a 404 becomes CuttingJobNotFoundError, any other
-// failure the backend's detail (or `fallback`). Shared by fetching and
-// cancelling, like analyses.ts's requestAnalysisJob.
+// failure the backend's detail (or `fallback`). Shared by fetching,
+// cancelling and discarding a source, like analyses.ts's requestAnalysisJob.
 async function requestCuttingJob(
   url: string,
   init: RequestInit | undefined,
@@ -453,6 +453,17 @@ export async function cancelCuttingJob(id: number): Promise<CuttingJob> {
     `${API_BASE_URL}/cutting-jobs/${id}/cancel`,
     { method: 'POST' },
     'Failed to cancel the cutting job.',
+  )
+}
+
+// Issue #169: delete a failed or cancelled job's Retained source; its status
+// doesn't change. A job with nothing to discard gets a 409, and a delete that
+// failed an error saying to try again; both details are shown as-is.
+export async function discardCuttingJobSource(id: number): Promise<CuttingJob> {
+  return requestCuttingJob(
+    `${API_BASE_URL}/cutting-jobs/${id}/discard-source`,
+    { method: 'POST' },
+    "Failed to discard the cutting job's source.",
   )
 }
 

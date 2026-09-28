@@ -9,6 +9,7 @@ import {
   CuttingJobNotFoundError,
   cancelCuttingJob,
   cutsDone,
+  discardCuttingJobSource,
   getCuttingJob,
   type Camera,
   type CuttingJob,
@@ -60,9 +61,42 @@ async function cancel() {
   }
 }
 
-// A cancel error belongs to the job it was about.
+// Issue #169: a failed job's Retained source, or a cancelled one's whose
+// delete failed at cancel time, can be discarded by anyone. It throws away a
+// multi-GB upload, so it takes a second, inline click, like consolidation
+// delete. The job's status doesn't change.
+const canDiscardSource = computed(
+  () =>
+    !!job.value &&
+    job.value.sourceRetained &&
+    (job.value.status === 'failed' || job.value.status === 'cancelled'),
+)
+const isConfirmingDiscard = ref(false)
+const isDiscarding = ref(false)
+const discardError = ref<string | null>(null)
+
+async function discardSource() {
+  if (!job.value || isDiscarding.value) return
+
+  isDiscarding.value = true
+  discardError.value = null
+  try {
+    replace(await discardCuttingJobSource(job.value.id))
+  } catch (err) {
+    discardError.value =
+      err instanceof Error ? err.message : "Failed to discard the cutting job's source."
+  } finally {
+    isDiscarding.value = false
+    isConfirmingDiscard.value = false
+  }
+}
+
+// A cancel or discard error, or a pending confirmation, belongs to the job it
+// was about.
 watch(jobId, () => {
   cancelError.value = null
+  discardError.value = null
+  isConfirmingDiscard.value = false
 })
 
 // A cancelled job never ran a phase (issue #168), so its Cuts count and
@@ -182,6 +216,47 @@ const failedOutputs = computed(
           role="alert"
         >
           {{ cancelError }}
+        </p>
+
+        <div v-if="canDiscardSource" class="mt-6 flex items-center gap-3 text-sm">
+          <template v-if="isConfirmingDiscard">
+            <span class="text-muted">Discard permanently?</span>
+            <button
+              type="button"
+              data-testid="discard-source-confirm"
+              :disabled="isDiscarding"
+              class="font-medium text-danger hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+              @click="discardSource"
+            >
+              {{ isDiscarding ? 'Discarding…' : 'Discard' }}
+            </button>
+            <button
+              type="button"
+              data-testid="discard-source-keep"
+              :disabled="isDiscarding"
+              class="text-muted hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+              @click="isConfirmingDiscard = false"
+            >
+              Keep
+            </button>
+          </template>
+          <button
+            v-else
+            type="button"
+            data-testid="discard-source"
+            class="rounded-md border border-border px-4 py-2 font-medium text-danger hover:bg-background"
+            @click="isConfirmingDiscard = true"
+          >
+            Discard source
+          </button>
+        </div>
+        <p
+          v-if="discardError"
+          data-testid="discard-source-error"
+          class="mt-4 text-sm text-danger"
+          role="alert"
+        >
+          {{ discardError }}
         </p>
 
         <div

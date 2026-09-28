@@ -151,6 +151,22 @@ class CuttingJobNotCancellableError(Exception):
         super().__init__(status)
 
 
+class CuttingSourceNotDiscardableError(Exception):
+    """Raised when discarding the source of a CuttingJob that has no
+    Retained source, or isn't `failed` or `cancelled` (issue #169): a queued
+    or running job still needs its source, and a succeeded one's is deleted
+    by the cutting-worker."""
+
+    def __init__(self, status: CuttingJobStatus) -> None:
+        self.status = status
+        super().__init__(status)
+
+
+class CuttingSourceNotDeletedError(Exception):
+    """Raised when Discard source (issue #169) couldn't delete every
+    directory; the job keeps a Retained source, ready to try again."""
+
+
 class SourceUploadNotUsableError(Exception):
     """An upload id named in a submission can't be used for it (ticket #97
     moved this check here from the API layer, so one bad upload id fails
@@ -628,13 +644,23 @@ def delete_cutting_job_sources(db: Session, job: CuttingJob) -> bool:
     A path whose delete failed stays set, so `source_retained` never claims
     a source is gone while it still fills the upload storage cap.
     """
+    _clear_deleted_source_paths(job)
+    db.add(job)
+    db.commit()
+    return not job.source_retained
+
+
+def _clear_deleted_source_paths(job: CuttingJob) -> bool:
+    """Delete `job`'s uploaded source(s), clearing each path whose directory
+    is really gone, without committing. Returns whether any path was
+    cleared."""
+    cleared = False
     for attribute in ("c1_source_path", "c2_source_path"):
         source_path = getattr(job, attribute)
         if source_path is not None and delete_source_upload(source_path):
             setattr(job, attribute, None)
-    db.add(job)
-    db.commit()
-    return not job.source_retained
+            cleared = True
+    return cleared
 
 
 def cancel_cutting_job(
@@ -684,6 +710,50 @@ def cancel_cutting_job(
         if not db.is_active:
             db.rollback()
     db.refresh(job)
+    return job
+
+
+_SOURCE_DISCARDABLE_STATUSES = frozenset({CuttingJobStatus.FAILED, CuttingJobStatus.CANCELLED})
+
+
+def discard_cutting_job_source(
+    db: Session, *, cutting_job_id: int, discarded_by: AuditIdentity = AuditIdentity()
+) -> CuttingJob:
+    """Discard the Retained source of the `failed` or `cancelled` CuttingJob
+    `cutting_job_id`, whoever requested it (issue #169). Its status never
+    changes: a failed job's history still shows that it ran and failed.
+
+    Raises CuttingJobNotFoundError for an unknown id and
+    CuttingSourceNotDiscardableError for a job with no Retained source or
+    any other status. The row is locked, like `cancel_cutting_job`, so two
+    discards can't both delete and audit the same source.
+
+    Every path whose directory is really gone is cleared, in the same commit
+    as the CUTTING_SOURCE_DISCARDED audit row; the row is written whenever
+    something was cleared, even if another camera's delete failed, since
+    that data is gone either way. If anything is still retained afterwards
+    it raises CuttingSourceNotDeletedError, and the job can be discarded
+    again.
+    """
+    job = db.scalar(select(CuttingJob).where(CuttingJob.id == cutting_job_id).with_for_update())
+    if job is None:
+        raise CuttingJobNotFoundError(cutting_job_id)
+    if job.status not in _SOURCE_DISCARDABLE_STATUSES or not job.source_retained:
+        raise CuttingSourceNotDiscardableError(job.status)
+
+    if _clear_deleted_source_paths(job):
+        record_audit_event(
+            db,
+            identity=discarded_by.identity,
+            identity_verified=discarded_by.verified,
+            action=AuditAction.CUTTING_SOURCE_DISCARDED,
+            target_type=AUDIT_TARGET_TYPE,
+            target=str(job.id),
+        )
+    db.add(job)
+    db.commit()
+    if job.source_retained:
+        raise CuttingSourceNotDeletedError(job.id)
     return job
 
 

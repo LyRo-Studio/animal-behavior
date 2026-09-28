@@ -2658,6 +2658,52 @@ time judgment calls:
   `requestAnalysisJob`, so a 404 on cancel is a `CuttingJobNotFoundError`
   too (caught in review).
 
+**Discard a failed job's source, implemented (issue #169).** Part of #167:
+`POST /cutting-jobs/{id}/discard-source`, `discard_cutting_job_source`, the
+`CUTTING_SOURCE_DISCARDED` audit action (migration 0019) and the Discard
+source button on `CuttingJobView`. Implementation-time judgment calls:
+
+- **Locked like cancel.** The row is read `FOR UPDATE`, so two discards
+  can't both delete and audit the same source; the second gets a 409.
+- **One 409 for "nothing to discard"**, whether the status is wrong or the
+  job has no Retained source: "Only the kept source of a failed or cancelled
+  cutting job can be discarded." The status is never changed.
+- **A delete that fails is a 500** with "The source video couldn't be
+  deleted. Try discarding it again." It's a server-side failure, not a
+  conflict with the job's state, and retrying can succeed.
+- **The audit row is written whenever a path was cleared**, in the same
+  commit, even if the other camera's delete failed and the request answers
+  500. That camera's data is gone either way, so it's recorded; a retry
+  that deletes the rest writes a second row. Nothing cleared, no row.
+- **`delete_cutting_job_sources` gained a non-committing helper**
+  (`_clear_deleted_source_paths`), so the discard can put the cleared paths
+  and its audit row in one commit. Tests still swap only
+  `app.services.cutting_jobs.delete_source_upload`.
+- **An unexpected error while deleting isn't caught**, unlike cancel's:
+  nothing is committed yet, so the request answers 500 and the whole
+  discard rolls back. A directory already removed then counts as gone on
+  the retry.
+- **The button also checks the status**, not only `sourceRetained`: a
+  queued or running job's source is retained too, and the backend refuses
+  it. Its "Discard permanently?" → Discard / Keep mirrors consolidation
+  delete; a failed discard shows the backend's detail and leaves the button
+  there to retry.
+- **Known gaps**, none worth a fix yet; revisit if one is ever seen:
+  - A succeeded job whose worker delete failed keeps a Retained source that
+    nothing in the app can remove, since #167 limits Discard source to
+    failed and cancelled jobs.
+  - A path whose directory isn't upload-shaped (a corrupt row, see #172's
+    name guard) is never deleted, so its discard answers 500 "Try
+    discarding it again" every time.
+  - Cancel deletes its source after its own commit, outside the row lock.
+    A discard landing in that moment sees a cancelled job with a Retained
+    source, finds the directory gone and writes a CUTTING_SOURCE_DISCARDED
+    row for a delete the cancel did. The button only appears once the
+    cancel has returned, so only a hand-made request can hit it.
+- **No dedicated test for migration 0019,** like 0018: without the enum
+  value the best-effort audit write would drop the row, and the API tests
+  would fail.
+
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
 (`consolidatie.py`, `observer_import.py`) is pre-existing Observer XT
