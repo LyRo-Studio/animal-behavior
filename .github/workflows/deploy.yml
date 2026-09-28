@@ -28,6 +28,16 @@ env:
   WORKER_IMAGE: ghcr.io/lyro-studio/animal-behavior-worker
   CUTTING_WORKER_IMAGE: ghcr.io/lyro-studio/animal-behavior-cutting-worker
   NGINX_IMAGE: ghcr.io/lyro-studio/animal-behavior-nginx
+  # Build with the Docker daemon's own builder (the `docker` driver), never
+  # a per-run docker-container builder: its layer cache then persists across
+  # runs and is capped below (CONTEXT.md's "Deploy disk usage" decision).
+  # Pinned by name because `docker/setup-buildx-action`, used before, ran
+  # `docker buildx create --use`, which can leave root's current builder
+  # pointing at a builder a crashed run never removed.
+  BUILDX_BUILDER: default
+  # Most build cache kept after a run, least recently used pruned first:
+  # room for the CUDA base layers every worker build reuses.
+  BUILD_CACHE_MAX_USED_SPACE: 20gb
 
 jobs:
   deploy:
@@ -159,6 +169,18 @@ jobs:
           mv "$tmp" .env
           chmod 600 .env
 
+      # Before any build or pull, not only at the end: a full disk kills the
+      # runner process itself, and then none of the job's remaining steps
+      # run, `if: always()` ones included. Cleaning up first means one
+      # crashed run can't leave the next one without space too.
+      # Never touches volumes (user data, e.g. cutting uploads). The image
+      # prune skips every image a container (running or stopped) uses, and
+      # a rollback pulls its tag from GHCR again, so no local copy is needed.
+      - name: Free disk space
+        run: |
+          docker buildx prune --force --max-used-space "$BUILD_CACHE_MAX_USED_SPACE"
+          docker image prune --all --force --filter "until=72h"
+
       # Needed both to push the newly built images and to pull an existing
       # tag back down on a rollback dispatch.
       - name: Log in to GHCR
@@ -167,10 +189,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        if: steps.image.outputs.build == 'true'
-        uses: docker/setup-buildx-action@v3
 
       - name: Build and push backend image
         if: steps.image.outputs.build == 'true'
@@ -277,3 +295,14 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.prod.yml \
             --profile worker --profile cutting-worker \
             up -d --pull always --no-build --wait --wait-timeout 600
+
+      # Only after a successful deploy: the images just replaced are then
+      # unused. Same filter and guarantees as "Free disk space" above.
+      - name: Remove old images
+        run: docker image prune --all --force --filter "until=72h"
+
+      # Even after a failed or cancelled run, so a half-finished build's
+      # cache is capped straight away rather than on the next run.
+      - name: Cap build cache
+        if: always()
+        run: docker buildx prune --force --max-used-space "$BUILD_CACHE_MAX_USED_SPACE"
