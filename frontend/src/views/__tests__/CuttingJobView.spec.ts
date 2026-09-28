@@ -54,6 +54,7 @@ function job(overrides: Record<string, unknown> = {}) {
     createdAt: '2026-09-24T10:00:00Z',
     startedAt: '2026-09-24T10:01:00Z',
     finishedAt: null,
+    sourceRetained: true,
     outputs: [output('ME', 'F1', 'succeeded'), output('ME', 'F2'), output('ME', 'F3')],
     ...overrides,
   }

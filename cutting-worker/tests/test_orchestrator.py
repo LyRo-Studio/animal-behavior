@@ -57,6 +57,41 @@ def test_process_next_job_succeeds_uploads_every_cut_and_discards_source(
     assert not Path(upload_path).parent.exists()
 
 
+def test_a_succeeded_job_no_longer_reports_a_retained_source(db_session, work_root, uploads_root):
+    """Issue #172: the source paths are cleared once the directories are
+    gone, so `source_retained` stops claiming a source the job no longer
+    has."""
+    job = build_cutting_job(db_session, cameras=("C1", "C2"), uploads_root=uploads_root)
+
+    process_next_job(
+        db_session, s3_client=FakeS3Client(), video_cutter=FakeVideoCutter(), work_root=work_root
+    )
+
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.SUCCEEDED
+    assert job.c1_source_path is None
+    assert job.c2_source_path is None
+    assert job.source_retained is False
+
+
+def test_a_source_that_cant_be_deleted_after_success_stays_retained(
+    db_session, work_root, uploads_root, monkeypatch
+):
+    """Issue #172: a failed delete is never hidden. The job still succeeds,
+    but its path stays set, so the leftover source is still visible."""
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+    monkeypatch.setattr("app.services.cutting_jobs.delete_source_upload", lambda source_path: False)
+
+    process_next_job(
+        db_session, s3_client=FakeS3Client(), video_cutter=FakeVideoCutter(), work_root=work_root
+    )
+
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.SUCCEEDED
+    assert job.c1_source_path is not None
+    assert job.source_retained is True
+
+
 def test_process_next_job_missing_phase_output_fails_job_and_keeps_source(
     db_session, work_root, uploads_root
 ):
@@ -84,6 +119,7 @@ def test_process_next_job_missing_phase_output_fails_job_and_keeps_source(
     upload_path = job.c1_source_path
     assert upload_path is not None
     assert Path(upload_path).is_file()
+    assert job.source_retained is True
 
 
 def test_process_next_job_both_cameras_computes_offset_and_uploads_all(
@@ -439,6 +475,31 @@ def test_an_error_escaping_the_run_still_writes_exactly_one_cutting_failed_row(
     (row,) = _terminal_audit_rows_for(db_session, job)
     assert row.action == AuditAction.CUTTING_FAILED
     assert row.failure_reason == "1 of 15 Cuts failed."
+
+
+def test_an_error_while_deleting_the_source_after_success_never_refinalizes_the_job(
+    db_session, work_root, uploads_root, monkeypatch
+):
+    """Issue #172: the delete after a success now commits, so it can raise.
+    The job's outcome is already committed by then, so that error must never
+    reach `process_next_job`'s catch-all recovery and finalize it again."""
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("simulated failure while deleting the source")
+
+    monkeypatch.setattr("cutting_worker.orchestrator.delete_cutting_job_sources", _raise)
+
+    process_next_job(
+        db_session, s3_client=FakeS3Client(), video_cutter=FakeVideoCutter(), work_root=work_root
+    )
+
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.SUCCEEDED
+    assert job.source_retained is True
+    assert [row.action for row in _terminal_audit_rows_for(db_session, job)] == [
+        AuditAction.CUTTING_COMPLETED
+    ]
 
 
 def test_a_failed_audit_write_after_success_never_fails_the_job(
