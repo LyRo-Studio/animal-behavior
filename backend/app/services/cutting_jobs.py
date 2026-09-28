@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.audit_log import AuditAction
@@ -141,7 +141,7 @@ class CuttingJobNotFoundError(Exception):
 class SourceUploadNotUsableError(Exception):
     """An upload id named in a submission can't be used for it (ticket #97
     moved this check here from the API layer, so one bad upload id fails
-    only its own Test within a batch). See the three subclasses."""
+    only its own Test within a batch). See the four subclasses."""
 
     def __init__(self, camera: str) -> None:
         self.camera = camera
@@ -158,6 +158,17 @@ class IncompleteSourceUploadError(SourceUploadNotUsableError):
 
 class MismatchedSourceUploadError(SourceUploadNotUsableError):
     """The upload was declared for a different Test or camera."""
+
+
+class SourceUploadAlreadyUsedError(SourceUploadNotUsableError):
+    """The upload already feeds another CuttingJob (issue #173). One upload
+    feeds exactly one job, so deleting one job's source (after a success,
+    on Cancel or on Discard source) can never remove another's."""
+
+    def __init__(self, camera: str, *, filename: str, cutting_job_id: int) -> None:
+        super().__init__(camera)
+        self.filename = filename
+        self.cutting_job_id = cutting_job_id
 
 
 class EmptyBatchError(Exception):
@@ -227,6 +238,30 @@ def _derive_source_collision_key(test_id: str, filename: str) -> str:
     return f"source/{test_id}/{filename}"
 
 
+def _stored_source_path(upload: SourceVideoUpload) -> str:
+    """How `upload` is stored in a job's `c1_source_path`/`c2_source_path`.
+    Shared by `create_cutting_job` and `_ensure_upload_unused`: the "one
+    upload feeds one job" check only works while both use the same form."""
+    return str(upload.local_path)
+
+
+def _ensure_upload_unused(db: Session, upload: SourceVideoUpload) -> None:
+    """Raise SourceUploadAlreadyUsedError if another CuttingJob already
+    points at `upload`'s file. Either path column is checked, although an
+    upload's camera is fixed when it's started, so only the matching one can
+    ever hold it."""
+    path = _stored_source_path(upload)
+    existing_job_id = db.scalar(
+        select(CuttingJob.id)
+        .where(or_(CuttingJob.c1_source_path == path, CuttingJob.c2_source_path == path))
+        .limit(1)
+    )
+    if existing_job_id is not None:
+        raise SourceUploadAlreadyUsedError(
+            upload.camera, filename=upload.filename, cutting_job_id=existing_job_id
+        )
+
+
 def create_cutting_job(
     db: Session,
     *,
@@ -278,6 +313,7 @@ def create_cutting_job(
         seen_cameras.add(upload.camera)
         if not source_filename_matches_camera(upload.filename, test_id, upload.camera):
             raise InvalidSourceFilenameError(upload.filename)
+        _ensure_upload_unused(db, upload)
 
     row = read_test_row(excel_bytes, test_id)
 
@@ -308,10 +344,12 @@ def create_cutting_job(
         reference_camera=row.reference_camera,
         phase_timestamps=row.phase_timestamps,
         c1_source_path=next(
-            (str(upload.local_path) for upload in uploads if upload.camera == "C1"), None
+            (_stored_source_path(upload) for upload in uploads if upload.camera == "C1"),
+            None,
         ),
         c2_source_path=next(
-            (str(upload.local_path) for upload in uploads if upload.camera == "C2"), None
+            (_stored_source_path(upload) for upload in uploads if upload.camera == "C2"),
+            None,
         ),
     )
     job.outputs = [

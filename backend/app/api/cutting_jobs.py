@@ -45,6 +45,7 @@ from app.services.cutting_jobs import (
     MismatchedSourceUploadError,
     NoSourceVideoUploadedError,
     ReferenceCameraMismatchError,
+    SourceUploadAlreadyUsedError,
     SourceVideoCollisionError,
     SourceVideoNotDecodableError,
     UnknownSourceUploadError,
@@ -195,6 +196,12 @@ def _describe_rejection(exc: Exception) -> _Rejection:
     """`exc` is one of `CUTTING_JOB_VALIDATION_ERRORS`."""
     bad_request = status.HTTP_400_BAD_REQUEST
     match exc:
+        case SourceUploadAlreadyUsedError():
+            return _Rejection(
+                status.HTTP_409_CONFLICT,
+                f"The {exc.camera} upload {exc.filename} is already used by cutting job "
+                f"{exc.cutting_job_id}. Upload the video again to cut it again.",
+            )
         case UnknownSourceUploadError():
             return _Rejection(bad_request, f"Unknown upload for {exc.camera}.")
         case IncompleteSourceUploadError():
