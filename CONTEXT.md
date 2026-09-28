@@ -419,7 +419,9 @@ authenticated with only the workflow's own `GITHUB_TOKEN`
   disk usage grows unbounded over time. Revisit (e.g. a periodic `docker
   image prune`) if/when this becomes a real problem — not solved
   proactively here to avoid an unattended job that could prune an image a
-  manual rollback still needs.
+  manual rollback still needs. **Resolved by "Deploy disk usage" below:**
+  a rollback pulls its tag from GHCR with `--pull always`, so it never
+  needs a local copy.
 
 **Analysis worker (ticket #47, part of #44):** the `worker` Docker service
 that claims a `queued` `AnalysisJob`, runs it through DogTrace, and
@@ -1057,6 +1059,43 @@ that this replaces are marked superseded in place.
 - **Follow-up, not done here:** ADR-0003's body still describes one runner on
   one box; it now carries an amendment note pointing at this section rather
   than being rewritten, since the ADR records the original reasoning.
+
+**Deploy disk usage (2026-09-28):** `dogtrace-app` (98 GB) filled up. Two
+causes fed each other:
+
+- **Images piled up:** every deploy pulls five new `sha-*` tags and nothing
+  ever removed the old ones (the follow-up noted under ticket #36). That
+  was 147 images and 74 GB, 8 of them in use.
+- **Build caches leaked:** `docker/setup-buildx-action` created a new
+  docker-container builder (`builder-<uuid>`, with its own
+  `buildx_buildkit_*_state` volume of 2.4–9 GB) on every run, and only its
+  post step removed it. Once the disk was full, the runner process itself
+  crashed with `No space left on device` mid-build ("the self-hosted
+  runner lost communication with the server"), so post steps never ran
+  and each run leaked another builder. Those caches don't show in `docker
+  system df` and `docker system prune` doesn't touch them. Each run also
+  started with an empty cache, so the CUDA layers were rebuilt every time.
+
+Decisions:
+
+- **The Docker daemon's own builder** (`docker` driver, pinned with
+  `BUILDX_BUILDER: default`) instead of a builder per run. The deploy
+  needs none of the docker-container driver's extras (multi-platform,
+  cache export), and the daemon's cache persists across runs, so the CUDA
+  layers are reused. There's no builder left to leak.
+- **Build cache capped at 20 GB** (`BUILD_CACHE_MAX_USED_SPACE`) with
+  `docker buildx prune --max-used-space`, least recently used first.
+- **Cleanup at the start of every run as well as the end.** A full disk
+  kills the runner, and then no later step runs, `if: always()` included,
+  so "Free disk space" prunes the cache and old images before anything is
+  built or pulled. After the deploy, "Remove old images" runs on success
+  and "Cap build cache" runs always.
+- **Old images:** `docker image prune --all --filter "until=72h"` removes
+  only images no container (running or stopped) uses. Volumes are never
+  pruned anywhere: they hold user data (e.g. `cutting_uploads_data`).
+- **Not done here:** the cap only applies between builds, so one build can
+  still exceed it while it runs. A hard cap during a build would be
+  BuildKit GC in the server's `/etc/docker/daemon.json`, outside this repo.
 
 **Application-level authentication removed (ticket #72):** the app no longer
 authenticates anyone. Mechatronics authenticates the person in front of it and
