@@ -511,4 +511,25 @@ describe('CuttingJobView', () => {
     )
     expect(wrapper.find('[data-testid="retry"]').exists()).toBe(true)
   })
+
+  it("ignores a retry answered after moving on to another job's page", async () => {
+    getCuttingJobMock.mockImplementation(async (id: number) => job({ id, status: 'failed' }))
+    let answer: (reason: unknown) => void = () => {}
+    retryCuttingJobMock.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        answer = reject
+      }),
+    )
+    const wrapper = await mountView('31')
+    await wrapper.find('[data-testid="retry"]').trigger('click')
+
+    await wrapper.router.push('/cutting-jobs/32')
+    await flushPromises()
+    answer(new CutsAlreadyExistError('Cuts already exist for T001. Confirm to overwrite them.'))
+    await flushPromises()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="retry-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="retry"]').attributes('disabled')).toBeUndefined()
+  })
 })

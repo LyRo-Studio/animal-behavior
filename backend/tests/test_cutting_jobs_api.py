@@ -1465,3 +1465,20 @@ def test_a_retry_counts_against_the_same_rate_limit_as_starting_a_job(
 
     assert response.status_code == 429
     assert client.get(f"/api/cutting-jobs/{job_id}").json()["status"] == "failed"
+
+
+def test_a_retry_held_back_by_existing_cuts_keeps_the_stored_timestamps(
+    client, db_session, s3_client
+):
+    """Nothing about the job changes until the retry goes through, not even
+    the corrected workbook's timestamps."""
+    job_id = _failed_job(client, db_session)
+    s3_client.objects["cuts/T001/T001_C1_ME_F1.mp4"] = b"an earlier cut"
+
+    blocked = _retry(client, job_id, excel=_excel_bytes(phases=("ME_F1", "ME_F2", "ME_F3")))
+
+    assert blocked.status_code == 409
+    job = db_session.get(CuttingJob, job_id)
+    db_session.refresh(job)
+    assert set(job.phase_timestamps) == {"ME_F1", "ME_F2"}
+    assert len(client.get(f"/api/cutting-jobs/{job_id}").json()["outputs"]) == 2

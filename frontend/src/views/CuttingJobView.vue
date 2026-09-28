@@ -110,27 +110,34 @@ function onRetryExcelChange(event: Event) {
   retryExcel.value = (event.target as HTMLInputElement).files?.[0] ?? null
 }
 
+// Bumped by every retry and by moving to another job, so an answer for a job
+// no longer shown is dropped: above all, its re-cut dialog must never offer to
+// overwrite the Cuts of the job now on the page.
+let retryRequest = 0
+
 async function retry(confirmOverwrite = false) {
   if (!job.value || isRetrying.value) return
 
+  const request = ++retryRequest
   isRetrying.value = true
   retryError.value = null
   try {
-    replace(
-      await retryCuttingJob(job.value.id, {
-        excel: retryExcel.value ?? undefined,
-        confirmOverwrite,
-      }),
-    )
+    const retried = await retryCuttingJob(job.value.id, {
+      excel: retryExcel.value ?? undefined,
+      confirmOverwrite,
+    })
+    if (request !== retryRequest) return
+    replace(retried)
     retryExcel.value = null
   } catch (err) {
+    if (request !== retryRequest) return
     if (err instanceof CutsAlreadyExistError) {
       isConfirmingRecut.value = true
     } else {
       retryError.value = err instanceof Error ? err.message : 'Failed to retry the cutting job.'
     }
   } finally {
-    isRetrying.value = false
+    if (request === retryRequest) isRetrying.value = false
   }
 }
 
@@ -150,6 +157,8 @@ watch(jobId, () => {
   cancelError.value = null
   discardError.value = null
   isConfirmingDiscard.value = false
+  retryRequest++
+  isRetrying.value = false
   retryError.value = null
   retryExcel.value = null
   isConfirmingRecut.value = false

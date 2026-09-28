@@ -685,6 +685,17 @@ def _clear_deleted_source_paths(job: CuttingJob) -> bool:
     return cleared
 
 
+def _lock_cutting_job(db: Session, cutting_job_id: int) -> CuttingJob:
+    """The CuttingJob `cutting_job_id`, row-locked (`SELECT ... FOR UPDATE`)
+    until the caller commits, or CuttingJobNotFoundError. Shared by cancel,
+    Discard source and retry, so none of them interleave with each other or
+    with the cutting-worker's claim."""
+    job = db.scalar(select(CuttingJob).where(CuttingJob.id == cutting_job_id).with_for_update())
+    if job is None:
+        raise CuttingJobNotFoundError(cutting_job_id)
+    return job
+
+
 def cancel_cutting_job(
     db: Session, *, cutting_job_id: int, cancelled_by: AuditIdentity = AuditIdentity()
 ) -> CuttingJob:
@@ -702,9 +713,7 @@ def cancel_cutting_job(
     job then keeps a Retained source, which Discard source (#169) accepts.
     The outputs are left `pending`; they never ran.
     """
-    job = db.scalar(select(CuttingJob).where(CuttingJob.id == cutting_job_id).with_for_update())
-    if job is None:
-        raise CuttingJobNotFoundError(cutting_job_id)
+    job = _lock_cutting_job(db, cutting_job_id)
     if job.status != CuttingJobStatus.QUEUED:
         raise CuttingJobNotCancellableError(job.status)
 
@@ -757,9 +766,7 @@ def discard_cutting_job_source(
     it raises CuttingSourceNotDeletedError, and the job can be discarded
     again.
     """
-    job = db.scalar(select(CuttingJob).where(CuttingJob.id == cutting_job_id).with_for_update())
-    if job is None:
-        raise CuttingJobNotFoundError(cutting_job_id)
+    job = _lock_cutting_job(db, cutting_job_id)
     if job.status not in _SOURCE_DISCARDABLE_STATUSES or not job.source_retained:
         raise CuttingSourceNotDiscardableError(job.status)
 
@@ -807,9 +814,7 @@ def retry_cutting_job(
     goes in the same commit. The row is locked, like cancel and Discard
     source, so a retry can't interleave with either.
     """
-    job = db.scalar(select(CuttingJob).where(CuttingJob.id == cutting_job_id).with_for_update())
-    if job is None:
-        raise CuttingJobNotFoundError(cutting_job_id)
+    job = _lock_cutting_job(db, cutting_job_id)
     if job.status != CuttingJobStatus.FAILED:
         raise CuttingJobNotRetryableError(job.status)
 
@@ -821,16 +826,21 @@ def retry_cutting_job(
     if not retained_cameras or any(output.camera not in retained_cameras for output in job.outputs):
         raise CuttingSourceNotRetainedError(job.id)
 
-    if excel_bytes is not None:
-        row = read_test_row(excel_bytes, job.test_id)
-        if len(retained_cameras) == 1 and retained_cameras[0] != row.reference_camera:
-            raise ReferenceCameraMismatchError(retained_cameras[0], row.reference_camera)
-        job.reference_camera = row.reference_camera
-        job.phase_timestamps = row.phase_timestamps
+    row = read_test_row(excel_bytes, job.test_id) if excel_bytes is not None else None
+    if (
+        row is not None
+        and len(retained_cameras) == 1
+        and retained_cameras[0] != row.reference_camera
+    ):
+        raise ReferenceCameraMismatchError(retained_cameras[0], row.reference_camera)
 
     if not confirm_overwrite and has_cuts(s3, job.test_id):
         raise CutsAlreadyExistError(job.test_id)
 
+    # Only now, once every check has passed, does anything about the job change.
+    if row is not None:
+        job.reference_camera = row.reference_camera
+        job.phase_timestamps = row.phase_timestamps
     job.status = CuttingJobStatus.QUEUED
     job.started_at = None
     job.finished_at = None

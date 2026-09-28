@@ -2765,6 +2765,28 @@ Implementation-time judgment calls:
   page's `ConfirmDialog` ("Re-cut and overwrite" / "Keep existing Cuts"),
   keeping the page behind it inert. The returned queued job replaces the
   shown one through `usePolledJob`'s `replace`, which starts polling again.
+- **Nothing about the job changes until every check has passed:** a
+  corrected workbook's row is read and checked first, and applied only
+  after the Cuts check. Caught in review; before, a `cuts_already_exist`
+  409 left the new timestamps on the job, undone only because the request
+  never committed.
+- **Cancel, Discard source and retry share `_lock_cutting_job`,** the
+  locked read that answers CuttingJobNotFoundError. Caught in review, as the
+  third copy.
+- **A retry answered after the page moved to another job is dropped.** A
+  counter bumped by each retry and by the job id changing guards it. Caught
+  in review: a late "Cuts already exist" answer opened the re-cut dialog on
+  the new job's page, and confirming it would have overwritten that job's
+  Cuts.
+- **Known gaps**, none worth a fix yet; revisit if one is ever seen:
+  - A corrected workbook that skips a phase the failed attempt already cut
+    leaves that phase's old Cut in S3, as re-cutting through a new job
+    already does (#96).
+  - The cutting-worker commits a failed job and its CUTTING_FAILED row
+    separately. A retry landing between the two makes that row report the
+    retry's fresh outputs and sort after CUTTING_RETRIED.
+  - The row lock is held across the S3 Cuts check. Only this job's row is
+    locked, and the worker's claim skips it.
 - **No dedicated test for migration 0020,** like 0018 and 0019.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
