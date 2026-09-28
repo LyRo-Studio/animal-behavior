@@ -18,7 +18,7 @@ from app.services.cutting_uploads import (
     UploadStorageCapExceededError,
     UploadWouldExceedDeclaredSizeError,
     append_upload_chunk,
-    discard_upload,
+    discard_source_upload,
     get_upload_status,
     source_filename_matches_camera,
     start_upload,
@@ -268,16 +268,31 @@ def test_append_chunk_for_unknown_upload_raises(tmp_path):
         _append(tmp_path, "does-not-exist", expected_offset=0, parts=[b"x"])
 
 
-def test_discard_upload_removes_everything_on_disk(tmp_path):
+def test_discarding_a_source_upload_removes_its_whole_directory(tmp_path):
     status = start_upload(
         tmp_path, test_id="T001", camera="C1", filename="T001_C1_source.mp4", total_size_bytes=5
     )
 
-    discard_upload(tmp_path, status.upload_id)
+    gone = discard_source_upload(str(upload_blob_path(tmp_path, status.upload_id)))
 
+    assert gone is True
+    assert not (tmp_path / status.upload_id).exists()
     with pytest.raises(UploadNotFoundError):
         get_upload_status(tmp_path, status.upload_id)
 
 
-def test_discard_upload_for_unknown_id_is_a_no_op(tmp_path):
-    discard_upload(tmp_path, "does-not-exist")
+def test_discarding_a_source_upload_thats_already_gone_counts_as_gone(tmp_path):
+    missing = tmp_path / ("0" * 32) / "blob"
+
+    assert discard_source_upload(str(missing)) is True
+
+
+def test_discarding_never_touches_a_directory_that_isnt_an_upload(tmp_path):
+    """Issue #172: the path comes from a database row; `rmtree` on anything
+    but an upload directory would be far worse than a source left behind."""
+    other = tmp_path / "cuts"
+    other.mkdir()
+    (other / "blob").write_bytes(b"keep me")
+
+    assert discard_source_upload(str(other / "blob")) is False
+    assert (other / "blob").read_bytes() == b"keep me"

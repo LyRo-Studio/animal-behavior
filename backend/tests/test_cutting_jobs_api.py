@@ -774,6 +774,29 @@ def test_get_cutting_job_shows_per_phase_progress_while_still_running(client, db
     }
 
 
+def test_a_new_cutting_job_reports_its_source_as_retained(client):
+    """Issue #172: a job holds its uploaded source until it's discarded."""
+    created = _create_job(client, identity="alice@example.com")
+
+    body = client.get(f"/api/cutting-jobs/{created['id']}").json()
+
+    assert body["source_retained"] is True
+
+
+def test_a_cutting_job_whose_source_was_discarded_reports_it_as_not_retained(client, db_session):
+    """Issue #172: the cutting-worker clears a job's source paths once their
+    directories are gone; the API reports that without touching the disk."""
+    created = _create_job(client, identity="alice@example.com")
+    job = db_session.get(CuttingJob, created["id"])
+    job.status = CuttingJobStatus.SUCCEEDED
+    job.c1_source_path = None
+    db_session.commit()
+
+    body = client.get(f"/api/cutting-jobs/{created['id']}").json()
+
+    assert body["source_retained"] is False
+
+
 def test_get_cutting_job_for_unknown_id_is_not_found(client):
     response = client.get("/api/cutting-jobs/999999")
 

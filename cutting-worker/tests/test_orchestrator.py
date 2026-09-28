@@ -57,6 +57,43 @@ def test_process_next_job_succeeds_uploads_every_cut_and_discards_source(
     assert not Path(upload_path).parent.exists()
 
 
+def test_a_succeeded_job_no_longer_reports_a_retained_source(db_session, work_root, uploads_root):
+    """Issue #172: the source paths are cleared once the directories are
+    gone, so `source_retained` stops claiming a source the job no longer
+    has."""
+    job = build_cutting_job(db_session, cameras=("C1", "C2"), uploads_root=uploads_root)
+
+    process_next_job(
+        db_session, s3_client=FakeS3Client(), video_cutter=FakeVideoCutter(), work_root=work_root
+    )
+
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.SUCCEEDED
+    assert job.c1_source_path is None
+    assert job.c2_source_path is None
+    assert job.source_retained is False
+
+
+def test_a_source_that_cant_be_deleted_after_success_stays_retained(
+    db_session, work_root, uploads_root, monkeypatch
+):
+    """Issue #172: a failed delete is never hidden. The job still succeeds,
+    but its path stays set, so the leftover source is still visible."""
+    job = build_cutting_job(db_session, cameras=("C1",), uploads_root=uploads_root)
+    monkeypatch.setattr(
+        "app.services.cutting_jobs.discard_source_upload", lambda source_path: False
+    )
+
+    process_next_job(
+        db_session, s3_client=FakeS3Client(), video_cutter=FakeVideoCutter(), work_root=work_root
+    )
+
+    db_session.refresh(job)
+    assert job.status == CuttingJobStatus.SUCCEEDED
+    assert job.c1_source_path is not None
+    assert job.source_retained is True
+
+
 def test_process_next_job_missing_phase_output_fails_job_and_keeps_source(
     db_session, work_root, uploads_root
 ):

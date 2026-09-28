@@ -285,6 +285,9 @@ export interface CuttingJob {
   createdAt: string
   startedAt: string | null
   finishedAt: string | null
+  // Issue #172: whether the job's uploaded source is still on disk (a
+  // Retained source).
+  sourceRetained: boolean
   outputs: CuttingJobOutput[]
 }
 
@@ -305,6 +308,7 @@ interface CuttingJobResponse {
   created_at: string
   started_at: string | null
   finished_at: string | null
+  source_retained: boolean
   outputs: CuttingJobOutputResponse[]
 }
 
@@ -318,6 +322,7 @@ function toCuttingJob(row: CuttingJobResponse): CuttingJob {
     createdAt: row.created_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
+    sourceRetained: row.source_retained,
     outputs: row.outputs.map((output) => ({
       camera: output.camera,
       condition: output.condition,

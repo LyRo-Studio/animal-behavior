@@ -2049,7 +2049,10 @@ implementation-time judgment calls:
   stored source paths are already absolute filesystem paths, and deriving
   `root`/`upload_id` back out of one just to call `discard_upload` would add
   an indirection with no behavioral difference — both end up deleting the
-  same directory.
+  same directory. *Superseded by issue #172:* `discard_upload` is gone, and
+  every delete goes through the shared `discard_source_upload`, which takes
+  the stored path directly and no longer ignores errors. See "Source
+  retention, implemented (issue #172)" below.
 - **Volume sharing with `backend`:** the cutting-worker container mounts the
   *same* `cutting_uploads_data` volume backend writes uploads into, at the
   same path (`${CUTTING_UPLOAD_TEMP_DIR:-/data/cutting-uploads}` in both
@@ -2534,6 +2537,42 @@ source** and **Discard source** above.
   (one upload feeds one job), which can run in parallel, then #168 (Cancel)
   and #169 (Discard source). Each slice ships its own migration. The two
   out-of-scope items are `needs-triage` follow-ups.
+
+**Source retention, implemented (issue #172).** The first slice of #167:
+`CuttingJobOut.source_retained`, one shared source delete, the
+cutting-worker's delete after a success, and migration 0017. Implementation-
+time judgment calls:
+
+- **`source_retained` is a model property** (`CuttingJob.source_retained`),
+  true while either source path is set, so the API schema, the worker and
+  the coming cancel/discard services all read the same rule.
+- **Two layers of delete:**
+  - `discard_source_upload(source_path) -> bool` in
+    `app/services/cutting_uploads.py` deletes one upload directory and
+    reports whether it's gone. A directory that was already missing counts
+    as gone. It replaces ticket #94's `discard_upload(root, upload_id)`,
+    which nothing called.
+  - `discard_cutting_job_sources(db, job) -> bool` in
+    `app/services/cutting_jobs.py` runs it for each set path, clears the
+    paths that are gone, commits, and reports whether nothing is retained.
+    The cutting-worker calls this one, and #168/#169 will too. So tests
+    swap exactly one name, `app.services.cutting_jobs.discard_source_upload`,
+    to simulate a failed delete.
+- **Only upload-shaped directories are ever deleted.** The path comes from a
+  database row, so `discard_source_upload` refuses (logs and returns False)
+  any directory whose name isn't a real upload id (32 hex characters, the
+  shape `start_upload` mints). A wrong path then leaves a Retained source,
+  which is far better than `rmtree` on something else. The cutting-worker's
+  test helper used `C1-T001`-style directory names; it now uses real
+  upload-id shapes.
+- **A failed delete after a success is logged as a warning;** the job stays
+  `succeeded` with `source_retained` true. It doesn't fail the job or
+  write an audit row; the Cuts are already safely in S3.
+- **Migration 0017** clears both paths on every `succeeded` job, leaving
+  every other status alone; its downgrade is a no-op. No enum changes: the
+  two new audit actions land with #168 and #169.
+- **Frontend:** `CuttingJob` gains `sourceRetained`, with no visible change
+  yet; #169's Discard source button is the first thing to read it.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
