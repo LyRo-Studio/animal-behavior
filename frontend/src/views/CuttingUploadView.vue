@@ -8,6 +8,7 @@ import {
   forgetSourceVideoUpload,
   MAX_TESTS_PER_BATCH,
   submitCuttingJobBatch,
+  UNKNOWN_SOURCE_UPLOAD_CODE,
   uploadSourceVideo,
   type Camera,
   type CuttingJob,
@@ -171,6 +172,13 @@ function applyResult(entry: TestEntry, result: CuttingJobBatchResult) {
   if (result.job === null) {
     if (result.error?.code === CUTS_ALREADY_EXIST_CODE) {
       entry.awaitingRecutConfirmation = true
+    } else if (result.error?.code === UNKNOWN_SOURCE_UPLOAD_CODE) {
+      // Issue #171: an upload left unused long enough is deleted. Forgetting
+      // every upload id of this Test sends the next submit back through
+      // the upload service, which reuses any upload still there and starts
+      // the gone one afresh.
+      for (const camera of CAMERAS) entry.videos[camera].uploadId = null
+      entry.error = `${describeRejection(result.error)} Submit again to upload it again.`
     } else {
       entry.error = describeRejection(result.error)
     }

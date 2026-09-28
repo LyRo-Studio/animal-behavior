@@ -351,6 +351,11 @@ export interface CuttingJobBatchEntry {
 // CUTS_ALREADY_EXIST_CODE), as opposed to every other per-Test error.
 export const CUTS_ALREADY_EXIST_CODE = 'cuts_already_exist'
 
+// Issue #171's marker on an "Unknown upload" rejection: the upload is gone
+// (an upload that never became a job is deleted once abandoned), so the
+// video has to be uploaded again.
+export const UNKNOWN_SOURCE_UPLOAD_CODE = 'unknown_source_upload'
+
 // Why one Test got no job. `code` is CUTS_ALREADY_EXIST_CODE when the Test
 // already has Cuts and the submission didn't confirm overwriting them;
 // `detail` is always safe to show as-is.

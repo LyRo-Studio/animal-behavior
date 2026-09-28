@@ -19,6 +19,7 @@ import shutil
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from app.core.config import settings
@@ -149,6 +150,14 @@ def upload_blob_path(root: Path, upload_id: str) -> Path:
     return _upload_dir(root, upload_id) / _BLOB_FILENAME
 
 
+def upload_id_of(source_path: str) -> str:
+    """The upload id behind `source_path`, a CuttingJob's
+    `c1_source_path`/`c2_source_path` (the reverse of `upload_blob_path`).
+    Read from the upload directory's name alone, so a differently spelled
+    upload root still names the same upload (issue #171)."""
+    return Path(source_path).parent.name
+
+
 def _current_usage_bytes(root: Path) -> int:
     """Total bytes currently retained across every upload under `root` —
     what the storage cap (CONTEXT.md's Feature C decision) is actually
@@ -161,6 +170,36 @@ def _current_usage_bytes(root: Path) -> int:
         if blob.is_file():
             total += blob.stat().st_size
     return total
+
+
+def _last_written(upload_dir: Path) -> float:
+    """When anything in `upload_dir` was last written, as a POSIX timestamp:
+    the newest modification time of the directory itself (set when its
+    files were created) and of each file in it. Every chunk appended to
+    `blob` moves it forward."""
+    return max(path.stat().st_mtime for path in (upload_dir, *upload_dir.iterdir()))
+
+
+def idle_upload_ids(root: Path, *, idle_since: datetime) -> list[str]:
+    """Every upload under `root` with nothing written since `idle_since`,
+    oldest first (issue #171). Whether a job still uses one isn't known
+    here; `delete_abandoned_uploads` (app/services/cutting_jobs.py) checks
+    that. Only upload-shaped directories are considered, so nothing else
+    under `root` is ever reported."""
+    if not root.exists():
+        return []
+    cutoff = idle_since.timestamp()
+    idle = []
+    for upload_dir in root.iterdir():
+        if not (_UPLOAD_ID_RE.match(upload_dir.name) and upload_dir.is_dir()):
+            continue
+        try:
+            last_written = _last_written(upload_dir)
+        except FileNotFoundError:
+            continue  # Deleted while being looked at.
+        if last_written < cutoff:
+            idle.append((last_written, upload_dir.name))
+    return [upload_id for _, upload_id in sorted(idle)]
 
 
 def start_upload(

@@ -19,6 +19,8 @@ from app.core.logging import configure_access_log_redaction
 from app.db.session import SessionLocal
 from app.services.audit_log import prune_old_audit_events
 from app.services.consolidation import reconcile_stale_consolidations
+from app.services.cutting_jobs import delete_abandoned_uploads
+from app.services.cutting_uploads import get_cutting_upload_root
 from app.services.s3_client import get_s3_client
 
 # ADR 0002: the media-streaming endpoint's token query parameter must never
@@ -120,16 +122,51 @@ async def _reconcile_stale_consolidations_periodically() -> None:
         await asyncio.sleep(settings.consolidation_reconcile_interval_seconds)
 
 
+def _delete_abandoned_uploads_once() -> list[str]:
+    """Issue #171. Opens and closes its own `Session` in this one call, for
+    the same thread-boundary reason as `_prune_audit_log_once` above."""
+    db = SessionLocal()
+    try:
+        return delete_abandoned_uploads(
+            db,
+            get_cutting_upload_root(),
+            abandoned_after=timedelta(days=settings.cutting_upload_abandoned_after_days),
+        )
+    finally:
+        db.close()
+
+
+async def _delete_abandoned_uploads_periodically() -> None:
+    """Issue #171: deletes cutting uploads that never became a job, once
+    immediately on startup and then every
+    `settings.cutting_upload_cleanup_interval_seconds`. Same shape, and same
+    reasons, as `_prune_audit_log_periodically` above. Each deleted upload
+    is logged by id; no audit row, since starting an upload isn't audited
+    either."""
+    while True:
+        try:
+            deleted = await asyncio.to_thread(_delete_abandoned_uploads_once)
+            if deleted:
+                logger.info(
+                    "Deleted %d abandoned cutting upload(s): %s", len(deleted), ", ".join(deleted)
+                )
+        except Exception:
+            logger.exception("Failed to delete abandoned cutting uploads")
+        await asyncio.sleep(settings.cutting_upload_cleanup_interval_seconds)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # `settings.audit_log_prune_enabled` / `consolidation_reconcile_enabled`
-    # (default True) are the test-disable seams for these tasks — see their
-    # own comments in app/core/config.py.
+    # `settings.audit_log_prune_enabled` / `consolidation_reconcile_enabled` /
+    # `cutting_upload_cleanup_enabled` (default True) are the test-disable
+    # seams for these tasks — see their own comments in app/core/config.py.
     tasks = []
     if settings.audit_log_prune_enabled:
         tasks.append(asyncio.create_task(_prune_audit_log_periodically()))
     if settings.consolidation_reconcile_enabled:
         tasks.append(asyncio.create_task(_reconcile_stale_consolidations_periodically()))
+    if settings.cutting_upload_cleanup_enabled:
+        tasks.append(asyncio.create_task(_delete_abandoned_uploads_periodically()))
     try:
         yield
     finally:

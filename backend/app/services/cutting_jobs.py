@@ -7,7 +7,7 @@ API before the worker exists").
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import or_, select
@@ -25,8 +25,10 @@ from app.services.cutting_uploads import (
     UploadNotFoundError,
     delete_source_upload,
     get_upload_status,
+    idle_upload_ids,
     source_filename_matches_camera,
     upload_blob_path,
+    upload_id_of,
 )
 from app.services.media_browser import has_cuts
 from app.services.media_prober import MediaProbeError, MediaProber
@@ -670,6 +672,38 @@ def delete_cutting_job_sources(db: Session, job: CuttingJob) -> bool:
     db.add(job)
     db.commit()
     return not job.source_retained
+
+
+def delete_abandoned_uploads(
+    db: Session, root: Path, *, abandoned_after: timedelta, now: datetime | None = None
+) -> list[str]:
+    """Delete every upload under `root` that no CuttingJob points at and
+    that nothing has been written to for `abandoned_after`, returning the
+    ids actually deleted (issue #171). Such uploads were started but never
+    became a job, and otherwise fill the upload storage cap forever.
+
+    An upload any job points at, whatever its status, is never touched: a
+    job's source has its own lifecycle (#172, Discard source #169). Jobs are
+    matched through `upload_id_of`, not the whole stored path, so a
+    differently spelled upload root can't make a used upload look unused.
+    Deleted through the shared `delete_source_upload`, so a directory that
+    can't be deleted is only logged and retried on the next run.
+    """
+    now = now or datetime.now(UTC)
+    candidates = idle_upload_ids(root, idle_since=now - abandoned_after)
+    if not candidates:
+        return []
+
+    used = {
+        upload_id_of(source_path)
+        for column in (CuttingJob.c1_source_path, CuttingJob.c2_source_path)
+        for source_path in db.scalars(select(column).where(column.is_not(None)))
+    }
+    return [
+        upload_id
+        for upload_id in candidates
+        if upload_id not in used and delete_source_upload(str(upload_blob_path(root, upload_id)))
+    ]
 
 
 def _clear_deleted_source_paths(job: CuttingJob) -> bool:

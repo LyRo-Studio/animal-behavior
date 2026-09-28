@@ -138,6 +138,15 @@ def _consolidation_reconcile_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _cutting_upload_cleanup_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same reason as `_audit_log_pruning_disabled` above, for issue #171's
+    abandoned-upload cleanup: it would otherwise delete uploads under the
+    real `cutting_upload_temp_dir` whenever a test starts the app. The
+    cleanup itself is tested directly in test_cutting_upload_cleanup.py."""
+    monkeypatch.setattr(settings, "cutting_upload_cleanup_enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def _identity_header_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point `settings.identity_header_name` at `tests.helpers.IDENTITY_HEADER`
     for every test (ticket #72) — production reads it from `.env`, and a
