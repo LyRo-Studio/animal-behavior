@@ -20,8 +20,9 @@ from app.models.cutting_job import CuttingJob, CuttingJobOutputStatus, CuttingJo
 from tests.helpers import identity_headers
 
 _CONDITIONS = ("ME", "ZE")
-_PHASE_HEADERS = [f"{condition}_F{n}" for condition in _CONDITIONS for n in range(1, 9)]
-_HEADERS = ["Test ID", "Dog ID", "C1/C2", *_PHASE_HEADERS]
+_PHASES = [f"{condition}_F{n}" for condition in _CONDITIONS for n in range(1, 9)]
+# The sheet writes each phase's header phase first ("F1_ME" for ME_F1).
+_HEADERS = ["Test ID", "Dog ID", "C1/C2", *(f"F{phase[4:]}_{phase[:2]}" for phase in _PHASES)]
 
 
 def _excel_bytes(
@@ -33,7 +34,7 @@ def _excel_bytes(
     sheet.append(_HEADERS)
     for row_test_id in (test_id, *extra_test_ids):
         row = [row_test_id, "Rex", reference_camera]
-        for index, header in enumerate(_PHASE_HEADERS):
+        for index, header in enumerate(_PHASES):
             row.append(time(index + 1, 0, 0) if header in phases else None)
         sheet.append(row)
     buffer = BytesIO()

@@ -20,8 +20,9 @@ from app.services.cutting_jobs import (
 # covered in cutting-worker/tests instead.
 
 _CONDITIONS = ("ME", "ZE")
-_PHASE_HEADERS = [f"{condition}_F{n}" for condition in _CONDITIONS for n in range(1, 9)]
-_HEADERS = ["Test ID", "Dog ID", "C1/C2", *_PHASE_HEADERS]
+_PHASES = [f"{condition}_F{n}" for condition in _CONDITIONS for n in range(1, 9)]
+# The sheet writes each phase's header phase first ("F1_ME" for ME_F1).
+_HEADERS = ["Test ID", "Dog ID", "C1/C2", *(f"F{phase[4:]}_{phase[:2]}" for phase in _PHASES)]
 
 
 def _workbook_bytes(test_id="T001", *, reference_camera="C1") -> bytes:
@@ -29,7 +30,7 @@ def _workbook_bytes(test_id="T001", *, reference_camera="C1") -> bytes:
     sheet = workbook.active
     sheet.append(_HEADERS)
     row = [test_id, "Rex", reference_camera]
-    for index in range(len(_PHASE_HEADERS)):
+    for index in range(len(_PHASES)):
         row.append(time(index + 1, 0, 0))
     sheet.append(row)
     buffer = BytesIO()

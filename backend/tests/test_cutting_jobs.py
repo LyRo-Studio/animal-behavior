@@ -34,12 +34,13 @@ from app.services.media_prober import MediaProbeError
 from app.services.timestamp_excel import TestRowNotFoundError
 
 _CONDITIONS = ("ME", "ZE")
-_PHASE_HEADERS = [f"{condition}_F{n}" for condition in _CONDITIONS for n in range(1, 9)]
-_HEADERS = ["Test ID", "Dog ID", "C1/C2", *_PHASE_HEADERS]
+_PHASES = [f"{condition}_F{n}" for condition in _CONDITIONS for n in range(1, 9)]
+# The sheet writes each phase's header phase first ("F1_ME" for ME_F1).
+_HEADERS = ["Test ID", "Dog ID", "C1/C2", *(f"F{phase[4:]}_{phase[:2]}" for phase in _PHASES)]
 
 
 def _workbook_bytes(
-    test_id="T001", *, reference_camera="C1", dog_id="Rex", phases=_PHASE_HEADERS
+    test_id="T001", *, reference_camera="C1", dog_id="Rex", phases=_PHASES
 ) -> bytes:
     """A workbook with one row for `test_id`, every header in `phases` given
     a distinct, valid (non-skipped) elapsed time, everything else blank
@@ -48,7 +49,7 @@ def _workbook_bytes(
     sheet = workbook.active
     sheet.append(_HEADERS)
     row = [test_id, dog_id, reference_camera]
-    for index, header in enumerate(_PHASE_HEADERS):
+    for index, header in enumerate(_PHASES):
         row.append(time(index + 1, 0, 0) if header in phases else None)
     sheet.append(row)
     buffer = BytesIO()
