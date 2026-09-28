@@ -2587,6 +2587,35 @@ time judgment calls:
 - **Frontend:** `CuttingJob` gains `sourceRetained`, with no visible change
   yet; #169's Discard source button is the first thing to read it.
 
+**One upload feeds exactly one job, implemented (issue #173).** Part of
+#167. `create_cutting_job` now rejects a job whose source upload another
+CuttingJob already points at. Until now only the frontend avoided sharing
+(#100 forgets an upload id once a job is created from it). Implementation-
+time judgment calls:
+
+- **Checked in `create_cutting_job`, not `submit_cutting_job`:** it's the one
+  place a job's source paths are written, so every caller is covered,
+  including direct ones such as the cutting-worker's test doubles. It runs
+  per upload, right after the filename check and before the ffprobe and S3
+  checks, since it's a single cheap query.
+- **"Already used" means a job row still holds the path**, in either
+  column, whatever that job's status. A succeeded job's upload directory is
+  deleted by the cutting-worker, so resubmitting that upload is reported as
+  unknown before this check runs. Once #172 lands (PR #176), every delete
+  also clears the path, so a deleted source never counts as used.
+- **409, naming the camera, the filename and the other job**
+  ("The C1 upload T001_C1_source.mp4 is already used by cutting job 12.
+  Upload the video again to cut it again."). It's a conflict with existing
+  state, like the source-collision 409, not a malformed request. It has no
+  `code`, so the frontend shows it as-is. A batch reports it in that Test's
+  own result; the other Tests are unaffected.
+- **Known gap: two concurrent submissions of the same upload can both get
+  through**, since each checks before either commits. Only a client that
+  deliberately reuses an upload id can hit it; the frontend never does. A
+  partial unique index on each source-path column would close it for good,
+  but that needs a migration and wasn't asked for. Revisit if it's ever
+  seen.
+
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
 (`consolidatie.py`, `observer_import.py`) is pre-existing Observer XT
