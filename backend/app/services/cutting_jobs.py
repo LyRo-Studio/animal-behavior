@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.audit_log import AuditAction
 from app.models.cutting_job import (
@@ -474,6 +474,25 @@ def get_cutting_job(db: Session, *, cutting_job_id: int) -> CuttingJob:
     if job is None:
         raise CuttingJobNotFoundError(cutting_job_id)
     return job
+
+
+# Same bound as analyses.py's MAX_LISTED_ANALYSIS_JOBS, for the same reason
+# (ENGINEERING-STANDARDS.md §5: avoid unbounded database queries).
+MAX_LISTED_CUTTING_JOBS = 500
+
+
+def list_cutting_jobs(db: Session, *, limit: int = MAX_LISTED_CUTTING_JOBS) -> list[CuttingJob]:
+    """The newest CuttingJobs (up to `limit`), whoever requested them —
+    ticket #101's history, shared like analysis history since ticket #72
+    (CONTEXT.md). Outputs are loaded up front, since every row serializes
+    them."""
+    stmt = (
+        select(CuttingJob)
+        .options(selectinload(CuttingJob.outputs))
+        .order_by(CuttingJob.created_at.desc(), CuttingJob.id.desc())
+        .limit(limit)
+    )
+    return list(db.scalars(stmt))
 
 
 def claim_next_queued_cutting_job(db: Session) -> CuttingJob | None:

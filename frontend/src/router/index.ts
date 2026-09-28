@@ -4,6 +4,7 @@ import AnalysesHistoryView from '@/views/AnalysesHistoryView.vue'
 import AnalysisView from '@/views/AnalysisView.vue'
 import ConsolidationsHistoryView from '@/views/ConsolidationsHistoryView.vue'
 import ConsolidationView from '@/views/ConsolidationView.vue'
+import CuttingJobsHistoryView from '@/views/CuttingJobsHistoryView.vue'
 import CuttingJobView from '@/views/CuttingJobView.vue'
 import CuttingUploadView from '@/views/CuttingUploadView.vue'
 import HomeView from '@/views/HomeView.vue'
@@ -37,6 +38,12 @@ const router = createRouter({
     // Ticket #100, part of issue #93's Feature C: upload source videos and
     // submit up to 5 Tests' cutting jobs.
     { path: '/cutting', name: 'cutting-upload', component: CuttingUploadView },
+    // Ticket #101: every cutting job, shared like /analyses.
+    {
+      path: '/cutting-jobs',
+      name: 'cutting-jobs-history',
+      component: CuttingJobsHistoryView,
+    },
     { path: '/cutting-jobs/:id', name: 'cutting-job-detail', component: CuttingJobView },
   ],
 })

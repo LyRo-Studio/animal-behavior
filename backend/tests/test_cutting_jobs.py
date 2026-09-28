@@ -28,6 +28,7 @@ from app.services.cutting_jobs import (
     SourceVideoUpload,
     create_cutting_job,
     get_cutting_job,
+    list_cutting_jobs,
 )
 from app.services.media_prober import MediaProbeError
 from app.services.timestamp_excel import TestRowNotFoundError
@@ -432,6 +433,29 @@ def test_get_cutting_job_returns_the_created_job(db_session, s3_client, media_pr
 def test_get_cutting_job_for_unknown_id_raises(db_session):
     with pytest.raises(CuttingJobNotFoundError):
         get_cutting_job(db_session, cutting_job_id=999999)
+
+
+def test_list_cutting_jobs_is_newest_first_and_bounded(
+    db_session, s3_client, media_prober, tmp_path
+):
+    """Ticket #101's history: every identity's jobs (shared, like analysis
+    history since ticket #72), capped so the listing can't grow without
+    bound (ENGINEERING-STANDARDS.md §5)."""
+    ids = [
+        create_cutting_job(
+            db_session,
+            requested_by_identity=identity,
+            test_id="T001",
+            excel_bytes=_workbook_bytes(reference_camera="C1"),
+            uploads=[_source_video(tmp_path, camera="C1", suffix=identity)],
+            s3=s3_client,
+            media_prober=media_prober,
+        ).id
+        for identity in ("alice", "bob", "carol")
+    ]
+
+    assert [job.id for job in list_cutting_jobs(db_session)] == ids[::-1]
+    assert [job.id for job in list_cutting_jobs(db_session, limit=2)] == [ids[2], ids[1]]
 
 
 # --- CUTTING_STARTED audit event (ticket #99) ---

@@ -6,6 +6,8 @@ import { API_BASE_URL, errorFromResponse } from '@/services/apiBase'
 
 export type Camera = 'C1' | 'C2'
 
+export const CAMERAS: Camera[] = ['C1', 'C2']
+
 export interface SourceVideoTarget {
   testId: string
   camera: Camera
@@ -326,10 +328,18 @@ function toCuttingJob(row: CuttingJobResponse): CuttingJob {
   }
 }
 
+// How many of `job`'s expected Cuts are already in S3.
+export function cutsDone(job: CuttingJob): number {
+  return job.outputs.filter((output) => output.status === 'succeeded').length
+}
+
 export interface CuttingJobBatchEntry {
   testId: string
   c1UploadId: string | null
   c2UploadId: string | null
+  // Ticket #101: set on the follow-up to a CUTS_ALREADY_EXIST_CODE
+  // rejection, once the researcher has confirmed overwriting that Test's Cuts.
+  confirmOverwrite?: boolean
 }
 
 // Ticket #96's marker on a "Cuts already exist" rejection (the backend's
@@ -379,6 +389,7 @@ export async function submitCuttingJobBatch(
         test_id: entry.testId,
         c1_upload_id: entry.c1UploadId,
         c2_upload_id: entry.c2UploadId,
+        confirm_overwrite: entry.confirmOverwrite ?? false,
       })),
     ),
   )
@@ -399,10 +410,28 @@ export async function submitCuttingJobBatch(
   }))
 }
 
+// A 404 from GET /cutting-jobs/{id}: there is no such job, so unlike any
+// other failure there's nothing worth retrying.
+export class CuttingJobNotFoundError extends Error {}
+
 export async function getCuttingJob(id: number): Promise<CuttingJob> {
   const response = await fetch(`${API_BASE_URL}/cutting-jobs/${id}`)
+  if (response.status === 404) {
+    throw new CuttingJobNotFoundError('Cutting job not found.')
+  }
   if (!response.ok) {
     throw await errorFromResponse(response, 'Failed to load the cutting job.')
   }
   return toCuttingJob(await response.json())
+}
+
+// Ticket #101's history: every cutting job, whoever ran it, newest first —
+// shared like analysis history since ticket #72. The backend bounds the list.
+export async function listCuttingJobs(): Promise<CuttingJob[]> {
+  const response = await fetch(`${API_BASE_URL}/cutting-jobs`)
+  if (!response.ok) {
+    throw await errorFromResponse(response, 'Failed to load cutting jobs.')
+  }
+  const rows: CuttingJobResponse[] = await response.json()
+  return rows.map(toCuttingJob)
 }
