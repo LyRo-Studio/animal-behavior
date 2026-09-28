@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 
+import { usePolledJob } from '@/composables/usePolledJob'
 import {
   CAMERAS,
   CUTTING_JOB_STATUS_LABELS,
@@ -15,58 +16,23 @@ import {
 } from '@/services/cuttingJobs'
 import { formatDate } from '@/utils/date'
 
-// Ticket #101: live per-phase progress for one cutting job, polled the same
-// way AnalysisView.vue polls an analysis. Each CuttingJobOutput turns
+// Ticket #101: live per-phase progress for one cutting job, polled by
+// usePolledJob like AnalysisView.vue. Each CuttingJobOutput turns
 // `succeeded` as the cutting-worker uploads that phase's Cut (#98); a failed
 // or skipped phase is only known once the job ends.
 
 const route = useRoute()
-const jobId = Number(route.params.id)
-
-const job = ref<CuttingJob | null>(null)
-const loadError = ref<string | null>(null)
-const notFound = ref(false)
-
-const POLL_INTERVAL_MS = 2000
-let pollTimer: ReturnType<typeof setTimeout> | undefined
-// Bumped on unmount, so a request still in flight then can't schedule
-// another poll once it resolves (AnalysisView.vue's requestGeneration).
-let requestGeneration = 0
 
 function isActive(current: CuttingJob): boolean {
   return current.status === 'queued' || current.status === 'running'
 }
 
-async function loadJob() {
-  const generation = requestGeneration
-  try {
-    const result = await getCuttingJob(jobId)
-    if (generation !== requestGeneration) return
-    job.value = result
-    loadError.value = null
-    if (isActive(result)) pollTimer = setTimeout(loadJob, POLL_INTERVAL_MS)
-  } catch (err) {
-    if (generation !== requestGeneration) return
-    if (err instanceof CuttingJobNotFoundError) {
-      notFound.value = true
-      return
-    }
-    loadError.value = err instanceof Error ? err.message : 'Failed to load the cutting job.'
-    pollTimer = setTimeout(loadJob, POLL_INTERVAL_MS)
-  }
-}
-
-onMounted(() => {
-  if (Number.isNaN(jobId)) {
-    notFound.value = true
-    return
-  }
-  loadJob()
-})
-
-onUnmounted(() => {
-  requestGeneration++
-  clearTimeout(pollTimer)
+const { job, loadError, notFound } = usePolledJob<CuttingJob>({
+  id: () => Number(route.params.id),
+  load: getCuttingJob,
+  isActive,
+  isNotFound: (err) => err instanceof CuttingJobNotFoundError,
+  fallbackError: 'Failed to load the cutting job.',
 })
 
 const OUTPUT_STATUS_LABELS: Record<CuttingJobOutputStatus, string> = {

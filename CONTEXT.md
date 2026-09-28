@@ -2359,6 +2359,21 @@ Implementation-time judgment calls:
   two buttons.
 - **Links:** the Video Cutting page and each job page link to the history.
   Home keeps its single "Video Cutting" entry.
+- **Follow-up: one polling loop, `usePolledJob`
+  (`frontend/src/composables/usePolledJob.ts`).** `CuttingJobView` had
+  copied `AnalysisView`'s poll/retry/`requestGeneration` loop almost line
+  for line, so both now use one composable. It takes the job id as a
+  reactive getter, because Vue Router reuses the mounted view when only
+  `:id` changes. Before this, going straight from one job's page to another
+  kept showing and polling the first job. A new id now stops the old loop,
+  ignores any late response for the old job, and loads the new one.
+  `AnalysisView` also clears its cancel/download errors then. `replace(job)`
+  is how `AnalysisView`'s cancel shows the cancelled job without a poll
+  already in flight overwriting it. `composables/` is a new folder for Vue
+  composables: ENGINEERING-STANDARDS.md names only `components/`, `views/`
+  and `services/`, and a composable is none of those. `StatusView`'s
+  health-check retry loop has a different shape (no id, no terminal
+  state) and keeps its own.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`

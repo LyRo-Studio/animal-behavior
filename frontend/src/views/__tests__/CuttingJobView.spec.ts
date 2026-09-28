@@ -32,7 +32,7 @@ async function mountView(id = '31') {
 
   const wrapper = mount(CuttingJobView, { global: { plugins: [router] } })
   await flushPromises()
-  return wrapper
+  return Object.assign(wrapper, { router })
 }
 
 function output(
@@ -179,6 +179,28 @@ describe('CuttingJobView', () => {
     const failures = wrapper.find('[data-testid="failed-outputs"]').text()
     expect(failures).toContain('C1 ME F2')
     expect(failures).toContain('No output file was produced.')
+  })
+
+  // Vue Router reuses the mounted view when only `:id` changes.
+  it('switches to another job when the route goes straight to it', async () => {
+    let finishOldPoll: (value: unknown) => void = () => {}
+    getCuttingJobMock
+      .mockResolvedValueOnce(job({ id: 31, testId: 'T001' }))
+      .mockReturnValueOnce(new Promise((resolve) => (finishOldPoll = resolve)))
+      .mockResolvedValue(job({ id: 32, testId: 'T002' }))
+    const wrapper = await mountView('31')
+    await vi.advanceTimersByTimeAsync(2000)
+
+    await wrapper.router.push('/cutting-jobs/32')
+    await flushPromises()
+    finishOldPoll(job({ id: 31, testId: 'T001' }))
+    await flushPromises()
+
+    expect(wrapper.find('h1').text()).toContain('Cutting job #32')
+    expect(wrapper.text()).toContain('T002')
+    expect(wrapper.text()).not.toContain('T001')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(getCuttingJobMock.mock.calls.map(([id]) => id)).toEqual([31, 31, 32, 32])
   })
 
   it('stops polling when the view is left', async () => {
