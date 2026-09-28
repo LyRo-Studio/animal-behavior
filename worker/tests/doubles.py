@@ -19,12 +19,13 @@ from worker.dogtrace_runner import ProgressCallback
 @dataclass
 class FakeS3Client:
     """Minimal in-memory double covering only what orchestrator.py actually
-    calls (`download_file`, `upload_file`) — see
-    app/services/s3_client.py's S3Client Protocol — plus
-    `list_objects_info`, which tests need only to create a wholesale
-    multi-Test job (`create_analysis_job` derives its Cuts by listing S3).
-    Not a full duplicate of backend/tests/fakes.py's fuller FakeS3Client,
-    which covers the browsing/streaming methods this worker never uses.
+    calls (`download_file`, `upload_file`, and `list_objects_info`/
+    `delete_object` to clear a retried job's earlier upload) — see
+    app/services/s3_client.py's S3Client Protocol. Tests also use
+    `list_objects_info` to create a wholesale multi-Test job
+    (`create_analysis_job` derives its Cuts by listing S3). Not a full
+    duplicate of backend/tests/fakes.py's fuller FakeS3Client, which covers
+    the browsing/streaming methods this worker never uses.
     """
 
     objects: dict[str, bytes] = field(default_factory=dict)
@@ -51,6 +52,9 @@ class FakeS3Client:
 
     def upload_file(self, local_path: Path, key: str) -> None:
         self.objects[key] = Path(local_path).read_bytes()
+
+    def delete_object(self, key: str) -> None:
+        self.objects.pop(key, None)
 
 
 @dataclass

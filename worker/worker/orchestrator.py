@@ -390,11 +390,17 @@ def _upload_artifacts(s3_client: S3Client, output_dir: Path, job: AnalysisJob) -
     Jobs that ran before ticket #91 keep their old
     `reports/<test_id>/<id>/` prefix: `report_s3_prefix` is stored per job,
     so nothing already in S3 is moved or needs to be.
+
+    Whatever an earlier attempt of this same job already uploaded is
+    cleared first (issue #132) — even when this attempt then has nothing to
+    upload itself.
     """
+    prefix = f"reports/{job.id}/"
+    _clear_earlier_attempt_upload(s3_client, prefix, job)
+
     if not output_dir.exists():
         return None
 
-    prefix = f"reports/{job.id}/"
     uploaded_anything = False
     for local_path in sorted(output_dir.rglob("*")):
         if not local_path.is_file():
@@ -404,3 +410,32 @@ def _upload_artifacts(s3_client: S3Client, output_dir: Path, job: AnalysisJob) -
         uploaded_anything = True
 
     return prefix if uploaded_anything else None
+
+
+def _clear_earlier_attempt_upload(s3_client: S3Client, prefix: str, job: AnalysisJob) -> None:
+    """Delete everything already under `prefix` — output an earlier attempt
+    of this same job uploaded before the worker crashed, ahead of
+    `finalize_analysis_job` committing (issue #132). `requeue_stuck_running_jobs`
+    then retried the job on restart, and DogTrace's per-video timestamp
+    subfolder means the retry's output never lands on exactly the same keys,
+    so without this the earlier attempt's files would sit next to the
+    retry's real output. On a first attempt the prefix is simply empty.
+
+    `prefix` ends in "/", so this never reaches another job whose id merely
+    starts with the same digits (`reports/12/` vs `reports/123/`).
+
+    Best-effort: a failure is logged, never raised. The leftovers are only
+    clutter (`casiop_report.xlsx`, the one downloadable file, is overwritten
+    by the retry anyway), so failing the job over them would discard its
+    real results — same reasoning as a failed per-Test split above.
+    """
+    try:
+        for stale in list(s3_client.list_objects_info(prefix)):
+            s3_client.delete_object(stale.key)
+    except Exception:
+        logger.exception(
+            "analysis_id=%s test_ids=%s clearing an earlier attempt's upload under %s failed",
+            job.id,
+            job.test_ids,
+            prefix,
+        )
