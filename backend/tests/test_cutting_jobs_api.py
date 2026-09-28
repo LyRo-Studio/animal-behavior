@@ -267,6 +267,10 @@ def test_create_cutting_job_rejects_an_unknown_upload_id(client):
     )
 
     assert response.status_code == 400
+    assert response.json() == {
+        "detail": "Unknown upload for C1.",
+        "code": "unknown_source_upload",
+    }
 
 
 def test_create_cutting_job_rejects_with_no_uploads_at_all(client):
@@ -563,7 +567,7 @@ def test_batch_reports_each_tests_own_failure_without_blocking_the_rest(client, 
     assert second["error"] == {
         "status_code": 400,
         "detail": "Unknown upload for C1.",
-        "code": None,
+        "code": "unknown_source_upload",
     }
     assert third["job"] is None
     assert third["error"]["status_code"] == 409

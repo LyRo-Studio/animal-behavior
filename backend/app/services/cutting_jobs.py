@@ -28,6 +28,7 @@ from app.services.cutting_uploads import (
     idle_upload_ids,
     source_filename_matches_camera,
     upload_blob_path,
+    upload_id_of,
 )
 from app.services.media_browser import has_cuts
 from app.services.media_prober import MediaProbeError, MediaProber
@@ -683,7 +684,7 @@ def delete_abandoned_uploads(
 
     An upload any job points at, whatever its status, is never touched: a
     job's source has its own lifecycle (#172, Discard source #169). Jobs are
-    matched on the upload directory's name, not the whole stored path, so a
+    matched through `upload_id_of`, not the whole stored path, so a
     differently spelled upload root can't make a used upload look unused.
     Deleted through the shared `delete_source_upload`, so a directory that
     can't be deleted is only logged and retried on the next run.
@@ -694,7 +695,7 @@ def delete_abandoned_uploads(
         return []
 
     used = {
-        Path(source_path).parent.name
+        upload_id_of(source_path)
         for column in (CuttingJob.c1_source_path, CuttingJob.c2_source_path)
         for source_path in db.scalars(select(column).where(column.is_not(None)))
     }

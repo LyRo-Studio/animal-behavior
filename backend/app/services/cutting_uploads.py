@@ -150,6 +150,14 @@ def upload_blob_path(root: Path, upload_id: str) -> Path:
     return _upload_dir(root, upload_id) / _BLOB_FILENAME
 
 
+def upload_id_of(source_path: str) -> str:
+    """The upload id behind `source_path`, a CuttingJob's
+    `c1_source_path`/`c2_source_path` (the reverse of `upload_blob_path`).
+    Read from the upload directory's name alone, so a differently spelled
+    upload root still names the same upload (issue #171)."""
+    return Path(source_path).parent.name
+
+
 def _current_usage_bytes(root: Path) -> int:
     """Total bytes currently retained across every upload under `root` —
     what the storage cap (CONTEXT.md's Feature C decision) is actually

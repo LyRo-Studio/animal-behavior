@@ -93,6 +93,10 @@ router = APIRouter(prefix="/cutting-jobs", tags=["cutting-jobs"])
 # collision 409 and offer a confirm-and-resubmit, without matching on the
 # human-readable `detail` string.
 CUTS_ALREADY_EXIST_CODE = "cuts_already_exist"
+# Issue #171: the marker on an "Unknown upload" rejection. An upload that
+# never became a job is deleted once abandoned, so a page left open long
+# enough can submit an id that's gone; the code tells it to upload afresh.
+UNKNOWN_SOURCE_UPLOAD_CODE = "unknown_source_upload"
 
 
 @router.post("/uploads", response_model=CuttingUploadOut, status_code=status.HTTP_201_CREATED)
@@ -211,7 +215,9 @@ def _describe_rejection(exc: Exception) -> _Rejection:
                 f"{exc.cutting_job_id}. Upload the video again to cut it again.",
             )
         case UnknownSourceUploadError():
-            return _Rejection(bad_request, f"Unknown upload for {exc.camera}.")
+            return _Rejection(
+                bad_request, f"Unknown upload for {exc.camera}.", code=UNKNOWN_SOURCE_UPLOAD_CODE
+            )
         case IncompleteSourceUploadError():
             return _Rejection(bad_request, f"Upload for {exc.camera} is not complete yet.")
         case MismatchedSourceUploadError():

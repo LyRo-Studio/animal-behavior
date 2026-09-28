@@ -2802,9 +2802,10 @@ open questions were answered with the user:
   status, is never touched.
 - **N is 7 days by default,** `CUTTING_UPLOAD_ABANDONED_AFTER_DAYS`. That
   covers an upload left over a long weekend, and it's how long resuming a
-  remembered upload (#100) keeps working. The frontend needs no change:
-  once an upload is gone, the backend answers 404 and a fresh upload
-  starts.
+  remembered upload (#100) keeps working. Resuming a remembered upload
+  needs no change: once it's gone, the backend answers 404 and a fresh
+  upload starts. (Review found the page's own copy of a finished upload's
+  id did need one; see below.)
 - **Automatic,** as an in-process lifespan task like the audit-log prune
   (#87) and the consolidation reconciler (#121): once at startup, then
   every `CUTTING_UPLOAD_CLEANUP_INTERVAL_SECONDS` (default an hour).
@@ -2837,6 +2838,27 @@ Implementation-time judgment calls:
   worker run would fail, and Discard source treats the missing directory
   as gone (#169). Revisit if it's ever seen.
 - **No migration:** uploads live only on disk.
+- **Any upload directory still on disk whose succeeded job's paths
+  migration 0017 cleared** now belongs to no job, so the cleanup deletes
+  it like any other abandoned upload.
+
+Review fixes:
+
+- **A gone upload makes the upload page upload again.** The page keeps a
+  finished upload's id and skips re-uploading while it has one, so a page
+  left open past the cleanup (after a rejected submission, say) would
+  resubmit the deleted id forever. The "Unknown upload" rejection now
+  carries `code: "unknown_source_upload"`, like #96's
+  `cuts_already_exist`. On it, `CuttingUploadView` forgets that Test's
+  upload ids and says to submit again; the next submit goes back through
+  the upload service, which reuses an upload still there and starts the
+  gone one afresh.
+- **Known gap: a chunk written in the very moment the cleanup deletes its
+  upload** is lost, and that request answers 404. The cleanup runs in a
+  thread, so it doesn't take the per-upload `asyncio` lock chunk writes
+  use. It needs an upload untouched for a week to resume in that same
+  instant; the page shows the upload failure, and the next submit starts a
+  fresh upload. Same order of risk as the job-creation gap above.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`

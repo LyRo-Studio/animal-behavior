@@ -391,6 +391,44 @@ describe('CuttingUploadView', () => {
     expect(wrapper.findAll('[data-testid="job-link"]')).toHaveLength(2)
   })
 
+  it('sends a Test whose upload is gone back through the upload service on the next submit', async () => {
+    // Issue #171: the page stayed open until the backend deleted T002's
+    // unused upload as abandoned.
+    let nextUploadId = 1
+    uploadSourceVideoMock.mockImplementation(
+      async (file: File) => `id-${file.name}-${nextUploadId}`,
+    )
+    submitCuttingJobBatchMock.mockResolvedValueOnce([
+      { testId: 'T001', job: job(31, 'T001'), error: null },
+      {
+        testId: 'T002',
+        job: null,
+        error: { detail: 'Unknown upload for C2.', code: 'unknown_source_upload' },
+      },
+    ])
+    const wrapper = await mountView()
+    const { t2c1, t2c2 } = await fillTwoTests(wrapper)
+    await wrapper.find('[data-testid="submit-batch"]').trigger('click')
+    await flushPromises()
+    expect(testEntries(wrapper)[1]!.find('[role="alert"]').text()).toContain(
+      'Unknown upload for C2. Submit again to upload it again.',
+    )
+
+    nextUploadId = 2
+    uploadSourceVideoMock.mockClear()
+    submitCuttingJobBatchMock.mockResolvedValueOnce([
+      { testId: 'T002', job: job(32, 'T002'), error: null },
+    ])
+    await wrapper.find('[data-testid="submit-batch"]').trigger('click')
+    await flushPromises()
+
+    expect(uploadSourceVideoMock.mock.calls.map(([file]) => file)).toEqual([t2c1, t2c2])
+    expect(submitCuttingJobBatchMock).toHaveBeenLastCalledWith(expect.any(File), [
+      { testId: 'T002', c1UploadId: 'id-T002_C1_b.mp4-2', c2UploadId: 'id-T002_C2_b.mp4-2' },
+    ])
+    expect(wrapper.findAll('[data-testid="job-link"]')).toHaveLength(2)
+  })
+
   it('shows why the whole batch was refused', async () => {
     uploadSourceVideoMock.mockImplementation(async (file: File) => `id-${file.name}`)
     submitCuttingJobBatchMock.mockRejectedValue(new Error('Too many requests. Try again later.'))

@@ -13,6 +13,7 @@ either, even if the task gets a chance to run before being cancelled.
 """
 
 import asyncio
+from datetime import timedelta
 
 import app.main as main_module
 from app.core.config import settings
@@ -127,10 +128,30 @@ def test_lifespan_starts_and_cleanly_cancels_the_upload_cleanup_task_when_enable
     assert "_delete_abandoned_uploads_periodically" in tasks.pop().get_coro().__qualname__
 
 
-def test_the_upload_cleanup_runs_on_startup_and_keeps_running_after_a_failed_run(monkeypatch):
-    """Issue #171: once straight away, so a restart doesn't postpone it a
-    full interval, and one failed run is logged rather than ending the
-    loop."""
+def test_lifespan_cleans_up_uploads_once_immediately_on_startup(monkeypatch):
+    """Issue #171: a restart doesn't postpone the cleanup a full interval."""
+    monkeypatch.setattr(settings, "audit_log_prune_enabled", False)
+    monkeypatch.setattr(settings, "cutting_upload_cleanup_enabled", True)
+    monkeypatch.setattr(settings, "cutting_upload_cleanup_interval_seconds", 3600)
+    calls = []
+    monkeypatch.setattr(
+        main_module, "_delete_abandoned_uploads_once", lambda: calls.append(1) or []
+    )
+
+    async def _run() -> None:
+        async with main_module.lifespan(None):
+            for _ in range(100):
+                if calls:
+                    break
+                await asyncio.sleep(0.01)
+
+    asyncio.run(_run())
+    assert calls == [1]
+
+
+def test_the_upload_cleanup_loop_keeps_running_after_a_failed_run(monkeypatch):
+    """Runs again every interval, and one failed run is logged rather than
+    ending the loop."""
     monkeypatch.setattr(settings, "audit_log_prune_enabled", False)
     monkeypatch.setattr(settings, "cutting_upload_cleanup_enabled", True)
     monkeypatch.setattr(settings, "cutting_upload_cleanup_interval_seconds", 0.01)
@@ -147,9 +168,34 @@ def test_the_upload_cleanup_runs_on_startup_and_keeps_running_after_a_failed_run
     async def _run() -> None:
         async with main_module.lifespan(None):
             for _ in range(200):
-                if len(calls) >= 2:
+                if len(calls) >= 3:
                     break
                 await asyncio.sleep(0.01)
 
     asyncio.run(_run())
-    assert len(calls) >= 2
+    assert len(calls) >= 3
+
+
+def test_each_upload_cleanup_run_uses_the_configured_root_and_age(monkeypatch, tmp_path):
+    """Stubs the Session and the cleanup itself, so this touches no real
+    database; test_cutting_upload_cleanup.py covers what the cleanup does."""
+    monkeypatch.setattr(settings, "cutting_upload_temp_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "cutting_upload_abandoned_after_days", 3)
+    closed = []
+
+    class _FakeSession:
+        def close(self) -> None:
+            closed.append(True)
+
+    received = {}
+
+    def _fake_cleanup(db, root, *, abandoned_after):
+        received.update(root=root, abandoned_after=abandoned_after)
+        return ["an-upload-id"]
+
+    monkeypatch.setattr(main_module, "SessionLocal", _FakeSession)
+    monkeypatch.setattr(main_module, "delete_abandoned_uploads", _fake_cleanup)
+
+    assert main_module._delete_abandoned_uploads_once() == ["an-upload-id"]
+    assert received == {"root": tmp_path, "abandoned_after": timedelta(days=3)}
+    assert closed == [True]
