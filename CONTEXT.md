@@ -552,8 +552,30 @@ boundary).
   under that job's `reports/<test_id>/<analysis_id>/` prefix. `S3Client`
   had no delete capability at the time; adding one just for this was
   deferred until it's an actual problem, not speculatively built into this
-  ticket. _Amended: `S3Client.delete_object` has since been added (ticket
-  #118), removing that blocker — tracked as issue #132._
+  ticket. _Amended: fixed by issue #132 — see "Retried analysis job clears
+  its earlier upload" below._
+
+**Retried analysis job clears its earlier upload (issue #132):** closes the
+follow-up above, using `S3Client.delete_object` (added by ticket #118).
+
+- **Before uploading, the worker deletes everything under the job's own
+  `reports/<id>/` prefix** (the analysis-id-first layout from ticket #91).
+  On a first attempt the prefix is empty; on a retry it removes whatever
+  the crashed attempt left behind. The trailing `/` keeps it from reaching
+  another job whose id starts with the same digits, and pre-#91 reports at
+  `reports/<test_id>/<id>/` are never touched.
+- **Cleared even when the retry uploads nothing** (e.g. every Cut has since
+  gone missing), so a job that ends without a report never keeps the
+  earlier attempt's files either.
+- **Best-effort: a failure to clear is logged, not fatal.** The leftovers
+  are clutter only — `casiop_report.xlsx`, the one downloadable file, is
+  overwritten by the retry anyway — so failing the job over them would
+  discard real results. Same reasoning as a failed per-Test split (ticket
+  #91).
+- **Not covered:** a job that fails *during* upload (not a crash) ends
+  `failed` with whatever it had uploaded so far still in S3, and a general
+  retention policy for old reports was never decided. Both are left for
+  their own tickets if they turn out to matter.
 
 **Analysis report download (ticket #49):** `GET /analyses/{id}/report`
 serves `<report_s3_prefix>casiop_report.xlsx` — the only artifact of

@@ -599,3 +599,107 @@ def test_process_next_job_failed_per_test_split_keeps_the_combined_report(db_ses
     assert all(video.status == AnalysisJobVideoStatus.SUCCEEDED for video in job.videos)
     assert job.report_s3_prefix == f"reports/{job.id}/"
     assert _uploaded_reports(s3_client) == {f"reports/{job.id}/casiop_report.xlsx"}
+
+
+def _report_keys(s3_client: FakeS3Client, job: AnalysisJob) -> set[str]:
+    """Every object currently stored under `job`'s own report prefix."""
+    return {key for key in s3_client.objects if key.startswith(f"reports/{job.id}/")}
+
+
+def _seed_earlier_attempt_upload(s3_client: FakeS3Client, job: AnalysisJob) -> None:
+    """What an earlier attempt that crashed mid-upload left under this job's
+    report prefix (issue #132): a per-video output folder under a different
+    DogTrace timestamp than the retry will write, plus its combined report."""
+    for key in (
+        f"reports/{job.id}/T001_C2_ME_F1/20250101_09h00/track_report.xlsx",
+        f"reports/{job.id}/casiop_report.xlsx",
+    ):
+        s3_client.objects[key] = b"stale-from-earlier-attempt"
+
+
+def test_process_next_job_retry_clears_the_earlier_attempts_upload(db_session, work_root):
+    job = _create_job(db_session)
+    s3_client = FakeS3Client()
+    _seed_cut(s3_client, "cuts/T001/T001_C2_ME_F1.mp4")
+    _seed_earlier_attempt_upload(s3_client, job)
+
+    process_next_job(
+        db_session, s3_client=s3_client, dogtrace_runner=FakeDogTraceRunner(), work_root=work_root
+    )
+
+    db_session.refresh(job)
+    assert job.status == AnalysisJobStatus.COMPLETED
+    assert job.report_s3_prefix == f"reports/{job.id}/"
+    assert _report_keys(s3_client, job) == {
+        f"reports/{job.id}/casiop_report.xlsx",
+        f"reports/{job.id}/T001_C2_ME_F1/20260101_00h00/track_report.xlsx",
+    }
+    assert s3_client.objects[f"reports/{job.id}/casiop_report.xlsx"] == b"fake-combined-report"
+
+
+def test_process_next_job_retry_clears_only_its_own_report_prefix(db_session, work_root):
+    job = _create_job(db_session)
+    s3_client = FakeS3Client()
+    _seed_cut(s3_client, "cuts/T001/T001_C2_ME_F1.mp4")
+    _seed_earlier_attempt_upload(s3_client, job)
+    # Another job whose id starts with this one's digits, a pre-#91 report at
+    # the old `reports/<test_id>/<id>/` layout, and the Cut itself.
+    other_keys = {
+        f"reports/{job.id}0/casiop_report.xlsx",
+        f"reports/T001/{job.id}/casiop_report.xlsx",
+        "cuts/T001/T001_C2_ME_F1.mp4",
+    }
+    for key in other_keys - set(s3_client.objects):
+        s3_client.objects[key] = b"someone-elses-file"
+
+    process_next_job(
+        db_session, s3_client=s3_client, dogtrace_runner=FakeDogTraceRunner(), work_root=work_root
+    )
+
+    assert other_keys <= set(s3_client.objects)
+
+
+def test_process_next_job_retry_with_no_output_still_clears_the_earlier_upload(
+    db_session, work_root
+):
+    # The Cut is gone by the retry, so DogTrace never runs and nothing is
+    # uploaded — the earlier attempt's files must still not be left behind.
+    job = _create_job(db_session)
+    s3_client = FakeS3Client()
+    _seed_earlier_attempt_upload(s3_client, job)
+
+    process_next_job(
+        db_session, s3_client=s3_client, dogtrace_runner=FakeDogTraceRunner(), work_root=work_root
+    )
+
+    db_session.refresh(job)
+    assert job.status == AnalysisJobStatus.FAILED
+    assert job.report_s3_prefix is None
+    assert _report_keys(s3_client, job) == set()
+
+
+class _RaisingDeleteS3Client(FakeS3Client):
+    """A FakeS3Client whose `delete_object` always raises — simulates S3
+    refusing to clear a retried job's earlier upload."""
+
+    def delete_object(self, key) -> None:
+        raise RuntimeError("simulated S3 delete failure")
+
+
+def test_process_next_job_failing_to_clear_the_earlier_upload_is_not_fatal(db_session, work_root):
+    # Leftover files are only clutter next to the retry's real output
+    # (`casiop_report.xlsx` itself is overwritten either way), so failing to
+    # remove them must not throw away the retry's results.
+    job = _create_job(db_session)
+    s3_client = _RaisingDeleteS3Client()
+    _seed_cut(s3_client, "cuts/T001/T001_C2_ME_F1.mp4")
+    _seed_earlier_attempt_upload(s3_client, job)
+
+    process_next_job(
+        db_session, s3_client=s3_client, dogtrace_runner=FakeDogTraceRunner(), work_root=work_root
+    )
+
+    db_session.refresh(job)
+    assert job.status == AnalysisJobStatus.COMPLETED
+    assert job.report_s3_prefix == f"reports/{job.id}/"
+    assert s3_client.objects[f"reports/{job.id}/casiop_report.xlsx"] == b"fake-combined-report"
