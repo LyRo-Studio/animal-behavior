@@ -456,7 +456,9 @@ def discard_cutting_job_source_endpoint(
     cutting_job_id: int, request: Request, db: Session = Depends(get_db)
 ) -> CuttingJob:
     """Issue #169: delete a failed or cancelled job's Retained source, by
-    anyone. Not rate limited, like cancel: it can only succeed once per job."""
+    anyone. Not rate limited, like cancel: each call deletes at most two
+    directories, under the job's row lock, and once it succeeds the job has
+    nothing left to discard."""
     try:
         return discard_cutting_job_source(
             db,

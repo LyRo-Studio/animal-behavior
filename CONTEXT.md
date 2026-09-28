@@ -2676,8 +2676,8 @@ source button on `CuttingJobView`. Implementation-time judgment calls:
   500. That camera's data is gone either way, so it's recorded; a retry
   that deletes the rest writes a second row. Nothing cleared, no row.
 - **`delete_cutting_job_sources` gained a non-committing helper**
-  (`_delete_sources`), so the discard can put the cleared paths and its
-  audit row in one commit. Tests still swap only
+  (`_clear_deleted_source_paths`), so the discard can put the cleared paths
+  and its audit row in one commit. Tests still swap only
   `app.services.cutting_jobs.delete_source_upload`.
 - **An unexpected error while deleting isn't caught**, unlike cancel's:
   nothing is committed yet, so the request answers 500 and the whole
@@ -2688,9 +2688,18 @@ source button on `CuttingJobView`. Implementation-time judgment calls:
   it. Its "Discard permanently?" → Discard / Keep mirrors consolidation
   delete; a failed discard shows the backend's detail and leaves the button
   there to retry.
-- **Known gap:** a succeeded job whose worker delete failed keeps a
-  Retained source that nothing in the app can remove, since #167 limits
-  Discard source to failed and cancelled jobs. Revisit if it's ever seen.
+- **Known gaps**, none worth a fix yet; revisit if one is ever seen:
+  - A succeeded job whose worker delete failed keeps a Retained source that
+    nothing in the app can remove, since #167 limits Discard source to
+    failed and cancelled jobs.
+  - A path whose directory isn't upload-shaped (a corrupt row, see #172's
+    name guard) is never deleted, so its discard answers 500 "Try
+    discarding it again" every time.
+  - Cancel deletes its source after its own commit, outside the row lock.
+    A discard landing in that moment sees a cancelled job with a Retained
+    source, finds the directory gone and writes a CUTTING_SOURCE_DISCARDED
+    row for a delete the cancel did. The button only appears once the
+    cancel has returned, so only a hand-made request can hit it.
 - **No dedicated test for migration 0019,** like 0018: without the enum
   value the best-effort audit write would drop the row, and the API tests
   would fail.

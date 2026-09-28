@@ -644,13 +644,13 @@ def delete_cutting_job_sources(db: Session, job: CuttingJob) -> bool:
     A path whose delete failed stays set, so `source_retained` never claims
     a source is gone while it still fills the upload storage cap.
     """
-    _delete_sources(job)
+    _clear_deleted_source_paths(job)
     db.add(job)
     db.commit()
     return not job.source_retained
 
 
-def _delete_sources(job: CuttingJob) -> bool:
+def _clear_deleted_source_paths(job: CuttingJob) -> bool:
     """Delete `job`'s uploaded source(s), clearing each path whose directory
     is really gone, without committing. Returns whether any path was
     cleared."""
@@ -741,7 +741,7 @@ def discard_cutting_job_source(
     if job.status not in _SOURCE_DISCARDABLE_STATUSES or not job.source_retained:
         raise CuttingSourceNotDiscardableError(job.status)
 
-    if _delete_sources(job):
+    if _clear_deleted_source_paths(job):
         record_audit_event(
             db,
             identity=discarded_by.identity,
