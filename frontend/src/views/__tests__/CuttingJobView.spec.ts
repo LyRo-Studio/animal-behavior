@@ -6,11 +6,13 @@ import CuttingJobView from '../CuttingJobView.vue'
 
 const getCuttingJobMock = vi.hoisted(() => vi.fn())
 const cancelCuttingJobMock = vi.hoisted(() => vi.fn())
+const discardCuttingJobSourceMock = vi.hoisted(() => vi.fn())
 
 vi.mock('@/services/cuttingJobs', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/cuttingJobs')>()),
   getCuttingJob: getCuttingJobMock,
   cancelCuttingJob: cancelCuttingJobMock,
+  discardCuttingJobSource: discardCuttingJobSourceMock,
 }))
 
 // The real class, so the view's `instanceof` check sees the same constructor.
@@ -84,6 +86,7 @@ describe('CuttingJobView', () => {
     vi.useRealTimers()
     getCuttingJobMock.mockReset()
     cancelCuttingJobMock.mockReset()
+    discardCuttingJobSourceMock.mockReset()
   })
 
   it("shows the job's Test, status, requester, and how many of its Cuts are done", async () => {
@@ -307,5 +310,82 @@ describe('CuttingJobView', () => {
     expect(wrapper.find('[data-testid="job-status"]').text()).toBe('Cancelled')
     expect(phaseRows(wrapper)).toEqual([])
     expect(wrapper.find('[data-testid="cuts-done"]').exists()).toBe(false)
+  })
+
+  // Issue #169.
+  it.each([
+    ['queued', true],
+    ['running', true],
+    ['succeeded', true],
+    ['failed', false],
+    ['cancelled', false],
+  ])(
+    'offers no Discard source for a %s job whose source retained is %s',
+    async (status, retained) => {
+      getCuttingJobMock.mockResolvedValue(job({ status, sourceRetained: retained }))
+
+      const wrapper = await mountView('31')
+
+      expect(wrapper.find('[data-testid="discard-source"]').exists()).toBe(false)
+    },
+  )
+
+  it.each(['failed', 'cancelled'])(
+    "asks a second time before discarding a %s job's source",
+    async (status) => {
+      getCuttingJobMock.mockResolvedValue(job({ status, sourceRetained: true }))
+      const wrapper = await mountView('31')
+
+      await wrapper.find('[data-testid="discard-source"]').trigger('click')
+
+      expect(wrapper.text()).toContain('Discard permanently?')
+      expect(wrapper.find('[data-testid="discard-source-confirm"]').text()).toBe('Discard')
+      expect(wrapper.find('[data-testid="discard-source-keep"]').text()).toBe('Keep')
+      expect(discardCuttingJobSourceMock).not.toHaveBeenCalled()
+    },
+  )
+
+  it('keeps the source when Keep is chosen', async () => {
+    getCuttingJobMock.mockResolvedValue(job({ status: 'failed', sourceRetained: true }))
+    const wrapper = await mountView('31')
+
+    await wrapper.find('[data-testid="discard-source"]').trigger('click')
+    await wrapper.find('[data-testid="discard-source-keep"]').trigger('click')
+
+    expect(wrapper.text()).not.toContain('Discard permanently?')
+    expect(wrapper.find('[data-testid="discard-source"]').exists()).toBe(true)
+    expect(discardCuttingJobSourceMock).not.toHaveBeenCalled()
+  })
+
+  it('discards the source once confirmed, leaving the job failed', async () => {
+    getCuttingJobMock.mockResolvedValue(job({ status: 'failed', sourceRetained: true }))
+    discardCuttingJobSourceMock.mockResolvedValue(job({ status: 'failed', sourceRetained: false }))
+    const wrapper = await mountView('31')
+
+    await wrapper.find('[data-testid="discard-source"]').trigger('click')
+    await wrapper.find('[data-testid="discard-source-confirm"]').trigger('click')
+    await flushPromises()
+
+    expect(discardCuttingJobSourceMock).toHaveBeenCalledWith(31)
+    expect(wrapper.find('[data-testid="job-status"]').text()).toBe('Failed')
+    expect(wrapper.find('[data-testid="discard-source"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Discard permanently?')
+  })
+
+  it('shows why a discard failed and lets it be tried again', async () => {
+    getCuttingJobMock.mockResolvedValue(job({ status: 'failed', sourceRetained: true }))
+    discardCuttingJobSourceMock.mockRejectedValue(
+      new Error("The source video couldn't be deleted. Try discarding it again."),
+    )
+    const wrapper = await mountView('31')
+
+    await wrapper.find('[data-testid="discard-source"]').trigger('click')
+    await wrapper.find('[data-testid="discard-source-confirm"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="discard-source-error"]').text()).toBe(
+      "The source video couldn't be deleted. Try discarding it again.",
+    )
+    expect(wrapper.find('[data-testid="discard-source"]').exists()).toBe(true)
   })
 })

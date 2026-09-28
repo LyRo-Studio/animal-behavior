@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   cancelCuttingJob,
   CuttingJobNotFoundError,
+  discardCuttingJobSource,
   forgetSourceVideoUpload,
   getCuttingJob,
   listCuttingJobs,
@@ -510,6 +511,53 @@ describe('cancelling a cutting job', () => {
 
     await expect(cancelCuttingJob(12)).rejects.toThrow(
       'Only a queued cutting job can be cancelled.',
+    )
+  })
+})
+
+// Issue #169: POST /cutting-jobs/{id}/discard-source answers with the job, its
+// status unchanged, or an error when there's nothing to discard or the delete
+// failed.
+describe("discarding a cutting job's source", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('posts the discard and returns the job without a retained source', async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, { ...JOB_RESPONSE, status: 'failed', source_retained: false }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const job = await discardCuttingJobSource(12)
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/cutting-jobs\/12\/discard-source$/),
+      { method: 'POST' },
+    )
+    expect(job.status).toBe('failed')
+    expect(job.sourceRetained).toBe(false)
+  })
+
+  it('says so distinctly when there is no such job, as fetching one does', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => json(404, { detail: 'Cutting job not found.' })),
+    )
+
+    await expect(discardCuttingJobSource(999)).rejects.toBeInstanceOf(CuttingJobNotFoundError)
+  })
+
+  it("passes on the backend's reason when the source couldn't be deleted", async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        json(500, { detail: "The source video couldn't be deleted. Try discarding it again." }),
+      ),
+    )
+
+    await expect(discardCuttingJobSource(12)).rejects.toThrow(
+      "The source video couldn't be deleted. Try discarding it again.",
     )
   })
 })

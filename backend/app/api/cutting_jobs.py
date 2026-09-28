@@ -39,6 +39,8 @@ from app.services.cutting_jobs import (
     CuttingJobNotCancellableError,
     CuttingJobNotFoundError,
     CuttingJobSubmission,
+    CuttingSourceNotDeletedError,
+    CuttingSourceNotDiscardableError,
     DuplicateCameraUploadError,
     DuplicateTestInBatchError,
     IncompleteSourceUploadError,
@@ -51,6 +53,7 @@ from app.services.cutting_jobs import (
     SourceVideoNotDecodableError,
     UnknownSourceUploadError,
     cancel_cutting_job,
+    discard_cutting_job_source,
     get_cutting_job,
     list_cutting_jobs,
     submit_cutting_job,
@@ -445,6 +448,34 @@ def cancel_cutting_job_endpoint(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Only a queued cutting job can be cancelled.",
+        ) from None
+
+
+@router.post("/{cutting_job_id}/discard-source", response_model=CuttingJobOut)
+def discard_cutting_job_source_endpoint(
+    cutting_job_id: int, request: Request, db: Session = Depends(get_db)
+) -> CuttingJob:
+    """Issue #169: delete a failed or cancelled job's Retained source, by
+    anyone. Not rate limited, like cancel: it can only succeed once per job."""
+    try:
+        return discard_cutting_job_source(
+            db,
+            cutting_job_id=cutting_job_id,
+            discarded_by=AuditIdentity(*get_verified_identity(request)),
+        )
+    except CuttingJobNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Cutting job not found."
+        ) from None
+    except CuttingSourceNotDiscardableError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only the kept source of a failed or cancelled cutting job can be discarded.",
+        ) from None
+    except CuttingSourceNotDeletedError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="The source video couldn't be deleted. Try discarding it again.",
         ) from None
 
 

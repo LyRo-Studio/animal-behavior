@@ -8,6 +8,7 @@ limiting.
 """
 
 import json
+import shutil
 from datetime import time
 from io import BytesIO
 
@@ -18,6 +19,7 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.models.audit_log import AuditAction, AuditLog
 from app.models.cutting_job import CuttingJob, CuttingJobOutputStatus, CuttingJobStatus
+from app.services import cutting_jobs as cutting_jobs_service
 from app.services.cutting_jobs import claim_next_queued_cutting_job
 from tests.helpers import identity_headers
 
@@ -1057,3 +1059,188 @@ def test_a_cancelled_jobs_outputs_stay_pending(client):
     response = client.post(f"/api/cutting-jobs/{created['id']}/cancel")
 
     assert {output["status"] for output in response.json()["outputs"]} == {"pending"}
+
+
+# --- POST /cutting-jobs/{id}/discard-source (issue #169) ---
+
+
+def _discarded_rows(db_session) -> list[AuditLog]:
+    return [
+        row
+        for row in _cutting_audit_rows(db_session)
+        if row.action == AuditAction.CUTTING_SOURCE_DISCARDED
+    ]
+
+
+def _job_with_status(client, db_session, upload_id, status, **submit_kwargs) -> int:
+    created = _submit_single(client, c1_upload_id=upload_id, **submit_kwargs)
+    assert created.status_code == 201, created.text
+    job = db_session.get(CuttingJob, created.json()["id"])
+    job.status = status
+    db_session.commit()
+    return job.id
+
+
+def test_discarding_a_failed_jobs_source_deletes_it_and_keeps_the_job_failed(
+    client, db_session, cutting_upload_root
+):
+    upload_id = _completed_upload_id(client, test_id="T001")
+    job_id = _job_with_status(client, db_session, upload_id, CuttingJobStatus.FAILED)
+
+    response = client.post(
+        f"/api/cutting-jobs/{job_id}/discard-source",
+        headers={"X-authentik-email": "jan.peeters@vives.be"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["source_retained"] is False
+    assert not (cutting_upload_root / upload_id).exists()
+    job = db_session.get(CuttingJob, job_id)
+    assert job.c1_source_path is None
+    (row,) = _discarded_rows(db_session)
+    assert row.target_type == "cutting_job"
+    assert row.target == str(job_id)
+    assert row.identity == "jan.peeters@vives.be"
+    assert row.identity_verified is False
+
+
+def test_a_cancelled_jobs_retained_source_can_be_discarded(client, db_session, cutting_upload_root):
+    """A cancel whose delete failed leaves a Retained source (issue #168)."""
+    upload_id = _completed_upload_id(client, test_id="T001")
+    job_id = _job_with_status(client, db_session, upload_id, CuttingJobStatus.CANCELLED)
+
+    response = client.post(f"/api/cutting-jobs/{job_id}/discard-source")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["source_retained"] is False
+    assert not (cutting_upload_root / upload_id).exists()
+    assert len(_discarded_rows(db_session)) == 1
+
+
+@pytest.mark.parametrize(
+    "status", [CuttingJobStatus.QUEUED, CuttingJobStatus.RUNNING, CuttingJobStatus.SUCCEEDED]
+)
+def test_only_a_failed_or_cancelled_jobs_source_can_be_discarded(
+    client, db_session, cutting_upload_root, status
+):
+    upload_id = _completed_upload_id(client, test_id="T001")
+    job_id = _job_with_status(client, db_session, upload_id, status)
+
+    response = client.post(f"/api/cutting-jobs/{job_id}/discard-source")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Only the kept source of a failed or cancelled cutting job can be discarded."
+    )
+    body = client.get(f"/api/cutting-jobs/{job_id}").json()
+    assert body["status"] == status.value
+    assert body["source_retained"] is True
+    assert (cutting_upload_root / upload_id).exists()
+    assert _discarded_rows(db_session) == []
+
+
+@pytest.mark.parametrize("status", [CuttingJobStatus.FAILED, CuttingJobStatus.CANCELLED])
+def test_a_job_with_no_retained_source_has_nothing_to_discard(client, db_session, status):
+    upload_id = _completed_upload_id(client, test_id="T001")
+    job_id = _job_with_status(client, db_session, upload_id, status)
+    assert client.post(f"/api/cutting-jobs/{job_id}/discard-source").status_code == 200
+
+    response = client.post(f"/api/cutting-jobs/{job_id}/discard-source")
+
+    assert response.status_code == 409
+    assert client.get(f"/api/cutting-jobs/{job_id}").json()["status"] == status.value
+    assert len(_discarded_rows(db_session)) == 1
+
+
+def test_discarding_an_unknown_jobs_source_is_not_found(client):
+    response = client.post("/api/cutting-jobs/999999/discard-source")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Cutting job not found."
+
+
+def test_anyone_can_discard_the_source_of_a_job_someone_else_started(client, db_session):
+    created = _create_job(client, identity="owner@vives.be")
+    job = db_session.get(CuttingJob, created["id"])
+    job.status = CuttingJobStatus.FAILED
+    db_session.commit()
+
+    response = client.post(
+        f"/api/cutting-jobs/{created['id']}/discard-source",
+        headers={"X-authentik-email": "other@vives.be"},
+    )
+
+    assert response.status_code == 200
+    (row,) = _discarded_rows(db_session)
+    assert row.identity == "other@vives.be"
+
+
+def test_a_source_directory_thats_already_gone_is_discarded_all_the_same(
+    client, db_session, cutting_upload_root
+):
+    upload_id = _completed_upload_id(client, test_id="T001")
+    job_id = _job_with_status(client, db_session, upload_id, CuttingJobStatus.FAILED)
+    shutil.rmtree(cutting_upload_root / upload_id)
+
+    response = client.post(f"/api/cutting-jobs/{job_id}/discard-source")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["source_retained"] is False
+    assert len(_discarded_rows(db_session)) == 1
+
+
+def test_a_discard_whose_delete_fails_returns_an_error_and_keeps_the_source(
+    client, db_session, cutting_upload_root, monkeypatch
+):
+    upload_id = _completed_upload_id(client, test_id="T001")
+    job_id = _job_with_status(client, db_session, upload_id, CuttingJobStatus.FAILED)
+    monkeypatch.setattr("app.services.cutting_jobs.delete_source_upload", lambda source_path: False)
+
+    response = client.post(f"/api/cutting-jobs/{job_id}/discard-source")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == (
+        "The source video couldn't be deleted. Try discarding it again."
+    )
+    body = client.get(f"/api/cutting-jobs/{job_id}").json()
+    assert body["status"] == "failed"
+    assert body["source_retained"] is True
+    assert (cutting_upload_root / upload_id).exists()
+    assert _discarded_rows(db_session) == []
+
+    monkeypatch.undo()
+    retried = client.post(f"/api/cutting-jobs/{job_id}/discard-source")
+
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["source_retained"] is False
+
+
+def test_a_discard_that_deletes_only_one_camera_keeps_and_audits_what_it_did(
+    client, db_session, cutting_upload_root, monkeypatch
+):
+    """The C1 directory really is gone, so its path is cleared and the delete
+    is audited; the C2 one isn't, so the job stays retained for a retry."""
+    c1_upload_id = _completed_upload_id(client, test_id="T001")
+    c2_upload_id = _completed_upload_id(client, test_id="T001", camera="C2")
+    job_id = _job_with_status(
+        client, db_session, c1_upload_id, CuttingJobStatus.FAILED, c2_upload_id=c2_upload_id
+    )
+    real_delete = cutting_jobs_service.delete_source_upload
+    monkeypatch.setattr(
+        "app.services.cutting_jobs.delete_source_upload",
+        lambda source_path: c2_upload_id not in source_path and real_delete(source_path),
+    )
+
+    response = client.post(f"/api/cutting-jobs/{job_id}/discard-source")
+
+    assert response.status_code == 500
+    job = db_session.get(CuttingJob, job_id)
+    db_session.refresh(job)
+    assert job.c1_source_path is None
+    assert job.c2_source_path is not None
+    assert not (cutting_upload_root / c1_upload_id).exists()
+    assert (cutting_upload_root / c2_upload_id).exists()
+    assert len(_discarded_rows(db_session)) == 1
