@@ -473,6 +473,70 @@ def test_create_cutting_job_needs_no_login(client):
     assert response.json()["requested_by_identity"] is None
 
 
+# --- One upload feeds exactly one job (issue #173) ---
+
+
+def _submit_single(client, *, test_id="T001", c1_upload_id=None, c2_upload_id=None, excel=None):
+    data = {"test_id": test_id}
+    if c1_upload_id is not None:
+        data["c1_upload_id"] = c1_upload_id
+    if c2_upload_id is not None:
+        data["c2_upload_id"] = c2_upload_id
+    return client.post(
+        "/api/cutting-jobs",
+        data=data,
+        files={"excel": ("timestamps.xlsx", excel or _excel_bytes(), "application/octet-stream")},
+    )
+
+
+def test_an_upload_already_used_by_a_job_cant_start_a_second_one(client, db_session):
+    upload_id = _completed_upload_id(client, test_id="T001")
+    first = _submit_single(client, c1_upload_id=upload_id)
+    assert first.status_code == 201, first.text
+
+    second = _submit_single(client, c1_upload_id=upload_id)
+
+    assert second.status_code == 409
+    assert second.json()["detail"] == (
+        f"The C1 upload T001_C1_source.mp4 is already used by cutting job {first.json()['id']}. "
+        "Upload the video again to cut it again."
+    )
+    assert db_session.query(CuttingJob).count() == 1
+
+
+def test_a_c2_upload_already_used_by_a_job_cant_start_a_second_one(client, db_session):
+    excel = _excel_bytes(reference_camera="C2")
+    upload_id = _completed_upload_id(client, test_id="T001", camera="C2")
+    first = _submit_single(client, c2_upload_id=upload_id, excel=excel)
+    assert first.status_code == 201, first.text
+
+    second = _submit_single(client, c2_upload_id=upload_id, excel=excel)
+
+    assert second.status_code == 409
+    assert "The C2 upload T001_C2_source.mp4 is already used" in second.json()["detail"]
+    assert db_session.query(CuttingJob).count() == 1
+
+
+def test_a_reused_upload_in_a_batch_fails_only_its_own_test(client, db_session):
+    reused = _completed_upload_id(client, test_id="T001")
+    first = _submit_single(client, c1_upload_id=reused)
+    assert first.status_code == 201, first.text
+    entries = [
+        {"test_id": "T001", "c1_upload_id": reused},
+        {"test_id": "T002", "c1_upload_id": _completed_upload_id(client, test_id="T002")},
+    ]
+
+    response = _post_batch(client, entries)
+
+    assert response.status_code == 200, response.text
+    rejected, created = response.json()["results"]
+    assert rejected["job"] is None
+    assert rejected["error"]["status_code"] == 409
+    assert "The C1 upload T001_C1_source.mp4 is already used" in rejected["error"]["detail"]
+    assert created["job"]["test_id"] == "T002"
+    assert db_session.query(CuttingJob).count() == 2
+
+
 # --- POST /cutting-jobs/batch (ticket #97) ---
 
 

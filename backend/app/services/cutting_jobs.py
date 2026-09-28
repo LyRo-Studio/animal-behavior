@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.audit_log import AuditAction
@@ -159,6 +159,17 @@ class MismatchedSourceUploadError(SourceUploadNotUsableError):
     """The upload was declared for a different Test or camera."""
 
 
+class SourceUploadAlreadyUsedError(SourceUploadNotUsableError):
+    """The upload already feeds another CuttingJob (issue #173). One upload
+    feeds exactly one job, so deleting one job's source (after a success,
+    on Cancel or on Discard source) can never remove another's."""
+
+    def __init__(self, camera: str, *, filename: str, cutting_job_id: int) -> None:
+        super().__init__(camera)
+        self.filename = filename
+        self.cutting_job_id = cutting_job_id
+
+
 class EmptyBatchError(Exception):
     """A batch submission named no Tests at all."""
 
@@ -226,6 +237,23 @@ def _derive_source_collision_key(test_id: str, filename: str) -> str:
     return f"source/{test_id}/{filename}"
 
 
+def _ensure_upload_unused(db: Session, upload: SourceVideoUpload) -> None:
+    """Raise SourceUploadAlreadyUsedError if another CuttingJob already
+    points at `upload`'s file. Either path column is checked, although an
+    upload's camera is fixed when it's started, so only the matching one can
+    ever hold it."""
+    path = str(upload.local_path)
+    existing_job_id = db.scalar(
+        select(CuttingJob.id)
+        .where(or_(CuttingJob.c1_source_path == path, CuttingJob.c2_source_path == path))
+        .limit(1)
+    )
+    if existing_job_id is not None:
+        raise SourceUploadAlreadyUsedError(
+            upload.camera, filename=upload.filename, cutting_job_id=existing_job_id
+        )
+
+
 def create_cutting_job(
     db: Session,
     *,
@@ -277,6 +305,7 @@ def create_cutting_job(
         seen_cameras.add(upload.camera)
         if not source_filename_matches_camera(upload.filename, test_id, upload.camera):
             raise InvalidSourceFilenameError(upload.filename)
+        _ensure_upload_unused(db, upload)
 
     row = read_test_row(excel_bytes, test_id)
 
