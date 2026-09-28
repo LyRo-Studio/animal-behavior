@@ -8,7 +8,9 @@ import {
   cancelAnalysis,
   downloadAnalysisReport,
   getAnalysis,
+  listAnalysisTraces,
   type AnalysisJob,
+  type AnalysisVideoTraces,
 } from '@/services/analyses'
 import { triggerBrowserDownload } from '@/utils/download'
 import { breakdownByTest, hasTestBreakdown } from '@/utils/testBreakdown'
@@ -88,11 +90,53 @@ async function cancel() {
 const isDownloading = ref(false)
 const downloadError = ref<string | null>(null)
 
-// A cancel/download error belongs to the analysis it was about.
+// A cancel/download error and the trace images belong to the analysis they
+// were about.
 watch(analysisId, () => {
   cancelError.value = null
   downloadError.value = null
+  traces.value = null
+  tracesError.value = null
+  openTraceVideos.value = new Set()
 })
+
+// Issue #133: each video's trace images. Listed once the job has a report
+// (the backend lists S3 for this, so never on every poll), and only
+// rendered — so only requested — for a video someone has expanded.
+const traces = ref<AnalysisVideoTraces[] | null>(null)
+const tracesError = ref<string | null>(null)
+const openTraceVideos = ref(new Set<string>())
+
+const videosWithTraces = computed(
+  () => traces.value?.filter((entry) => entry.images.length > 0) ?? [],
+)
+
+// The id of the shown job once it has a report, else null — stays the same
+// across polls that change nothing, so the list is loaded once.
+const reportReadyId = computed(() => (job.value?.reportAvailable ? job.value.id : null))
+
+watch(
+  reportReadyId,
+  async (id) => {
+    if (id === null) return
+    try {
+      const loaded = await listAnalysisTraces(id)
+      if (reportReadyId.value === id) traces.value = loaded
+    } catch (err) {
+      if (reportReadyId.value === id) {
+        tracesError.value = err instanceof Error ? err.message : 'Failed to load trace images.'
+      }
+    }
+  },
+  { immediate: true },
+)
+
+function onTraceToggle(cutKey: string, event: Event) {
+  const next = new Set(openTraceVideos.value)
+  if ((event.target as HTMLDetailsElement).open) next.add(cutKey)
+  else next.delete(cutKey)
+  openTraceVideos.value = next
+}
 
 async function downloadReport() {
   if (!job.value || isDownloading.value) return
@@ -236,6 +280,56 @@ async function downloadReport() {
         <p v-if="downloadError" class="mt-2 text-sm text-danger" role="alert">
           {{ downloadError }}
         </p>
+
+        <section v-if="job.reportAvailable" class="mt-8" data-testid="trace-images">
+          <h3 class="text-base font-medium text-foreground">Trace images</h3>
+          <p v-if="tracesError" class="mt-2 text-sm text-danger" role="alert">{{ tracesError }}</p>
+          <p v-else-if="traces === null" class="mt-2 text-sm text-muted">Loading…</p>
+          <p v-else-if="videosWithTraces.length === 0" class="mt-2 text-sm text-muted">
+            No trace images for this analysis.
+          </p>
+          <details
+            v-for="entry in videosWithTraces"
+            :key="entry.cutKey"
+            data-testid="trace-video"
+            class="mt-2 rounded-md border border-border bg-surface"
+            @toggle="onTraceToggle(entry.cutKey, $event)"
+          >
+            <summary class="cursor-pointer px-3 py-2 text-sm font-medium text-foreground">
+              {{ filename(entry.cutKey) }}
+              <span class="font-normal text-muted">
+                ({{ entry.images.length }} {{ entry.images.length === 1 ? 'image' : 'images' }})
+              </span>
+            </summary>
+            <ul
+              v-if="openTraceVideos.has(entry.cutKey)"
+              class="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3"
+            >
+              <li v-for="image in entry.images" :key="image.url">
+                <a :href="image.url" target="_blank" rel="noopener">
+                  <img
+                    :src="image.url"
+                    :alt="image.filename"
+                    loading="lazy"
+                    class="aspect-video w-full rounded border border-border bg-background object-contain"
+                  />
+                </a>
+                <div class="mt-1 flex items-center justify-between gap-2 text-xs">
+                  <span class="truncate text-muted" :title="image.filename">
+                    {{ image.label }}
+                  </span>
+                  <a
+                    :href="image.downloadUrl"
+                    download
+                    class="shrink-0 font-medium text-primary hover:underline"
+                  >
+                    Download
+                  </a>
+                </div>
+              </li>
+            </ul>
+          </details>
+        </section>
       </template>
     </section>
   </main>

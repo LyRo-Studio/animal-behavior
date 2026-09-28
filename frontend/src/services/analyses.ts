@@ -198,3 +198,51 @@ export async function downloadAnalysisReport(id: number): Promise<Blob> {
 
   return response.blob()
 }
+
+export interface AnalysisTraceImage {
+  filename: string
+  // The filename without its video's stem and extension: "dog_trace".
+  label: string
+  // Served inline — usable directly as an <img src>, since the app has no
+  // auth of its own to attach (ticket #72).
+  url: string
+  // The same image as an attachment, for a plain <a href download>.
+  downloadUrl: string
+}
+
+export interface AnalysisVideoTraces {
+  cutKey: string
+  // Empty for a video DogTrace drew nothing for (e.g. it failed).
+  images: AnalysisTraceImage[]
+}
+
+interface AnalysisVideoTracesResponse {
+  cut_key: string
+  images: { path: string; filename: string; label: string }[]
+}
+
+// Issue #133: each video's trace images for a finished analysis. The
+// backend returns each image's path relative to the job's report prefix;
+// every segment is encoded on its own so the slashes between them survive.
+export async function listAnalysisTraces(id: number): Promise<AnalysisVideoTraces[]> {
+  const response = await fetch(`${API_BASE_URL}/analyses/${id}/traces`)
+
+  if (!response.ok) {
+    throw await errorFromResponse(response, 'Failed to load trace images.')
+  }
+
+  const rows: AnalysisVideoTracesResponse[] = await response.json()
+  return rows.map((row) => ({
+    cutKey: row.cut_key,
+    images: row.images.map((image) => {
+      const encodedPath = image.path.split('/').map(encodeURIComponent).join('/')
+      const url = `${API_BASE_URL}/analyses/${id}/traces/${encodedPath}`
+      return {
+        filename: image.filename,
+        label: image.label,
+        url,
+        downloadUrl: `${url}?download=true`,
+      }
+    }),
+  }))
+}

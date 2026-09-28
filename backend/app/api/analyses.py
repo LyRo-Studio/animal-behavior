@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.models.analysis_job import AnalysisJob
 from app.models.audit_log import AuditAction
-from app.schemas.analyses import AnalysisJobOut, CreateAnalysisRequest
+from app.schemas.analyses import AnalysisJobOut, AnalysisVideoTracesOut, CreateAnalysisRequest
 from app.services.analyses import (
     REPORT_FILENAME,
     AnalysisJobNotCancellableError,
@@ -23,11 +23,15 @@ from app.services.analyses import (
     InvalidCutSelectionError,
     TooManyTestsError,
     TooManyVideosError,
+    TraceImageNotFoundError,
+    VideoTraceImages,
     cancel_analysis_job,
     create_analysis_job,
     get_analysis_job,
     get_analysis_report_key,
+    get_analysis_trace_image_key,
     list_analysis_jobs,
+    list_analysis_trace_images,
 )
 from app.services.audit_log import record_audit_event
 from app.services.media_browser import TestNotFoundError
@@ -207,6 +211,81 @@ def download_analysis_report(
         media_type=_REPORT_MEDIA_TYPE,
         headers={
             "Content-Disposition": f'attachment; filename="{REPORT_FILENAME}"',
+            "Content-Length": str(info.size),
+        },
+    )
+
+
+@router.get("/{analysis_id}/traces", response_model=list[AnalysisVideoTracesOut])
+def list_analysis_traces(
+    analysis_id: int,
+    db: Session = Depends(get_db),
+    s3: S3Client = Depends(get_s3_client),
+) -> list[VideoTraceImages]:
+    """Each video's trace images for `analysis_id` (issue #133). Fetched
+    separately from `GET /analyses/{id}` because it lists S3, which that
+    endpoint — polled while a job runs — shouldn't do on every poll."""
+    try:
+        return list_analysis_trace_images(db, s3, analysis_id=analysis_id)
+    except AnalysisJobNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found."
+        ) from None
+    except AnalysisReportNotAvailableError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No trace images are available for this analysis yet.",
+        ) from None
+
+
+@router.get("/{analysis_id}/traces/{path:path}")
+def get_analysis_trace_image(
+    analysis_id: int,
+    path: str,
+    download: bool = False,
+    db: Session = Depends(get_db),
+    s3: S3Client = Depends(get_s3_client),
+) -> StreamingResponse:
+    """One trace image (issue #133), shown inline by default so the
+    frontend can use this URL directly as an `<img src>` — no media token
+    needed since ticket #72 removed the app's own authentication.
+    `?download=true` serves it as an attachment instead.
+
+    Deliberately not audited, unlike the combined report: previews load
+    several of these per video, which is "every click", not the meaningful
+    action the audit log records (CONTEXT.md's audit log design).
+    """
+    try:
+        key = get_analysis_trace_image_key(db, analysis_id=analysis_id, path=path)
+    except AnalysisJobNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found."
+        ) from None
+    except AnalysisReportNotAvailableError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No trace images are available for this analysis yet.",
+        ) from None
+    except TraceImageNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Trace image not found."
+        ) from None
+
+    try:
+        info = s3.head_object(key)
+    except S3ObjectNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Trace image not found."
+        ) from None
+
+    filename = key.rsplit("/", 1)[-1]
+    disposition = "attachment" if download else "inline"
+    body = _iter_range(s3, key, 0, info.size - 1) if info.size > 0 else iter((b"",))
+    return StreamingResponse(
+        body,
+        media_type="image/jpeg",
+        headers={
+            "Content-Disposition": f'{disposition}; filename="{filename}"',
             "Content-Length": str(info.size),
         },
     )

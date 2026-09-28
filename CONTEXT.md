@@ -614,6 +614,58 @@ serves `<report_s3_prefix>casiop_report.xlsx` — the only artifact of
   guidance), same mechanism as Cut streaming just without the Range-parsing
   half of it.
 
+**Analysis trace images (issue #133):** every image DogTrace draws per
+video (`_dog_trace.jpg`, `_fp_trace.jpg`, `_tp_trace.jpg`,
+`_contact_trace.jpg`, and also `_approach_trace.jpg` and `_overlap_<n>.jpg`,
+which the issue didn't list) can now be previewed and downloaded from
+`AnalysisView`. The combined report stays the only file with its own
+download button at the top.
+
+- **Two endpoints.** `GET /analyses/{id}/traces` lists each video's images
+  (every video in job order, a failed one with an empty list), and
+  `GET /analyses/{id}/traces/{path}` serves one image — inline by default,
+  as an attachment with `?download=true`. The list is its own endpoint, not
+  part of `AnalysisJobOut`, because it lists S3 and `GET /analyses/{id}` is
+  polled every 2s while a job runs.
+- **Matched by DogTrace's file naming, not its folder layout.** An image
+  belongs to a video when it's a `.jpg` anywhere under the job's
+  `report_s3_prefix` whose filename starts with the video's stem plus "_"
+  (`T001_C2_ME_F1_dog_trace.jpg`). Today DogTrace puts them all in a flat
+  `traces/` folder (confirmed against the real bucket), but nothing outside
+  `worker/dogtrace_runner.py` depends on that. Old `reports/<test_id>/<id>/`
+  and new `reports/<id>/` jobs work the same, since only
+  `report_s3_prefix` is used. The "_" keeps `..._F1` from claiming
+  `..._F10`'s images.
+- **Every `.jpg` of a video counts**, not a fixed list of kinds, so a new
+  kind of image from a future DogTrace version shows up without a code
+  change.
+- **The image endpoint takes the listed path back and never lists S3
+  itself.** Listing and serving share one rule (`_trace_image_of`), so a
+  listed image is always one the endpoint will serve: plain segments only
+  (letters, digits, `_`, `-`, `.`; no `.` or `..`), a `.jpg`, named after
+  one of the job's videos. Anything else is the same 404 as a
+  missing image, so it can't be used to read other files under the prefix —
+  in particular `casiop_report.xlsx`, which must stay behind its own
+  audited endpoint. Otherwise each thumbnail would cost a full listing of a
+  job that can have ~1000 images.
+- **Plain `<img src>` URLs, no media token.** Since ticket #72 there's no
+  app-level auth to attach, so the browser requests images directly, unlike
+  the report's fetch-to-Blob. ADR 0002's token exception stays scoped to
+  Cut streaming.
+- **Not audited.** Previews load several images per video — "every click",
+  not the meaningful action the audit log records — so neither endpoint
+  writes an audit row. `REPORT_DOWNLOADED` still covers the report.
+- **Same availability rule as the report** (`status` in `{completed,
+  completed_with_errors}` and `report_s3_prefix` set; 409 otherwise), and
+  the same reasoning for no separate rate limit: a `head_object` plus a
+  chunked streamed read, or one bounded listing per page view.
+- **UI:** a "Trace images" section, shown once `reportAvailable`, lists
+  only the videos that have images, each as a collapsed `<details>`.
+  Thumbnails are only rendered — so only requested — after someone expands
+  a video, and use `loading="lazy"`. Each links to the full image in a new
+  tab and has its own download link, captioned with the `label` the
+  backend derives (`dog_trace`) so the naming rule lives in one place.
+
 **Analysis detail/progress view (ticket #52):** `AnalysisView.vue`
 (`/analyses/:id`), reached from `MediaBrowserView`'s "Analyze selected"
 button. Polls `GET /analyses/{id}` every 2s while `status` is
@@ -1540,7 +1592,8 @@ single-Test flow byte-for-byte unchanged.
   original v1 scoping). Raised during this session but split into its own
   future ticket (issue #133): it applies equally to today's single-Test
   analyses, so bundling it here would mix two unrelated concerns into one
-  set of tickets.
+  set of tickets. _Amended: shipped by issue #133 — see "Analysis trace
+  images" below ticket #49's report download._
 
 **Multi-test analysis — foundation (ticket #89):** shipped the schema/API
 half of Feature B above (`CreateAnalysisRequest`, wholesale derivation, the

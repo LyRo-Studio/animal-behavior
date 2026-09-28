@@ -5,7 +5,9 @@ actually claims and runs it.
 """
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -29,10 +31,11 @@ from app.services.s3_client import S3Client
 # analysis input.
 _DOGTRACE_C2_FILENAME_RE = re.compile(r"^T\d{3}_C2_(ME|ZE)_F\d+\.mp4$", re.IGNORECASE)
 
-# The only artifact exposed as a download in v1 (issue #44's "Report
-# persistence" decision) — every other file the worker uploads alongside it
-# under the same `report_s3_prefix` (track_report.xlsx/csv, .pkl files,
-# config.json, trace images) stays un-surfaced.
+# The combined report — the only artifact exposed as a download in v1
+# (issue #44's "Report persistence" decision). Issue #133 has since exposed
+# the trace images too (`list_analysis_trace_images`); every other file the
+# worker uploads under the same `report_s3_prefix` (track_report.xlsx/csv,
+# .pkl files, config.json) stays un-surfaced.
 REPORT_FILENAME = "casiop_report.xlsx"
 
 # Ticket #89 / issue #88's Feature B limits: 10 Tests per job, 300 total
@@ -277,12 +280,125 @@ def get_analysis_report_key(db: Session, *, analysis_id: int) -> str:
     something was actually uploaded.
     """
     job = get_analysis_job(db, analysis_id=analysis_id)
+    return f"{_finished_report_prefix(job)}{REPORT_FILENAME}"
+
+
+def _finished_report_prefix(job: AnalysisJob) -> str:
+    """`job`'s `report_s3_prefix`, or raise AnalysisReportNotAvailableError
+    if it has no uploaded output to serve yet — shared by the combined
+    report (ticket #49) and the trace images (issue #133)."""
     if (
         job.status not in (AnalysisJobStatus.COMPLETED, AnalysisJobStatus.COMPLETED_WITH_ERRORS)
         or job.report_s3_prefix is None
     ):
         raise AnalysisReportNotAvailableError(job.status)
-    return f"{job.report_s3_prefix}{REPORT_FILENAME}"
+    return job.report_s3_prefix
+
+
+# One path segment of a trace image's `path` — letters, digits, "_", "-",
+# "." only, so a request can never smuggle in "/", "\\" or anything else a
+# storage gateway might interpret. "." and ".." are rejected separately.
+_TRACE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+@dataclass(frozen=True)
+class TraceImage:
+    # Relative to the job's `report_s3_prefix` — what the image endpoint
+    # takes back, so serving one never needs to list the prefix again.
+    path: str
+    filename: str
+    # The filename without its video's stem and extension: "dog_trace".
+    label: str
+
+
+@dataclass(frozen=True)
+class VideoTraceImages:
+    cut_key: str
+    images: list[TraceImage]
+
+
+def _trace_image_of(path: str, cut_keys: list[str]) -> tuple[str, TraceImage] | None:
+    """The one rule for what counts as a trace image (issue #133), shared by
+    listing and serving so a listed image is always one the image endpoint
+    will serve: `(its video's cut key, the image)`, or None.
+
+    `path` (relative to the job's report prefix) must be plain segments
+    only (`_TRACE_PATH_SEGMENT_RE`, never "." or ".."), and its filename a
+    `.jpg` starting with one of the job's video stems plus "_"
+    (`T001_C2_ME_F1_dog_trace.jpg`) — DogTrace's own naming, not its folder
+    layout, so nothing here depends on where under the prefix it puts them
+    (`traces/` today). The "_" keeps `..._F1` from claiming `..._F10`'s.
+    """
+    segments = path.split("/")
+    if any(
+        segment in (".", "..") or not _TRACE_PATH_SEGMENT_RE.fullmatch(segment)
+        for segment in segments
+    ):
+        return None
+    filename = segments[-1]
+    if not filename.lower().endswith(".jpg"):
+        return None
+    for cut_key in cut_keys:
+        name_prefix = f"{PurePosixPath(cut_key).stem}_"
+        if filename.startswith(name_prefix):
+            label = filename[len(name_prefix) : -len(".jpg")]
+            return cut_key, TraceImage(path=path, filename=filename, label=label)
+    return None
+
+
+def list_analysis_trace_images(
+    db: Session, s3: S3Client, *, analysis_id: int
+) -> list[VideoTraceImages]:
+    """Every trace image DogTrace drew for each of `analysis_id`'s videos
+    (issue #133, per `_trace_image_of`), anywhere under the job's report
+    prefix — old `reports/<test_id>/<id>/` jobs work the same as new ones.
+    In the job's own video order, each video's images sorted by path; a
+    video with none (e.g. it failed) gets an empty list.
+
+    Raises the same errors as `get_analysis_report_key`.
+    """
+    job = get_analysis_job(db, analysis_id=analysis_id)
+    prefix = _finished_report_prefix(job)
+
+    cut_keys = list(dict.fromkeys(video.cut_key for video in job.videos))
+    images_by_cut_key: dict[str, list[TraceImage]] = {cut_key: [] for cut_key in cut_keys}
+    for info in s3.list_objects_info(prefix):
+        match = _trace_image_of(info.key[len(prefix) :], cut_keys)
+        if match is not None:
+            cut_key, image = match
+            images_by_cut_key[cut_key].append(image)
+
+    return [
+        VideoTraceImages(
+            cut_key=cut_key,
+            images=sorted(images_by_cut_key[cut_key], key=lambda image: image.path),
+        )
+        for cut_key in cut_keys
+    ]
+
+
+class TraceImageNotFoundError(Exception):
+    """Raised when a requested trace-image `path` isn't one of the job's own
+    trace images per `_trace_image_of` (issue #133). The same answer as a
+    genuinely missing image, so the endpoint can't be used to read any
+    other file under the prefix — in particular the combined report, which
+    has its own audited endpoint."""
+
+
+def get_analysis_trace_image_key(db: Session, *, analysis_id: int, path: str) -> str:
+    """The S3 key of one of `analysis_id`'s trace images (issue #133), given
+    its `path` as returned by `list_analysis_trace_images` — checked with
+    the same `_trace_image_of` rule, without listing S3 again.
+
+    Raises the same errors as `get_analysis_report_key`, plus
+    TraceImageNotFoundError.
+    """
+    job = get_analysis_job(db, analysis_id=analysis_id)
+    prefix = _finished_report_prefix(job)
+
+    if _trace_image_of(path, [video.cut_key for video in job.videos]) is None:
+        raise TraceImageNotFoundError(path)
+    return f"{prefix}{path}"
 
 
 def claim_next_queued_job(db: Session, *, dogtrace_version: str) -> AnalysisJob | None:

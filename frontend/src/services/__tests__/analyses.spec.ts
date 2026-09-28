@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { createAnalysis, createWholesaleAnalysis } from '../analyses'
+import { API_BASE_URL } from '../apiBase'
+import { createAnalysis, createWholesaleAnalysis, listAnalysisTraces } from '../analyses'
 
 const JOB_RESPONSE = {
   id: 7,
@@ -57,6 +58,96 @@ describe('creating an analysis', () => {
 
     await expect(createWholesaleAnalysis(['T001', 'T002'])).rejects.toThrow(
       'Select at most 10 Tests per analysis.',
+    )
+  })
+})
+
+// Issue #133: each video's trace images, with URLs the view can use directly
+// as an <img src> and a download link.
+describe('listing trace images', () => {
+  const fetchMock = vi.fn()
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    fetchMock.mockReset()
+  })
+
+  it('gives every image a view URL and a download URL', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            cut_key: 'cuts/T001/T001_C2_ME_F1.mp4',
+            images: [
+              {
+                path: 'traces/T001_C2_ME_F1_dog_trace.jpg',
+                filename: 'T001_C2_ME_F1_dog_trace.jpg',
+                label: 'dog_trace',
+              },
+            ],
+          },
+          { cut_key: 'cuts/T001/T001_C2_ME_F2.mp4', images: [] },
+        ]),
+        { status: 200 },
+      ),
+    )
+
+    const traces = await listAnalysisTraces(42)
+
+    expect(fetchMock.mock.calls[0]![0]).toBe(`${API_BASE_URL}/analyses/42/traces`)
+    const base = `${API_BASE_URL}/analyses/42/traces/traces/T001_C2_ME_F1_dog_trace.jpg`
+    expect(traces).toEqual([
+      {
+        cutKey: 'cuts/T001/T001_C2_ME_F1.mp4',
+        images: [
+          {
+            filename: 'T001_C2_ME_F1_dog_trace.jpg',
+            label: 'dog_trace',
+            url: base,
+            downloadUrl: `${base}?download=true`,
+          },
+        ],
+      },
+      { cutKey: 'cuts/T001/T001_C2_ME_F2.mp4', images: [] },
+    ])
+  })
+
+  it('encodes each path segment but keeps the slashes between them', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            cut_key: 'cuts/T001/T001_C2_ME_F1.mp4',
+            images: [
+              { path: 'a b/T001_C2_ME_F1_#1.jpg', filename: 'T001_C2_ME_F1_#1.jpg', label: '#1' },
+            ],
+          },
+        ]),
+        { status: 200 },
+      ),
+    )
+
+    const [video] = await listAnalysisTraces(42)
+
+    expect(video!.images[0]!.url).toBe(
+      `${API_BASE_URL}/analyses/42/traces/a%20b/T001_C2_ME_F1_%231.jpg`,
+    )
+  })
+
+  it("surfaces the backend's message when the list can't be loaded", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ detail: 'No trace images are available for this analysis yet.' }),
+        { status: 409 },
+      ),
+    )
+
+    await expect(listAnalysisTraces(42)).rejects.toThrow(
+      'No trace images are available for this analysis yet.',
     )
   })
 })

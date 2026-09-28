@@ -7,6 +7,7 @@ import AnalysisView from '../AnalysisView.vue'
 const getAnalysisMock = vi.hoisted(() => vi.fn())
 const cancelAnalysisMock = vi.hoisted(() => vi.fn())
 const downloadAnalysisReportMock = vi.hoisted(() => vi.fn())
+const listAnalysisTracesMock = vi.hoisted(() => vi.fn())
 // A real class, not a plain mock: the view does `err instanceof
 // AnalysisNotFoundError`, so the mocked module needs to export the same
 // constructor identity that tests throw instances of.
@@ -16,6 +17,7 @@ vi.mock('@/services/analyses', () => ({
   getAnalysis: getAnalysisMock,
   cancelAnalysis: cancelAnalysisMock,
   downloadAnalysisReport: downloadAnalysisReportMock,
+  listAnalysisTraces: listAnalysisTracesMock,
   AnalysisNotFoundError,
 }))
 
@@ -72,6 +74,7 @@ function video(overrides: Record<string, unknown> = {}) {
 describe('AnalysisView', () => {
   beforeEach(() => {
     vi.useFakeTimers()
+    listAnalysisTracesMock.mockResolvedValue([])
   })
 
   afterEach(() => {
@@ -79,6 +82,7 @@ describe('AnalysisView', () => {
     getAnalysisMock.mockReset()
     cancelAnalysisMock.mockReset()
     downloadAnalysisReportMock.mockReset()
+    listAnalysisTracesMock.mockReset()
   })
 
   it('shows a not-found message for an unknown job', async () => {
@@ -477,5 +481,100 @@ describe('AnalysisView', () => {
     const wrapper = await mountView()
 
     expect(wrapper.find('[data-testid="test-breakdown"]').exists()).toBe(false)
+  })
+
+  // Issue #133: each video's trace images, previewed inline and downloadable.
+  describe('trace images', () => {
+    const dogTrace = {
+      filename: 'T001_C2_ME_F1_dog_trace.jpg',
+      label: 'dog_trace',
+      url: '/api/analyses/42/traces/traces/T001_C2_ME_F1_dog_trace.jpg',
+      downloadUrl: '/api/analyses/42/traces/traces/T001_C2_ME_F1_dog_trace.jpg?download=true',
+    }
+
+    function finishedJob() {
+      return job({
+        status: 'completed_with_errors',
+        reportAvailable: true,
+        videos: [
+          video({ status: 'succeeded' }),
+          video({ cutKey: 'cuts/T001/T001_C2_ME_F2.mp4', position: 1, status: 'failed' }),
+        ],
+      })
+    }
+
+    it('lists only the videos that have trace images, collapsed at first', async () => {
+      getAnalysisMock.mockResolvedValue(finishedJob())
+      listAnalysisTracesMock.mockResolvedValue([
+        { cutKey: 'cuts/T001/T001_C2_ME_F1.mp4', images: [dogTrace] },
+        { cutKey: 'cuts/T001/T001_C2_ME_F2.mp4', images: [] },
+      ])
+
+      const wrapper = await mountView()
+
+      expect(listAnalysisTracesMock).toHaveBeenCalledWith(42)
+      const entries = wrapper.findAll('[data-testid="trace-video"]')
+      expect(entries).toHaveLength(1)
+      expect(entries[0]!.text()).toContain('T001_C2_ME_F1.mp4')
+      expect(entries[0]!.text()).toContain('1 image')
+      // Collapsed: nothing is requested until someone opens the video.
+      expect(wrapper.find('img').exists()).toBe(false)
+    })
+
+    it('shows previews linking to the full image, plus a download link, once expanded', async () => {
+      getAnalysisMock.mockResolvedValue(finishedJob())
+      listAnalysisTracesMock.mockResolvedValue([
+        { cutKey: 'cuts/T001/T001_C2_ME_F1.mp4', images: [dogTrace] },
+      ])
+      const wrapper = await mountView()
+
+      const details = wrapper.find('[data-testid="trace-video"]')
+      ;(details.element as HTMLDetailsElement).open = true
+      await details.trigger('toggle')
+
+      const img = wrapper.find('img')
+      expect(img.attributes('src')).toBe(dogTrace.url)
+      expect(img.attributes('alt')).toBe('T001_C2_ME_F1_dog_trace.jpg')
+      expect(img.attributes('loading')).toBe('lazy')
+      expect(wrapper.find('[data-testid="trace-video"] li').text()).toContain('dog_trace')
+      expect(wrapper.find(`a[href="${dogTrace.url}"]`).attributes('target')).toBe('_blank')
+      const download = wrapper.find(`a[href="${dogTrace.downloadUrl}"]`)
+      expect(download.attributes('download')).toBeDefined()
+    })
+
+    it('never asks for trace images before the job has a report', async () => {
+      getAnalysisMock.mockResolvedValue(job({ status: 'running' }))
+
+      const wrapper = await mountView()
+
+      expect(listAnalysisTracesMock).not.toHaveBeenCalled()
+      expect(wrapper.find('[data-testid="trace-images"]').exists()).toBe(false)
+    })
+
+    it('loads trace images once a polled job finishes with a report', async () => {
+      getAnalysisMock
+        .mockResolvedValueOnce(job({ status: 'running' }))
+        .mockResolvedValue(finishedJob())
+      listAnalysisTracesMock.mockResolvedValue([
+        { cutKey: 'cuts/T001/T001_C2_ME_F1.mp4', images: [dogTrace] },
+      ])
+      const wrapper = await mountView()
+
+      await vi.advanceTimersByTimeAsync(2000)
+
+      expect(listAnalysisTracesMock).toHaveBeenCalledTimes(1)
+      expect(wrapper.findAll('[data-testid="trace-video"]')).toHaveLength(1)
+    })
+
+    it("shows the backend's reason when the trace images can't be loaded", async () => {
+      getAnalysisMock.mockResolvedValue(finishedJob())
+      listAnalysisTracesMock.mockRejectedValue(new Error('Failed to load trace images.'))
+
+      const wrapper = await mountView()
+
+      expect(wrapper.find('[data-testid="trace-images"]').text()).toContain(
+        'Failed to load trace images.',
+      )
+    })
   })
 })

@@ -59,3 +59,25 @@ class AnalysisJobOut(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     videos: list[AnalysisJobVideoOut]
+
+
+class AnalysisTraceImageOut(BaseModel):
+    """One trace image (issue #133). `path` is relative to the job's report
+    prefix and is what `GET /analyses/{id}/traces/{path}` takes back."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    path: str
+    filename: str
+    # The filename without its video's stem and extension: "dog_trace".
+    label: str
+
+
+class AnalysisVideoTracesOut(BaseModel):
+    """One video's trace images (issue #133) — empty for a video DogTrace
+    drew nothing for, e.g. because it failed."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    cut_key: str
+    images: list[AnalysisTraceImageOut]
