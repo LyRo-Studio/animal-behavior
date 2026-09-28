@@ -71,6 +71,7 @@ function job(id: number, testId: string) {
     createdAt: '2026-09-24T10:00:00Z',
     startedAt: null,
     finishedAt: null,
+    sourceRetained: true,
     outputs: [],
   }
 }

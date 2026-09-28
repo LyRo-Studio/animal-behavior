@@ -76,10 +76,9 @@ class CuttingJob(Base):
     phase_timestamps: Mapped[dict[str, int]] = mapped_column(JSONB, nullable=False)
     # Local temp-storage paths of the uploaded source video(s) — never S3,
     # not even transiently (CONTEXT.md's Feature C "Upload mechanics"
-    # decision). Whichever camera wasn't uploaded stays null. No cleanup
-    # happens in this ticket (no cutting-worker exists yet to discard a
-    # succeeded job's source, or to know when a failed job was retried/
-    # cancelled) — these just point at what's on disk right now.
+    # decision). Whichever camera wasn't uploaded stays null. A path is
+    # cleared once its upload directory has been deleted (issue #172), so a
+    # set path means that source is still on disk: see `source_retained`.
     c1_source_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     c2_source_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -93,6 +92,13 @@ class CuttingJob(Base):
         cascade="all, delete-orphan",
         order_by="CuttingJobOutput.id",
     )
+
+    @property
+    def source_retained(self) -> bool:
+        """Whether any of this job's uploaded source is still on disk (a
+        Retained source, issue #172). Read from the paths alone, never the
+        disk: every delete clears a path once its directory is gone."""
+        return self.c1_source_path is not None or self.c2_source_path is not None
 
 
 class CuttingJobOutput(Base):

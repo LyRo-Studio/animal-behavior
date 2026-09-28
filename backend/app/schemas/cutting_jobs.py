@@ -53,6 +53,7 @@ class CuttingJobOut(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    source_retained: bool
     outputs: list[CuttingJobOutputOut]
 
 

@@ -22,6 +22,7 @@ from app.models.cutting_job import (
 from app.services.audit_log import AuditIdentity, record_audit_event
 from app.services.cutting_uploads import (
     UploadNotFoundError,
+    delete_source_upload,
     get_upload_status,
     source_filename_matches_camera,
     upload_blob_path,
@@ -566,6 +567,23 @@ def finalize_cutting_job(db: Session, job: CuttingJob) -> CuttingJob:
     db.commit()
     db.refresh(job)
     return job
+
+
+def delete_cutting_job_sources(db: Session, job: CuttingJob) -> bool:
+    """Delete `job`'s uploaded source(s) and clear each path whose directory
+    is really gone, then commit. Returns whether nothing is retained any
+    more (issue #172).
+
+    A path whose delete failed stays set, so `source_retained` never claims
+    a source is gone while it still fills the upload storage cap.
+    """
+    for attribute in ("c1_source_path", "c2_source_path"):
+        source_path = getattr(job, attribute)
+        if source_path is not None and delete_source_upload(source_path):
+            setattr(job, attribute, None)
+    db.add(job)
+    db.commit()
+    return not job.source_retained
 
 
 def requeue_stuck_running_cutting_jobs(db: Session) -> list[CuttingJob]:

@@ -25,6 +25,7 @@ from app.services.audit_log import record_audit_event
 from app.services.cutting_jobs import (
     AUDIT_TARGET_TYPE,
     claim_next_queued_cutting_job,
+    delete_cutting_job_sources,
     finalize_cutting_job,
 )
 from app.services.s3_client import S3Client
@@ -173,7 +174,7 @@ def _run_claimed_job(
 
     finalized = _finalize_and_audit_job(db, job)
     if finalized.status == CuttingJobStatus.SUCCEEDED:
-        _discard_source_uploads(job)
+        _delete_source_uploads(db, job)
 
 
 def _finalize_and_audit_job(db: Session, job: CuttingJob) -> CuttingJob:
@@ -284,15 +285,29 @@ def _expected_output_filename(job: CuttingJob, output: CuttingJobOutput) -> str:
     )
 
 
-def _discard_source_uploads(job: CuttingJob) -> None:
-    """Delete `job`'s local source upload(s) entirely (CONTEXT.md's Feature
-    C decision: "on success the local upload is discarded immediately") —
-    removes each upload's whole directory (meta.json + blob, see
-    app/services/cutting_uploads.py), not just the video file, so nothing of
-    it lingers to count against the upload storage cap. Best-effort: a
-    source directory already gone (or never there) is not an error — the
-    job itself already reached its terminal `succeeded` state regardless.
+def _delete_source_uploads(db: Session, job: CuttingJob) -> None:
+    """Delete `job`'s local source upload(s) (CONTEXT.md's Feature C
+    decision: "on success the local upload is discarded immediately") and
+    clear each path whose directory is really gone (issue #172). A delete
+    that fails is logged and its path stays set, so the job still reports a
+    Retained source; the job itself stays `succeeded` regardless.
+
+    Never raises. The delete commits, so it can fail, but the job's outcome
+    and its audit row are already committed by then; an error reaching
+    `process_next_job`'s catch-all recovery would finalize it a second time.
     """
-    for source_path in (job.c1_source_path, job.c2_source_path):
-        if source_path is not None:
-            shutil.rmtree(Path(source_path).parent, ignore_errors=True)
+    try:
+        retained = not delete_cutting_job_sources(db, job)
+    except Exception:
+        logger.exception(
+            "cutting_job_id=%s test_id=%s error while deleting its source after success",
+            job.id,
+            job.test_id,
+        )
+        return
+    if retained:
+        logger.warning(
+            "cutting_job_id=%s test_id=%s succeeded but its source upload is still on disk",
+            job.id,
+            job.test_id,
+        )
