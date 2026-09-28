@@ -143,6 +143,19 @@ class Settings(BaseSettings):
     # the aggregate cap above (ENGINEERING-STANDARDS.md §5: "limit request
     # body and upload sizes"). Generous for a real multi-GB source video.
     cutting_upload_max_file_size_bytes: int = 20 * 1024 * 1024 * 1024  # 20 GiB
+    # Issue #171: an upload no CuttingJob points at, with nothing written to
+    # it for this many days, is deleted by the cleanup task in app/main.py,
+    # so abandoned uploads can't fill the cap above forever. A week covers
+    # an upload left over a long weekend; the frontend's remembered upload
+    # ids (#100) simply start a fresh upload once one is gone. Checked every
+    # `cutting_upload_cleanup_interval_seconds`. `gt=0` on both: a zero age
+    # would delete an upload between its chunks, and a zero interval would
+    # busy-loop.
+    cutting_upload_abandoned_after_days: int = Field(default=7, gt=0)
+    cutting_upload_cleanup_interval_seconds: int = Field(default=60 * 60, gt=0)
+    # Test-only seam, same as audit_log_prune_enabled below — deliberately
+    # not in .env.example.
+    cutting_upload_cleanup_enabled: bool = True
 
     # Ticket #94: creating a CuttingJob reuses the existing per-identity
     # rate_limit.py machinery, same reasoning as Feature B's POST /analyses

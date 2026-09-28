@@ -68,6 +68,9 @@ Putting a failed CuttingJob back in the queue to cut its Retained source again, 
 **Retained source**:
 A CuttingJob's uploaded source video(s) while they're still on the app's local disk. A queued or running job needs its source; a failed job keeps it deliberately, so it can be retried without a multi-GB re-upload; any other job keeps one only when deleting it failed. Counts toward the upload storage cap until deleted.
 
+**Abandoned upload**:
+A source upload no CuttingJob points at, with nothing written to it for `CUTTING_UPLOAD_ABANDONED_AFTER_DAYS` (7 by default): started but never submitted, or submitted, rejected and never tried again. Deleted automatically, since it would otherwise fill the upload storage cap forever. Distinct from a **Retained source**, which belongs to a job and is never treated as abandoned.
+
 **Discard source**:
 Deleting the Retained source of a failed CuttingJob, or of a cancelled one whose source couldn't be deleted at cancel time. The job's status doesn't change: a failed job's history still shows that it ran and failed.
 
@@ -2526,8 +2529,8 @@ source** and **Discard source** above.
   its summary. `finished_at` is set at cancel time, as for analyses.
 - **Out of scope, filed separately:** Retry of a failed job (#170, since
   built; see below), and
-  cleanup of uploads that never became a job (#171; they count toward the
-  storage cap too).
+  cleanup of uploads that never became a job (#171, since built; they count
+  toward the storage cap too).
 - **Spec-time details (#167):** both audit rows are written by the service
   in the same commit as the change, like `CUTTING_STARTED`, not by the API
   afterwards like `ANALYSIS_CANCELLED`. The migration's downgrade is a
@@ -2788,6 +2791,52 @@ Implementation-time judgment calls:
   - The row lock is held across the S3 Cuts check. Only this job's row is
     locked, and the worker's claim skips it.
 - **No dedicated test for migration 0020,** like 0018 and 0019.
+
+**Clean up uploads that never became a job (issue #171) — design agreed
+2026-09-28, then built.** The other follow-up #167 split out. The three
+open questions were answered with the user:
+
+- **When an upload is abandoned:** one rule for partial and complete
+  uploads alike: nothing written to it for N days. A complete upload ages
+  from its last chunk. An upload any job points at, whatever the job's
+  status, is never touched.
+- **N is 7 days by default,** `CUTTING_UPLOAD_ABANDONED_AFTER_DAYS`. That
+  covers an upload left over a long weekend, and it's how long resuming a
+  remembered upload (#100) keeps working. The frontend needs no change:
+  once an upload is gone, the backend answers 404 and a fresh upload
+  starts.
+- **Automatic,** as an in-process lifespan task like the audit-log prune
+  (#87) and the consolidation reconciler (#121): once at startup, then
+  every `CUTTING_UPLOAD_CLEANUP_INTERVAL_SECONDS` (default an hour).
+  Deletions are logged with their ids. No audit row: starting an upload
+  isn't audited either, and this deletes nothing that belongs to a job.
+
+Implementation-time judgment calls:
+
+- **Two layers, like #172's delete.** `idle_upload_ids` in
+  `cutting_uploads.py` only reads the disk and never knows about jobs.
+  `delete_abandoned_uploads` in `cutting_jobs.py` asks the database which
+  uploads jobs still use and deletes the rest through the shared
+  `delete_source_upload`, so the upload-id name guard applies and a
+  directory that can't be deleted is only logged and tried again next run.
+- **"Last written" is the newest modification time** of the upload's
+  directory, its `meta.json` and its `blob`. Every appended chunk moves the
+  blob's forward, and a directory missing its files still has an age.
+- **Jobs are matched on the upload directory's name,** not the whole
+  stored path, so a differently spelled upload root can't make a used
+  upload look unused. It reads every set source path; only jobs still
+  holding a source have one (#172 clears the rest), so the list stays
+  small.
+- **Only upload-shaped directories are ever considered,** so nothing else
+  under the upload root (a `lost+found`, a stray file) is touched.
+- **The two new settings are listed in `docker-compose.yml`,** since the
+  backend service names its variables one by one.
+- **Known gap: a job created from an upload in the very moment the cleanup
+  decides it's unused** would point at a deleted directory. That needs an
+  upload untouched for a week to be submitted in the same instant. Its
+  worker run would fail, and Discard source treats the missing directory
+  as gone (#169). Revisit if it's ever seen.
+- **No migration:** uploads live only on disk.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`

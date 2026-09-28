@@ -1,5 +1,6 @@
 """Direct tests of `app.main.lifespan`'s background-task wiring: the audit
-log prune (ticket #87) and stale-consolidation reconciliation (ticket #121).
+log prune (ticket #87), stale-consolidation reconciliation (ticket #121) and
+the abandoned cutting-upload cleanup (issue #171).
 
 Never goes through `TestClient`/`app.db.session.SessionLocal` — `_audit_log_
 pruning_disabled` (conftest.py, autouse) already keeps the real prune task
@@ -110,3 +111,45 @@ def test_the_reconcile_loop_keeps_running_after_a_failed_run(monkeypatch):
 
     asyncio.run(_run())
     assert len(calls) >= 3
+
+
+def test_lifespan_starts_and_cleanly_cancels_the_upload_cleanup_task_when_enabled(monkeypatch):
+    monkeypatch.setattr(settings, "audit_log_prune_enabled", False)
+    monkeypatch.setattr(settings, "cutting_upload_cleanup_enabled", True)
+    monkeypatch.setattr(main_module, "_delete_abandoned_uploads_once", lambda: [])
+
+    async def _run() -> set[asyncio.Task]:
+        async with main_module.lifespan(None):
+            return _other_tasks()
+
+    tasks = asyncio.run(_run())
+    assert len(tasks) == 1
+    assert "_delete_abandoned_uploads_periodically" in tasks.pop().get_coro().__qualname__
+
+
+def test_the_upload_cleanup_runs_on_startup_and_keeps_running_after_a_failed_run(monkeypatch):
+    """Issue #171: once straight away, so a restart doesn't postpone it a
+    full interval, and one failed run is logged rather than ending the
+    loop."""
+    monkeypatch.setattr(settings, "audit_log_prune_enabled", False)
+    monkeypatch.setattr(settings, "cutting_upload_cleanup_enabled", True)
+    monkeypatch.setattr(settings, "cutting_upload_cleanup_interval_seconds", 0.01)
+    calls = []
+
+    def _fail_first_time() -> list[str]:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("simulated database outage")
+        return []
+
+    monkeypatch.setattr(main_module, "_delete_abandoned_uploads_once", _fail_first_time)
+
+    async def _run() -> None:
+        async with main_module.lifespan(None):
+            for _ in range(200):
+                if len(calls) >= 2:
+                    break
+                await asyncio.sleep(0.01)
+
+    asyncio.run(_run())
+    assert len(calls) >= 2
