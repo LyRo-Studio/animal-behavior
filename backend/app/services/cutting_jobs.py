@@ -167,6 +167,20 @@ class CuttingSourceNotDeletedError(Exception):
     directory; the job keeps a Retained source, ready to try again."""
 
 
+class CuttingJobNotRetryableError(Exception):
+    """Raised when retrying a CuttingJob that isn't `failed` (issue #170): a
+    cancelled job is final, and any other status has nothing to retry."""
+
+    def __init__(self, status: CuttingJobStatus) -> None:
+        self.status = status
+        super().__init__(status)
+
+
+class CuttingSourceNotRetainedError(Exception):
+    """Raised when retrying a failed CuttingJob whose source (or one of its
+    cameras' sources) was already deleted (issue #170)."""
+
+
 class SourceUploadNotUsableError(Exception):
     """An upload id named in a submission can't be used for it (ticket #97
     moved this check here from the API layer, so one bad upload id fails
@@ -381,17 +395,7 @@ def create_cutting_job(
             None,
         ),
     )
-    job.outputs = [
-        CuttingJobOutput(
-            camera=upload.camera,
-            condition=condition,
-            phase=phase,
-            status=CuttingJobOutputStatus.PENDING,
-        )
-        for upload in uploads
-        for condition, phase in _EXPECTED_OUTPUT_SLOTS
-        if f"{condition}_{phase}" in row.phase_timestamps
-    ]
+    job.outputs = _expected_outputs([upload.camera for upload in uploads], row.phase_timestamps)
 
     db.add(job)
     db.flush()
@@ -406,6 +410,24 @@ def create_cutting_job(
     db.commit()
     db.refresh(job)
     return job
+
+
+def _expected_outputs(
+    cameras: list[str], phase_timestamps: dict[str, int]
+) -> list[CuttingJobOutput]:
+    """One `pending` CuttingJobOutput per camera per phase `phase_timestamps`
+    doesn't skip, in the order the job page shows them."""
+    return [
+        CuttingJobOutput(
+            camera=camera,
+            condition=condition,
+            phase=phase,
+            status=CuttingJobOutputStatus.PENDING,
+        )
+        for camera in cameras
+        for condition, phase in _EXPECTED_OUTPUT_SLOTS
+        if f"{condition}_{phase}" in phase_timestamps
+    ]
 
 
 @dataclass(frozen=True)
@@ -663,6 +685,17 @@ def _clear_deleted_source_paths(job: CuttingJob) -> bool:
     return cleared
 
 
+def _lock_cutting_job(db: Session, cutting_job_id: int) -> CuttingJob:
+    """The CuttingJob `cutting_job_id`, row-locked (`SELECT ... FOR UPDATE`)
+    until the caller commits, or CuttingJobNotFoundError. Shared by cancel,
+    Discard source and retry, so none of them interleave with each other or
+    with the cutting-worker's claim."""
+    job = db.scalar(select(CuttingJob).where(CuttingJob.id == cutting_job_id).with_for_update())
+    if job is None:
+        raise CuttingJobNotFoundError(cutting_job_id)
+    return job
+
+
 def cancel_cutting_job(
     db: Session, *, cutting_job_id: int, cancelled_by: AuditIdentity = AuditIdentity()
 ) -> CuttingJob:
@@ -680,9 +713,7 @@ def cancel_cutting_job(
     job then keeps a Retained source, which Discard source (#169) accepts.
     The outputs are left `pending`; they never ran.
     """
-    job = db.scalar(select(CuttingJob).where(CuttingJob.id == cutting_job_id).with_for_update())
-    if job is None:
-        raise CuttingJobNotFoundError(cutting_job_id)
+    job = _lock_cutting_job(db, cutting_job_id)
     if job.status != CuttingJobStatus.QUEUED:
         raise CuttingJobNotCancellableError(job.status)
 
@@ -735,9 +766,7 @@ def discard_cutting_job_source(
     it raises CuttingSourceNotDeletedError, and the job can be discarded
     again.
     """
-    job = db.scalar(select(CuttingJob).where(CuttingJob.id == cutting_job_id).with_for_update())
-    if job is None:
-        raise CuttingJobNotFoundError(cutting_job_id)
+    job = _lock_cutting_job(db, cutting_job_id)
     if job.status not in _SOURCE_DISCARDABLE_STATUSES or not job.source_retained:
         raise CuttingSourceNotDiscardableError(job.status)
 
@@ -754,6 +783,85 @@ def discard_cutting_job_source(
     db.commit()
     if job.source_retained:
         raise CuttingSourceNotDeletedError(job.id)
+    return job
+
+
+def retry_cutting_job(
+    db: Session,
+    *,
+    cutting_job_id: int,
+    excel_bytes: bytes | None,
+    s3: S3Client,
+    confirm_overwrite: bool = False,
+    retried_by: AuditIdentity = AuditIdentity(),
+) -> CuttingJob:
+    """Put the `failed` CuttingJob `cutting_job_id` back in the queue, cutting
+    its Retained source again (issue #170). The same row is reused, so the
+    "one upload feeds one job" rule (#173) doesn't apply, and
+    `requested_by_identity` keeps naming whoever started it.
+
+    Raises CuttingJobNotFoundError for an unknown id,
+    CuttingJobNotRetryableError for any other status, and
+    CuttingSourceNotRetainedError if any camera the job cut has no source
+    left. `excel_bytes`, when given, is a corrected timestamp workbook: its
+    row for this Test replaces the stored reference camera and timestamps,
+    with the same checks as a new job (any of CUTTING_JOB_VALIDATION_ERRORS).
+    Without it, the stored timestamps are cut again. A Test that already has
+    Cuts raises CutsAlreadyExistError unless `confirm_overwrite` is set, as
+    in `create_cutting_job` (#96); the failed attempt's own Cuts count too.
+
+    The outputs are rebuilt as `pending`, and the CUTTING_RETRIED audit row
+    goes in the same commit. The row is locked, like cancel and Discard
+    source, so a retry can't interleave with either.
+    """
+    job = _lock_cutting_job(db, cutting_job_id)
+    if job.status != CuttingJobStatus.FAILED:
+        raise CuttingJobNotRetryableError(job.status)
+
+    retained_cameras = [
+        camera
+        for camera, source_path in (("C1", job.c1_source_path), ("C2", job.c2_source_path))
+        if source_path is not None
+    ]
+    if not retained_cameras or any(output.camera not in retained_cameras for output in job.outputs):
+        raise CuttingSourceNotRetainedError(job.id)
+
+    row = read_test_row(excel_bytes, job.test_id) if excel_bytes is not None else None
+    if (
+        row is not None
+        and len(retained_cameras) == 1
+        and retained_cameras[0] != row.reference_camera
+    ):
+        raise ReferenceCameraMismatchError(retained_cameras[0], row.reference_camera)
+
+    if not confirm_overwrite and has_cuts(s3, job.test_id):
+        raise CutsAlreadyExistError(job.test_id)
+
+    # Only now, once every check has passed, does anything about the job change.
+    if row is not None:
+        job.reference_camera = row.reference_camera
+        job.phase_timestamps = row.phase_timestamps
+    job.status = CuttingJobStatus.QUEUED
+    job.started_at = None
+    job.finished_at = None
+    # Deleted first: the unit of work would otherwise insert the new outputs
+    # before deleting the old ones, tripping the (job, camera, condition,
+    # phase) unique constraint.
+    job.outputs.clear()
+    db.flush()
+    job.outputs = _expected_outputs(retained_cameras, job.phase_timestamps)
+    db.add(job)
+    db.flush()
+    record_audit_event(
+        db,
+        identity=retried_by.identity,
+        identity_verified=retried_by.verified,
+        action=AuditAction.CUTTING_RETRIED,
+        target_type=AUDIT_TARGET_TYPE,
+        target=str(job.id),
+    )
+    db.commit()
+    db.refresh(job)
     return job
 
 

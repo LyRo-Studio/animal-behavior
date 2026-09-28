@@ -2,15 +2,18 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { usePolledJob } from '@/composables/usePolledJob'
 import {
   CAMERAS,
   CUTTING_JOB_STATUS_LABELS,
   CuttingJobNotFoundError,
+  CutsAlreadyExistError,
   cancelCuttingJob,
   cutsDone,
   discardCuttingJobSource,
   getCuttingJob,
+  retryCuttingJob,
   type Camera,
   type CuttingJob,
   type CuttingJobOutput,
@@ -91,12 +94,74 @@ async function discardSource() {
   }
 }
 
-// A cancel or discard error, or a pending confirmation, belongs to the job it
-// was about.
+// Issue #170: a failed job with its source still kept can be retried, by
+// anyone, optionally with a corrected timestamp workbook. The same job goes
+// back in the queue, and polling picks it up again.
+const canRetry = computed(
+  () => !!job.value && job.value.status === 'failed' && job.value.sourceRetained,
+)
+const retryExcel = ref<File | null>(null)
+const isRetrying = ref(false)
+const retryError = ref<string | null>(null)
+// The Test already has Cuts (#96): the re-cut dialog is open.
+const isConfirmingRecut = ref(false)
+
+function onRetryExcelChange(event: Event) {
+  retryExcel.value = (event.target as HTMLInputElement).files?.[0] ?? null
+}
+
+// Bumped by every retry and by moving to another job, so an answer for a job
+// no longer shown is dropped: above all, its re-cut dialog must never offer to
+// overwrite the Cuts of the job now on the page.
+let retryRequest = 0
+
+async function retry(confirmOverwrite = false) {
+  if (!job.value || isRetrying.value) return
+
+  const request = ++retryRequest
+  isRetrying.value = true
+  retryError.value = null
+  try {
+    const retried = await retryCuttingJob(job.value.id, {
+      excel: retryExcel.value ?? undefined,
+      confirmOverwrite,
+    })
+    if (request !== retryRequest) return
+    replace(retried)
+    retryExcel.value = null
+  } catch (err) {
+    if (request !== retryRequest) return
+    if (err instanceof CutsAlreadyExistError) {
+      isConfirmingRecut.value = true
+    } else {
+      retryError.value = err instanceof Error ? err.message : 'Failed to retry the cutting job.'
+    }
+  } finally {
+    if (request === retryRequest) isRetrying.value = false
+  }
+}
+
+function confirmRecut() {
+  isConfirmingRecut.value = false
+  retry(true)
+}
+
+function keepExistingCuts() {
+  isConfirmingRecut.value = false
+  retryError.value = `${job.value?.testId} already has Cuts; it wasn't re-cut.`
+}
+
+// A cancel, discard or retry error, or a pending confirmation, belongs to the
+// job it was about.
 watch(jobId, () => {
   cancelError.value = null
   discardError.value = null
   isConfirmingDiscard.value = false
+  retryRequest++
+  isRetrying.value = false
+  retryError.value = null
+  retryExcel.value = null
+  isConfirmingRecut.value = false
 })
 
 // A cancelled job never ran a phase (issue #168), so its Cuts count and
@@ -167,7 +232,8 @@ const failedOutputs = computed(
       </div>
     </header>
 
-    <section class="mx-auto max-w-2xl px-6 py-10">
+    <!-- `inert` while the re-cut dialog is open, as on the upload page. -->
+    <section class="mx-auto max-w-2xl px-6 py-10" :inert="isConfirmingRecut || undefined">
       <p v-if="notFound" class="text-sm text-danger" role="alert">Cutting job not found.</p>
 
       <template v-else-if="job">
@@ -218,13 +284,48 @@ const failedOutputs = computed(
           {{ cancelError }}
         </p>
 
+        <div v-if="canRetry" class="mt-6 rounded-md border border-border bg-surface p-4">
+          <label for="retry-excel" class="block text-sm font-medium text-foreground">
+            Corrected timestamp Excel (optional)
+          </label>
+          <p class="mt-1 text-sm text-muted">
+            Without one, the job is cut again with the timestamps it had.
+          </p>
+          <input
+            id="retry-excel"
+            type="file"
+            accept=".xlsx"
+            data-testid="retry-excel"
+            class="mt-2 block w-full text-sm text-foreground file:mr-4 file:rounded-md file:border-0 file:bg-primary file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-primary-hover"
+            :disabled="isRetrying"
+            @change="onRetryExcelChange"
+          />
+          <button
+            type="button"
+            data-testid="retry"
+            :disabled="isRetrying || isDiscarding"
+            class="mt-4 rounded-md bg-primary px-4 py-2 font-medium text-white hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+            @click="retry()"
+          >
+            {{ isRetrying ? 'Retrying…' : 'Retry' }}
+          </button>
+        </div>
+        <p
+          v-if="retryError"
+          data-testid="retry-error"
+          class="mt-4 text-sm text-danger"
+          role="alert"
+        >
+          {{ retryError }}
+        </p>
+
         <div v-if="canDiscardSource" class="mt-6 flex items-center gap-3 text-sm">
           <template v-if="isConfirmingDiscard">
             <span class="text-muted">Discard permanently?</span>
             <button
               type="button"
               data-testid="discard-source-confirm"
-              :disabled="isDiscarding"
+              :disabled="isDiscarding || isRetrying"
               class="font-medium text-danger hover:underline disabled:cursor-not-allowed disabled:opacity-50"
               @click="discardSource"
             >
@@ -323,5 +424,19 @@ const failedOutputs = computed(
       <p v-else-if="loadError" class="text-sm text-danger" role="alert">{{ loadError }}</p>
       <p v-else class="text-sm text-muted">Loading…</p>
     </section>
+
+    <ConfirmDialog
+      v-if="isConfirmingRecut && job"
+      title="Cuts already exist"
+      confirm-label="Re-cut and overwrite"
+      cancel-label="Keep existing Cuts"
+      @confirm="confirmRecut"
+      @cancel="keepExistingCuts"
+    >
+      <p>
+        {{ job.testId }} already has Cuts. Re-cutting overwrites every existing Cut it produces
+        again.
+      </p>
+    </ConfirmDialog>
   </main>
 </template>

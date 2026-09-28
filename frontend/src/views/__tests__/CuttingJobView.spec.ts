@@ -7,16 +7,18 @@ import CuttingJobView from '../CuttingJobView.vue'
 const getCuttingJobMock = vi.hoisted(() => vi.fn())
 const cancelCuttingJobMock = vi.hoisted(() => vi.fn())
 const discardCuttingJobSourceMock = vi.hoisted(() => vi.fn())
+const retryCuttingJobMock = vi.hoisted(() => vi.fn())
 
 vi.mock('@/services/cuttingJobs', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/cuttingJobs')>()),
   getCuttingJob: getCuttingJobMock,
   cancelCuttingJob: cancelCuttingJobMock,
   discardCuttingJobSource: discardCuttingJobSourceMock,
+  retryCuttingJob: retryCuttingJobMock,
 }))
 
 // The real class, so the view's `instanceof` check sees the same constructor.
-const { CuttingJobNotFoundError } = await import('@/services/cuttingJobs')
+const { CuttingJobNotFoundError, CutsAlreadyExistError } = await import('@/services/cuttingJobs')
 
 async function mountView(id = '31') {
   const router = createRouter({
@@ -64,6 +66,14 @@ function job(overrides: Record<string, unknown> = {}) {
   }
 }
 
+async function chooseFile(wrapper: VueWrapper, testId: string, name: string) {
+  const file = new File(['bytes'], name)
+  const input = wrapper.find(`[data-testid="${testId}"]`)
+  Object.defineProperty(input.element, 'files', { value: [file], configurable: true })
+  await input.trigger('change')
+  return file
+}
+
 function cutsDone(wrapper: VueWrapper) {
   return wrapper.find('[data-testid="cuts-done"]').text()
 }
@@ -87,6 +97,7 @@ describe('CuttingJobView', () => {
     getCuttingJobMock.mockReset()
     cancelCuttingJobMock.mockReset()
     discardCuttingJobSourceMock.mockReset()
+    retryCuttingJobMock.mockReset()
   })
 
   it("shows the job's Test, status, requester, and how many of its Cuts are done", async () => {
@@ -387,5 +398,138 @@ describe('CuttingJobView', () => {
       "The source video couldn't be deleted. Try discarding it again.",
     )
     expect(wrapper.find('[data-testid="discard-source"]').exists()).toBe(true)
+  })
+
+  // Issue #170.
+  it.each([
+    ['queued', true],
+    ['running', true],
+    ['succeeded', true],
+    ['cancelled', true],
+    ['failed', false],
+  ])('offers no Retry for a %s job whose source retained is %s', async (status, retained) => {
+    getCuttingJobMock.mockResolvedValue(job({ status, sourceRetained: retained }))
+
+    const wrapper = await mountView('31')
+
+    expect(wrapper.find('[data-testid="retry"]').exists()).toBe(false)
+  })
+
+  it('retries a failed job from its kept source and follows it again', async () => {
+    getCuttingJobMock.mockResolvedValueOnce(
+      job({ status: 'failed', outputs: [output('ME', 'F1', 'failed')] }),
+    )
+    retryCuttingJobMock.mockResolvedValue(
+      job({ status: 'queued', startedAt: null, outputs: [output('ME', 'F1')] }),
+    )
+    getCuttingJobMock.mockResolvedValue(
+      job({ status: 'running', outputs: [output('ME', 'F1', 'succeeded')] }),
+    )
+    const wrapper = await mountView('31')
+
+    await wrapper.find('[data-testid="retry"]').trigger('click')
+    await flushPromises()
+
+    expect(retryCuttingJobMock).toHaveBeenCalledWith(31, {
+      excel: undefined,
+      confirmOverwrite: false,
+    })
+    expect(wrapper.find('[data-testid="job-status"]').text()).toBe('Queued')
+    expect(wrapper.find('[data-testid="retry"]').exists()).toBe(false)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(wrapper.find('[data-testid="job-status"]').text()).toBe('Running')
+  })
+
+  it('sends a corrected timestamp workbook with the retry', async () => {
+    getCuttingJobMock.mockResolvedValue(job({ status: 'failed' }))
+    retryCuttingJobMock.mockResolvedValue(job({ status: 'queued' }))
+    const wrapper = await mountView('31')
+    const excel = await chooseFile(wrapper, 'retry-excel', 'timestamps.xlsx')
+
+    await wrapper.find('[data-testid="retry"]').trigger('click')
+    await flushPromises()
+
+    expect(retryCuttingJobMock).toHaveBeenCalledWith(31, { excel, confirmOverwrite: false })
+  })
+
+  it('asks before re-cutting a Test that already has Cuts, then retries once confirmed', async () => {
+    getCuttingJobMock.mockResolvedValue(job({ status: 'failed' }))
+    retryCuttingJobMock
+      .mockRejectedValueOnce(
+        new CutsAlreadyExistError('Cuts already exist for T001. Confirm to overwrite them.'),
+      )
+      .mockResolvedValueOnce(job({ status: 'queued' }))
+    const wrapper = await mountView('31')
+
+    await wrapper.find('[data-testid="retry"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[role="dialog"]').text()).toContain('T001 already has Cuts.')
+
+    await wrapper.find('[data-testid="confirm-dialog-confirm"]').trigger('click')
+    await flushPromises()
+
+    expect(retryCuttingJobMock).toHaveBeenLastCalledWith(31, {
+      excel: undefined,
+      confirmOverwrite: true,
+    })
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="job-status"]').text()).toBe('Queued')
+  })
+
+  it("leaves the job failed when the researcher keeps the Test's existing Cuts", async () => {
+    getCuttingJobMock.mockResolvedValue(job({ status: 'failed' }))
+    retryCuttingJobMock.mockRejectedValue(
+      new CutsAlreadyExistError('Cuts already exist for T001. Confirm to overwrite them.'),
+    )
+    const wrapper = await mountView('31')
+
+    await wrapper.find('[data-testid="retry"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="confirm-dialog-cancel"]').trigger('click')
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(retryCuttingJobMock).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-testid="retry-error"]').text()).toBe(
+      "T001 already has Cuts; it wasn't re-cut.",
+    )
+    expect(wrapper.find('[data-testid="job-status"]').text()).toBe('Failed')
+  })
+
+  it('shows why a retry was refused', async () => {
+    getCuttingJobMock.mockResolvedValue(job({ status: 'failed' }))
+    retryCuttingJobMock.mockRejectedValue(
+      new Error('No row for this Test was found in the timestamp Excel.'),
+    )
+    const wrapper = await mountView('31')
+
+    await wrapper.find('[data-testid="retry"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="retry-error"]').text()).toBe(
+      'No row for this Test was found in the timestamp Excel.',
+    )
+    expect(wrapper.find('[data-testid="retry"]').exists()).toBe(true)
+  })
+
+  it("ignores a retry answered after moving on to another job's page", async () => {
+    getCuttingJobMock.mockImplementation(async (id: number) => job({ id, status: 'failed' }))
+    let answer: (reason: unknown) => void = () => {}
+    retryCuttingJobMock.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        answer = reject
+      }),
+    )
+    const wrapper = await mountView('31')
+    await wrapper.find('[data-testid="retry"]').trigger('click')
+
+    await wrapper.router.push('/cutting-jobs/32')
+    await flushPromises()
+    answer(new CutsAlreadyExistError('Cuts already exist for T001. Confirm to overwrite them.'))
+    await flushPromises()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="retry-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="retry"]').attributes('disabled')).toBeUndefined()
   })
 })

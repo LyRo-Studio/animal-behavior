@@ -38,9 +38,11 @@ from app.services.cutting_jobs import (
     CutsAlreadyExistError,
     CuttingJobNotCancellableError,
     CuttingJobNotFoundError,
+    CuttingJobNotRetryableError,
     CuttingJobSubmission,
     CuttingSourceNotDeletedError,
     CuttingSourceNotDiscardableError,
+    CuttingSourceNotRetainedError,
     DuplicateCameraUploadError,
     DuplicateTestInBatchError,
     IncompleteSourceUploadError,
@@ -56,6 +58,7 @@ from app.services.cutting_jobs import (
     discard_cutting_job_source,
     get_cutting_job,
     list_cutting_jobs,
+    retry_cutting_job,
     submit_cutting_job,
     submit_cutting_job_batch,
 )
@@ -251,6 +254,16 @@ def _describe_rejection(exc: Exception) -> _Rejection:
     raise TypeError(f"not a cutting-job validation error: {exc!r}")
 
 
+def _rejection_response(exc: Exception) -> JSONResponse:
+    """`exc` (one of `CUTTING_JOB_VALIDATION_ERRORS`) as a whole response,
+    with `code` only when the rejection has one."""
+    rejection = _describe_rejection(exc)
+    content = {"detail": rejection.detail}
+    if rejection.code is not None:
+        content["code"] = rejection.code
+    return JSONResponse(status_code=rejection.status_code, content=content)
+
+
 def _within_excel_size_limit(excel_bytes: bytes) -> bytes:
     """`excel_bytes`, read with a one-byte margin, unless it's over
     `cutting_job_excel_max_file_size_bytes` (ENGINEERING-STANDARDS.md §5:
@@ -323,11 +336,7 @@ async def create_cutting_job_endpoint(
             started_by=AuditIdentity(*get_verified_identity(request)),
         )
     except CUTTING_JOB_VALIDATION_ERRORS as exc:
-        rejection = _describe_rejection(exc)
-        content = {"detail": rejection.detail}
-        if rejection.code is not None:
-            content["code"] = rejection.code
-        return JSONResponse(status_code=rejection.status_code, content=content)
+        return _rejection_response(exc)
 
 
 _batch_entries_adapter = TypeAdapter(CuttingJobBatchEntries)
@@ -479,6 +488,61 @@ def discard_cutting_job_source_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="The source video couldn't be deleted. Try discarding it again.",
         ) from None
+
+
+@router.post("/{cutting_job_id}/retry", response_model=CuttingJobOut)
+async def retry_cutting_job_endpoint(
+    cutting_job_id: int,
+    request: Request,
+    excel: UploadFile | None = File(None),
+    confirm_overwrite: bool = Form(False),
+    identity: str | None = Depends(get_identity),
+    db: Session = Depends(get_db),
+    s3: S3Client = Depends(get_s3_client),
+    limiter: RateLimiter = Depends(get_rate_limiter),
+) -> CuttingJob | JSONResponse:
+    """Issue #170: cut a failed job's Retained source again, by anyone. It
+    queues a whole re-cut, so it shares `POST /cutting-jobs`' rate limit.
+    `excel` is an optional corrected timestamp workbook; a Test with Cuts
+    needs `confirm_overwrite`, answering the same 409 as creating a job."""
+    _enforce_create_rate_limit(limiter, identity)
+
+    excel_bytes = (
+        _within_excel_size_limit(
+            await excel.read(settings.cutting_job_excel_max_file_size_bytes + 1)
+        )
+        if excel is not None
+        else None
+    )
+
+    try:
+        return retry_cutting_job(
+            db,
+            cutting_job_id=cutting_job_id,
+            excel_bytes=excel_bytes,
+            s3=s3,
+            confirm_overwrite=confirm_overwrite,
+            retried_by=AuditIdentity(*get_verified_identity(request)),
+        )
+    except CuttingJobNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Cutting job not found."
+        ) from None
+    except CuttingJobNotRetryableError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only a failed cutting job can be retried.",
+        ) from None
+    except CuttingSourceNotRetainedError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This cutting job's source is no longer kept. "
+                "Upload the video again to cut it again."
+            ),
+        ) from None
+    except CUTTING_JOB_VALIDATION_ERRORS as exc:
+        return _rejection_response(exc)
 
 
 @router.get("/{cutting_job_id}", response_model=CuttingJobOut)

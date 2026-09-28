@@ -9,8 +9,9 @@ limiting.
 
 import json
 import shutil
-from datetime import time
+from datetime import UTC, datetime, time
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
@@ -1244,3 +1245,240 @@ def test_a_discard_that_deletes_only_one_camera_keeps_and_audits_what_it_did(
     assert not (cutting_upload_root / c1_upload_id).exists()
     assert (cutting_upload_root / c2_upload_id).exists()
     assert len(_discarded_rows(db_session)) == 1
+
+
+# --- POST /cutting-jobs/{id}/retry (issue #170) ---
+
+
+def _retried_rows(db_session) -> list[AuditLog]:
+    return [
+        row for row in _cutting_audit_rows(db_session) if row.action == AuditAction.CUTTING_RETRIED
+    ]
+
+
+def _failed_job(client, db_session, **submit_kwargs) -> int:
+    """A job the cutting-worker ran and failed: C1 ME F1 uploaded, C1 ME F2
+    failed."""
+    upload_id = _completed_upload_id(client, test_id="T001")
+    job_id = _job_with_status(
+        client, db_session, upload_id, CuttingJobStatus.FAILED, **submit_kwargs
+    )
+    job = db_session.get(CuttingJob, job_id)
+    job.started_at = datetime(2026, 9, 28, 10, 0, tzinfo=UTC)
+    job.finished_at = datetime(2026, 9, 28, 10, 5, tzinfo=UTC)
+    first, second = job.outputs[:2]
+    first.status = CuttingJobOutputStatus.SUCCEEDED
+    second.status = CuttingJobOutputStatus.FAILED
+    second.failure_reason = "ffmpeg exited with status 1"
+    db_session.commit()
+    return job_id
+
+
+def _retry(client, job_id, *, excel=None, confirm_overwrite=False, headers=None):
+    return client.post(
+        f"/api/cutting-jobs/{job_id}/retry",
+        data={"confirm_overwrite": "true"} if confirm_overwrite else {},
+        files=(
+            {"excel": ("timestamps.xlsx", excel, "application/octet-stream")}
+            if excel is not None
+            else None
+        ),
+        headers=headers,
+    )
+
+
+def _phases(body) -> list[tuple[str, str, str, str | None]]:
+    return [
+        (output["condition"], output["phase"], output["status"], output["failure_reason"])
+        for output in body["outputs"]
+    ]
+
+
+def test_retrying_a_failed_job_requeues_the_same_job_from_its_kept_source(
+    client, db_session, cutting_upload_root
+):
+    job_id = _failed_job(client, db_session)
+    before = client.get(f"/api/cutting-jobs/{job_id}").json()
+
+    response = _retry(client, job_id, headers={"X-authentik-email": "jan.peeters@vives.be"})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == job_id
+    assert body["status"] == "queued"
+    assert body["started_at"] is None
+    assert body["finished_at"] is None
+    assert body["source_retained"] is True
+    assert body["requested_by_identity"] == before["requested_by_identity"]
+    assert _phases(body) == [("ME", "F1", "pending", None), ("ME", "F2", "pending", None)]
+    job = db_session.get(CuttingJob, job_id)
+    assert Path(job.c1_source_path).exists()
+    (row,) = _retried_rows(db_session)
+    assert row.target_type == "cutting_job"
+    assert row.target == str(job_id)
+    assert row.identity == "jan.peeters@vives.be"
+    assert row.identity_verified is False
+
+
+def test_a_retried_job_is_claimed_by_the_cutting_worker(client, db_session):
+    job_id = _failed_job(client, db_session)
+    assert _retry(client, job_id).status_code == 200
+
+    claimed = claim_next_queued_cutting_job(db_session)
+
+    assert claimed is not None and claimed.id == job_id
+
+
+def test_a_retry_with_a_corrected_workbook_cuts_by_its_timestamps(client, db_session):
+    job_id = _failed_job(client, db_session)
+
+    response = _retry(client, job_id, excel=_excel_bytes(phases=("ME_F1", "ME_F2", "ME_F3")))
+
+    assert response.status_code == 200, response.text
+    assert _phases(response.json()) == [
+        ("ME", "F1", "pending", None),
+        ("ME", "F2", "pending", None),
+        ("ME", "F3", "pending", None),
+    ]
+    job = db_session.get(CuttingJob, job_id)
+    db_session.refresh(job)
+    assert set(job.phase_timestamps) == {"ME_F1", "ME_F2", "ME_F3"}
+
+
+def test_a_retry_whose_workbook_has_no_row_for_the_test_changes_nothing(client, db_session):
+    job_id = _failed_job(client, db_session)
+
+    response = _retry(client, job_id, excel=_excel_bytes(test_id="T002"))
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "No row for this Test was found in the timestamp Excel."
+    body = client.get(f"/api/cutting-jobs/{job_id}").json()
+    assert body["status"] == "failed"
+    assert _phases(body)[1] == ("ME", "F2", "failed", "ffmpeg exited with status 1")
+    assert _retried_rows(db_session) == []
+
+
+def test_a_retry_whose_workbook_names_another_reference_camera_is_refused(client, db_session):
+    job_id = _failed_job(client, db_session)
+
+    response = _retry(client, job_id, excel=_excel_bytes(reference_camera="C2"))
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "The uploaded camera doesn't match this Test's reference camera."
+    )
+    assert client.get(f"/api/cutting-jobs/{job_id}").json()["status"] == "failed"
+
+
+def test_a_retry_rejects_an_oversized_workbook(client, db_session, monkeypatch):
+    job_id = _failed_job(client, db_session)
+    monkeypatch.setattr(settings, "cutting_job_excel_max_file_size_bytes", 10)
+
+    response = _retry(client, job_id, excel=_excel_bytes())
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Timestamp Excel is too large."
+    assert client.get(f"/api/cutting-jobs/{job_id}").json()["status"] == "failed"
+
+
+def test_retrying_a_test_that_has_cuts_asks_for_confirmation_first(client, db_session, s3_client):
+    """The failed attempt's own Cuts count too: S3 can't tell whose they are."""
+    job_id = _failed_job(client, db_session)
+    s3_client.objects["cuts/T001/T001_C1_ME_F1.mp4"] = b"an earlier cut"
+
+    blocked = _retry(client, job_id)
+
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "cuts_already_exist"
+    assert client.get(f"/api/cutting-jobs/{job_id}").json()["status"] == "failed"
+    assert _retried_rows(db_session) == []
+
+    confirmed = _retry(client, job_id, confirm_overwrite=True)
+
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["status"] == "queued"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        CuttingJobStatus.QUEUED,
+        CuttingJobStatus.RUNNING,
+        CuttingJobStatus.SUCCEEDED,
+        CuttingJobStatus.CANCELLED,
+    ],
+)
+def test_only_a_failed_job_can_be_retried(client, db_session, status):
+    upload_id = _completed_upload_id(client, test_id="T001")
+    job_id = _job_with_status(client, db_session, upload_id, status)
+
+    response = _retry(client, job_id)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Only a failed cutting job can be retried."
+    assert client.get(f"/api/cutting-jobs/{job_id}").json()["status"] == status.value
+    assert _retried_rows(db_session) == []
+
+
+def test_a_failed_job_whose_source_was_discarded_cant_be_retried(client, db_session):
+    job_id = _failed_job(client, db_session)
+    assert client.post(f"/api/cutting-jobs/{job_id}/discard-source").status_code == 200
+
+    response = _retry(client, job_id)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "This cutting job's source is no longer kept. Upload the video again to cut it again."
+    )
+    assert client.get(f"/api/cutting-jobs/{job_id}").json()["status"] == "failed"
+
+
+def test_a_failed_job_missing_one_cameras_source_cant_be_retried(client, db_session):
+    """Both cameras were cut; with only one left, a retry would cut less."""
+    c2_upload_id = _completed_upload_id(client, test_id="T001", camera="C2")
+    job_id = _failed_job(client, db_session, c2_upload_id=c2_upload_id)
+    job = db_session.get(CuttingJob, job_id)
+    job.c2_source_path = None
+    db_session.commit()
+
+    response = _retry(client, job_id)
+
+    assert response.status_code == 409
+    assert client.get(f"/api/cutting-jobs/{job_id}").json()["status"] == "failed"
+
+
+def test_retrying_an_unknown_job_is_not_found(client):
+    response = _retry(client, 999999)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Cutting job not found."
+
+
+def test_a_retry_counts_against_the_same_rate_limit_as_starting_a_job(
+    client, db_session, monkeypatch
+):
+    """A retry queues a whole re-cut, as expensive as a new job."""
+    job_id = _failed_job(client, db_session)
+    monkeypatch.setattr(settings, "create_cutting_job_rate_limit_max_attempts_per_identity", 1)
+
+    response = _retry(client, job_id)
+
+    assert response.status_code == 429
+    assert client.get(f"/api/cutting-jobs/{job_id}").json()["status"] == "failed"
+
+
+def test_a_retry_held_back_by_existing_cuts_keeps_the_stored_timestamps(
+    client, db_session, s3_client
+):
+    """Nothing about the job changes until the retry goes through, not even
+    the corrected workbook's timestamps."""
+    job_id = _failed_job(client, db_session)
+    s3_client.objects["cuts/T001/T001_C1_ME_F1.mp4"] = b"an earlier cut"
+
+    blocked = _retry(client, job_id, excel=_excel_bytes(phases=("ME_F1", "ME_F2", "ME_F3")))
+
+    assert blocked.status_code == 409
+    job = db_session.get(CuttingJob, job_id)
+    db_session.refresh(job)
+    assert set(job.phase_timestamps) == {"ME_F1", "ME_F2"}
+    assert len(client.get(f"/api/cutting-jobs/{job_id}").json()["outputs"]) == 2
