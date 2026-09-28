@@ -1028,3 +1028,32 @@ def test_a_cancel_whose_source_delete_fails_still_cancels_and_keeps_the_source(
     assert response.json()["source_retained"] is True
     assert (cutting_upload_root / upload_id).exists()
     assert len(_cancelled_rows(db_session)) == 1
+
+
+def test_a_cancel_whose_source_delete_raises_still_returns_the_cancelled_job(
+    client, db_session, cutting_upload_root, monkeypatch
+):
+    """The cancel is already committed by then, so an unexpected error while
+    deleting must never turn it into a 500 (issue #168)."""
+    upload_id = _completed_upload_id(client, test_id="T001")
+    created = _submit_single(client, c1_upload_id=upload_id).json()
+
+    def _raise(source_path):
+        raise RuntimeError("simulated failure while deleting the source")
+
+    monkeypatch.setattr("app.services.cutting_jobs.delete_source_upload", _raise)
+
+    response = client.post(f"/api/cutting-jobs/{created['id']}/cancel")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["source_retained"] is True
+
+
+def test_a_cancelled_jobs_outputs_stay_pending(client):
+    """They never ran; the job page hides them instead (issue #168)."""
+    created = _create_job(client, identity="alice@example.com")
+
+    response = client.post(f"/api/cutting-jobs/{created['id']}/cancel")
+
+    assert {output["status"] for output in response.json()["outputs"]} == {"pending"}

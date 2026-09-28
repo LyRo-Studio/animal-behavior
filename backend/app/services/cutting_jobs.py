@@ -42,6 +42,8 @@ from app.services.timestamp_excel import (
     read_test_row,
 )
 
+logger = logging.getLogger(__name__)
+
 # One (condition, phase) slot per expected CuttingJobOutput, per uploaded
 # camera — ZE_F8 deliberately excluded: every phase is sliced [this
 # phase's start, next phase's start), so the last phase (ZE_F8, the 16th
@@ -204,8 +206,6 @@ class DuplicateTestInBatchError(Exception):
         self.test_id = test_id
         super().__init__(test_id)
 
-
-logger = logging.getLogger(__name__)
 
 # Everything one Test's submission can be rejected with. Within a batch,
 # any of these fails only that Test (ticket #97); anything else (e.g. a
@@ -677,6 +677,12 @@ def cancel_cutting_job(
         delete_cutting_job_sources(db, job)
     except Exception:
         logger.exception("cutting_job_id=%s cancelled, but deleting its source failed", job.id)
+        # A failed commit inside the delete leaves the session unusable until
+        # it's rolled back; the cancel itself is already committed. Only then:
+        # a rollback with nothing to undo would be harmless in production, but
+        # inside the tests' outer transaction it would undo the whole test.
+        if not db.is_active:
+            db.rollback()
     db.refresh(job)
     return job
 

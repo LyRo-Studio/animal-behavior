@@ -65,6 +65,10 @@ watch(jobId, () => {
   cancelError.value = null
 })
 
+// A cancelled job never ran a phase (issue #168), so its Cuts count and
+// phase table would only suggest phases still to come.
+const showsPhases = computed(() => job.value?.status !== 'cancelled')
+
 const OUTPUT_STATUS_LABELS: Record<CuttingJobOutputStatus, string> = {
   pending: 'Pending',
   succeeded: 'Done',
@@ -140,8 +144,7 @@ const failedOutputs = computed(
           <dd class="text-foreground" data-testid="job-status">
             {{ CUTTING_JOB_STATUS_LABELS[job.status] }}
           </dd>
-          <!-- A cancelled job never ran a phase (issue #168). -->
-          <template v-if="job.status !== 'cancelled'">
+          <template v-if="showsPhases">
             <dt class="text-muted">Cuts</dt>
             <dd class="text-foreground" data-testid="cuts-done">
               {{ cutsDone(job) }} of {{ job.outputs.length }} done
@@ -196,7 +199,7 @@ const failedOutputs = computed(
           />
         </div>
 
-        <table v-if="job.status !== 'cancelled'" class="mt-6 w-full text-left text-sm">
+        <table v-if="showsPhases" class="mt-6 w-full text-left text-sm">
           <caption class="sr-only">
             Cuts per phase
           </caption>

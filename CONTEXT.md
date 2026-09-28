@@ -2624,9 +2624,20 @@ time judgment calls:
 - **The source is deleted after the cancel commits, and its errors are
   swallowed.** `cancel_cutting_job` commits the status and the audit row
   first, then calls `delete_cutting_job_sources` (#172). Anything that goes
-  wrong there, including its own commit, is logged and never undoes or fails
-  the cancel. The job is refreshed and returned as it now stands, with
-  `source_retained` true if the delete didn't finish.
+  wrong there is logged and never undoes or fails the cancel. The job is
+  refreshed and returned as it now stands, with `source_retained` true if
+  the delete didn't finish.
+  - If the delete's own commit fails, the session needs a rollback before
+    that refresh (caught in review: without it the endpoint answered 500
+    for a cancel that had succeeded). The rollback runs only when
+    `db.is_active` is false. Unconditionally it would be harmless in
+    production, but inside the tests' outer transaction it undoes the whole
+    test. For the same reason that one path is untested; a delete that
+    raises (the session still usable) is tested.
+  - If the delete fails partway, a path already cleared in memory is
+    restored by the refresh, although its directory may be gone. The job
+    then reports a Retained source it partly lacks; Discard source (#169)
+    treats a missing directory as gone, so it's cleaned up there.
 - **Same 404/409 shape as the analysis cancel**, with "Cutting job not
   found." and "Only a queued cutting job can be cancelled." A cancelled job
   can't be cancelled again (409).
@@ -2642,6 +2653,10 @@ time judgment calls:
   The Cancel button, its "Cancelling…" state and its error mirror
   `AnalysisView`; the returned job replaces the displayed one through
   `usePolledJob`'s `replace`, which also stops polling.
+- **One request helper in the frontend service:** `getCuttingJob` and
+  `cancelCuttingJob` share `requestCuttingJob`, like `analyses.ts`'s
+  `requestAnalysisJob`, so a 404 on cancel is a `CuttingJobNotFoundError`
+  too (caught in review).
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`

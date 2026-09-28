@@ -493,6 +493,15 @@ describe('cancelling a cutting job', () => {
     expect(job.sourceRetained).toBe(false)
   })
 
+  it('says so distinctly when there is no such job, as fetching one does', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => json(404, { detail: 'Cutting job not found.' })),
+    )
+
+    await expect(cancelCuttingJob(999)).rejects.toBeInstanceOf(CuttingJobNotFoundError)
+  })
+
   it("passes on the backend's reason when the job can't be cancelled", async () => {
     vi.stubGlobal(
       'fetch',

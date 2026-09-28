@@ -419,26 +419,41 @@ export async function submitCuttingJobBatch(
 // other failure there's nothing worth retrying.
 export class CuttingJobNotFoundError extends Error {}
 
-export async function getCuttingJob(id: number): Promise<CuttingJob> {
-  const response = await fetch(`${API_BASE_URL}/cutting-jobs/${id}`)
+// One cutting job from `url`: a 404 becomes CuttingJobNotFoundError, any other
+// failure the backend's detail (or `fallback`). Shared by fetching and
+// cancelling, like analyses.ts's requestAnalysisJob.
+async function requestCuttingJob(
+  url: string,
+  init: RequestInit | undefined,
+  fallback: string,
+): Promise<CuttingJob> {
+  const response = await fetch(url, init)
   if (response.status === 404) {
     throw new CuttingJobNotFoundError('Cutting job not found.')
   }
   if (!response.ok) {
-    throw await errorFromResponse(response, 'Failed to load the cutting job.')
+    throw await errorFromResponse(response, fallback)
   }
   return toCuttingJob(await response.json())
+}
+
+export async function getCuttingJob(id: number): Promise<CuttingJob> {
+  return requestCuttingJob(
+    `${API_BASE_URL}/cutting-jobs/${id}`,
+    undefined,
+    'Failed to load the cutting job.',
+  )
 }
 
 // Issue #168: cancel a job that hasn't started yet; the backend deletes its
 // uploaded source. A job that's already running or finished gets a 409, whose
 // detail says so.
 export async function cancelCuttingJob(id: number): Promise<CuttingJob> {
-  const response = await fetch(`${API_BASE_URL}/cutting-jobs/${id}/cancel`, { method: 'POST' })
-  if (!response.ok) {
-    throw await errorFromResponse(response, 'Failed to cancel the cutting job.')
-  }
-  return toCuttingJob(await response.json())
+  return requestCuttingJob(
+    `${API_BASE_URL}/cutting-jobs/${id}/cancel`,
+    { method: 'POST' },
+    'Failed to cancel the cutting job.',
+  )
 }
 
 // Ticket #101's history: every cutting job, whoever ran it, newest first —
