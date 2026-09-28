@@ -516,7 +516,7 @@ def claim_next_queued_cutting_job(db: Session) -> CuttingJob | None:
     job = db.scalar(
         select(CuttingJob)
         .where(CuttingJob.status == CuttingJobStatus.QUEUED)
-        .order_by(CuttingJob.created_at.asc())
+        .order_by(CuttingJob.created_at.asc(), CuttingJob.id.asc())
         .limit(1)
         .with_for_update(skip_locked=True)
     )

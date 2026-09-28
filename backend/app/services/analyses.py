@@ -306,7 +306,7 @@ def claim_next_queued_job(db: Session, *, dogtrace_version: str) -> AnalysisJob 
     job = db.scalar(
         select(AnalysisJob)
         .where(AnalysisJob.status == AnalysisJobStatus.QUEUED)
-        .order_by(AnalysisJob.created_at.asc())
+        .order_by(AnalysisJob.created_at.asc(), AnalysisJob.id.asc())
         .limit(1)
         .with_for_update(skip_locked=True)
     )
