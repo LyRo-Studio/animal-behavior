@@ -2310,17 +2310,70 @@ uploads through #94's chunked protocol and submits through #97's
   `_C1_`/`_C2_`) when the field is still empty. The backend still validates
   the filename against the Test/camera at upload start.
 
-**Cutting-worker image missing backend modules (bug fix, 2026-09-28).**
-`cutting-worker/Dockerfile` copies a hand-picked slice of `backend/app`.
-#96 (`media_browser.has_cuts`) and #99 (`audit_log`) added imports to
-`app/services/cutting_jobs.py` without adding those files to the list, so
-the real container crash-looped on `ModuleNotFoundError` at startup and
-every cutting job stayed `queued`. The tests missed it because they run
-against the whole backend. Both files are now copied, and
-`cutting-worker/tests/test_dockerfile.py` follows every `app…` import
-reachable from `cutting_worker/` and fails if the Dockerfile's `COPY` list
-doesn't cover it. That runs in CI with no Docker build needed.
-`worker/Dockerfile` uses the same kind of list and has no such guard yet.
+**Cutting status, progress, history and re-cut confirmation (ticket #101)
+— shipped.** Completes Feature C's frontend on top of #96/#98/#100.
+Implementation-time judgment calls:
+
+- **Approved deviation: the history is shared, not "the current identity's
+  own" (confirmed by the user, 2026-09-28).** #101's acceptance criterion
+  says "own past cutting jobs", but Identity is attribution-only with no
+  per-person visibility (ADR-0004), and analysis and consolidation history
+  have been fully shared since #72. Issue #93's user story 15 ("mirroring
+  analysis history, so that shared history stays consistent") points the
+  same way. So `CuttingJobsHistoryView` (`/cutting-jobs`, route
+  `cutting-jobs-history`) lists every job and shows who ran each one.
+- **New `GET /cutting-jobs`, backed by `list_cutting_jobs`.** No list
+  endpoint existed; #101's third "blocked by" was an unfilled placeholder.
+  Newest first, bounded to `MAX_LISTED_CUTTING_JOBS` (500) like
+  `list_analysis_jobs`, outputs loaded up front. No filters, since nothing
+  needs one yet.
+- **`CuttingJobView` now polls** every 2 s while the job is `queued` or
+  `running`, the same way `AnalysisView` does, and stops at a terminal
+  status or on unmount. It shows a progress bar (Cuts done ÷ expected) and
+  a phase × camera table (Done/Pending/Failed), plus each failed output's
+  reason. A 404 is `CuttingJobNotFoundError` and stops polling; any other
+  error is shown and retried. There's no "currently cutting" phase: the
+  backend has no such status, and a failed or skipped phase is only known
+  once the job ends (#98).
+- **Re-cut confirmation is one dialog per submit, not one per Test.** Every
+  Test a submit finds already cut is listed in a single `ConfirmDialog`.
+  "Re-cut and overwrite" resubmits just those Tests with
+  `confirm_overwrite`, reusing their finished uploads (the refused attempt
+  consumed nothing, #96). "Keep existing Cuts" creates nothing and leaves
+  "<Test> already has Cuts; it wasn't re-cut." on each Test. To re-cut only
+  some of them, cancel, remove the others and submit again. The follow-up
+  is one more `create-cutting-job` rate-limit attempt, as #96 already
+  accepted. This replaces #100's "isn't possible from this page yet"
+  message.
+- **A confirmation sticks to its Test until the Test ID changes (caught in
+  review).** If the confirmed follow-up fails as a whole (say, throttled),
+  the next "Upload and cut" still sends that Test with `confirm_overwrite`,
+  instead of being blocked again and re-asking, which would cost two more
+  rate-limit attempts per round. Editing the Test ID clears it, as it
+  already clears that Test's uploads. The form behind the dialog is `inert`
+  while the dialog is open, so it can't be edited from the keyboard either.
+- **`ConfirmDialog` is a reusable component** (`frontend/src/components/`),
+  a plain `role="dialog"` overlay rather than native `<dialog>`, whose
+  `showModal()` jsdom doesn't implement. Focus starts on Cancel so a stray
+  Enter never overwrites anything; Escape cancels; Tab cycles between the
+  two buttons.
+- **Links:** the Video Cutting page and each job page link to the history.
+  Home keeps its single "Video Cutting" entry.
+- **Follow-up: one polling loop, `usePolledJob`
+  (`frontend/src/composables/usePolledJob.ts`).** `CuttingJobView` had
+  copied `AnalysisView`'s poll/retry/`requestGeneration` loop almost line
+  for line, so both now use one composable. It takes the job id as a
+  reactive getter, because Vue Router reuses the mounted view when only
+  `:id` changes. Before this, going straight from one job's page to another
+  kept showing and polling the first job. A new id now stops the old loop,
+  ignores any late response for the old job, and loads the new one.
+  `AnalysisView` also clears its cancel/download errors then. `replace(job)`
+  is how `AnalysisView`'s cancel shows the cancelled job without a poll
+  already in flight overwriting it. `composables/` is a new folder for Vue
+  composables: ENGINEERING-STANDARDS.md names only `components/`, `views/`
+  and `services/`, and a composable is none of those. `StatusView`'s
+  health-check retry loop has a different shape (no id, no terminal
+  state) and keeps its own.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
@@ -2429,8 +2482,7 @@ of being folded into `ConsolidationView` — it mirrors
 `AnalysesHistoryView`, which is also a separate page. Each row shows
 `display_name` (falling back to `original_filename`), plus the original
 filename as "Source" when a display name is set, and its status,
-created date and requesting Identity (its Condition too, until ticket
-#149 removed it). Only `completed` rows offer
+created date and requesting Identity. Only `completed` rows offer
 a download (the same `GET /consolidations/{id}/download` as #115).
 `failed` rows show their `failure_reason`. This also settles the
 "stuck `processing`" gap from #115's core-flow decision: those rows are
@@ -2585,262 +2637,205 @@ upload page.
   thresholds (backend minutes vs. a frontend guess) would drift apart, so the
   database stays the single source of truth.
 
-**Consolidation: every level from one upload, Condition removed (ticket
-#149, part of #143):** the upload no longer takes a Condition. The runner
-runs `lees_observer` → `bereken_observer`, whose calculation is unchanged
-(only a dead ethogram branch was removed), once per `deel`
-(`1`, `2`, `1+2`), exactly the calculation the old ME, ZE and ME_ZE
-consolidations ran, and `schrijf_resultaat` writes one English workbook:
-`with_owner`, `without_owner` and `combined` (one row per test), then
-`README`, `details`, `phase_details`, `denominators`, `warnings`,
-`variables`, `phase_selection` and `excluded`. Verified cell for cell
-against the old per-Condition outputs, for the synthetic fixture and a
-real export.
-- **Diagnostic sheets keep the calculation's own column names** (`fase`,
-  `groep`, `gedrag_s`, ...) and gain a leading `level` column; the README
-  translates them. The importer's own messages stay Dutch. Translating
-  both belongs to the importer/workbook rework (#150-#154), not this
-  slice. `phase_selection` lists every source row once, with the `levels`
-  it was used in.
-- **Migration 0016 deletes every Consolidation** (all made under the old
-  per-Condition format) and drops the `condition` column and its
-  `consolidation_condition` enum type. The audit log is untouched. It's
-  irreversible: `downgrade()` restores only the column, `NOT NULL` as in
-  0011, filling any row made after the upgrade with `ME_ZE`, the old
-  Condition that covered both parts.
-- **Stored results are removed by a separate, re-runnable command**, since
-  a migration has no storage client:
-  `docker compose exec backend python -m app.commands.remove_unreferenced_consolidation_results`,
-  run once after the deploy that ships 0016. It deletes every object under
-  `consolidations/` that no Consolidation's `result_storage_key`
-  references, and nothing else. It lists objects before reading the
-  referenced keys, and a key is committed before its result is uploaded,
-  so an in-flight consolidation's result is never removed. It isn't wired
-  into `deploy.yml`: it's a one-off, not a step every deploy needs.
+**Consolidation: input, calculation and result workbook (issue #143,
+tickets #149–#154):** how a Consolidation works today. The ticket-by-ticket
+history is in git. One upload of a raw Observer export gives one English
+result workbook with every Consolidation level. The runner
+(`ObserverConsolidationRunner`) calls `lees_observer` → `bereken_observer`
+→ `schrijf_resultaat` once: the export is read once and `consolideer`
+computes every level in one call.
 
-**Consolidation: Ethogram-driven group mapping (ticket #150, part of
-#143):** which Behaviour group, Out of Sight and State/Event a column
-belongs to comes from `consolidation/ethogram_definition.json`, never from
-where the column sits in the export. The old fixed first/last-behaviour
-group boundaries are gone, so any behaviour column may be missing.
-- **Generated, never hand-edited.** `python -m consolidation.ethogram_definition`
-  derives the JSON from the committed printable Ethogram
-  (`20241218_Printbaar ethogram.xlsx`, un-ignored in `.gitignore`: it is a
-  protocol document, not research data). It records each behaviour's
-  code, group, State/Event, modifier categories and Ethogram order, and
-  each group's Out of Sight and scored phases.
+- **Input: only the raw `Results` sheet**, exactly as Observer exports
+  it. Other sheets in the workbook are never read.
+  - **Required columns:** Observations, Test ID, Dog ID, the owner-present
+    flag (`Aanwezigheid FP in fase`) and Duration. A missing one fails:
+    "Missing column in Results: <header>". A duplicate of one of these,
+    or of a `Total …` column, fails naming it and its column letters.
+  - **Never read:** Fase, Geslacht hond, Observer's container columns
+    (`Independent Variables …`, `Result Containers`) and `Total number Out
+    of sight …`.
+  - **The phase comes from the Observation name** (`<Test ID>_…_F12`):
+    the Observer phase number, 1–15. The owner-present flag must be True
+    exactly for 1–7. A Test ID typo in the name is only a warning; the
+    `Test ID` column is used.
+  - **Cells:** Observer's `-` is a measured 0. A blank or non-numeric cell
+    fails, naming it ("Blank cell Results!J4 (<header>)"). This holds for
+    Duration and every `Total …` column, whether or not it enters a result
+    (decided with the user in #151). Observer always writes a number or
+    `-`, so a blank means a damaged export. A fully empty row is skipped.
+  - **F8 rows** are listed on `phase_selection` but never validated
+    (decided with the user in #151): they never contribute to a result.
+- **Ethogram definition:** `consolidation/ethogram_definition.json` says
+  which Behaviour group, Out of Sight, State/Event, Ethogram order and
+  scored phases a behaviour has. It never depends on where a column sits
+  in the export.
+  - **Generated, never hand-edited:** `python -m consolidation.ethogram_definition`
+    derives it from the committed printable Ethogram
+    (`20241218_Printbaar ethogram.xlsx`, un-ignored in `.gitignore`: it is
+    a protocol document, not research data).
   - **Hand-maintained in the generator:** the export-name aliases (5
     behaviours, the Out of Sight name variant, 9 TP/FP protocol names),
-    the modifier aliases, the `Blad1` column → group mapping, and the
+    the modifier aliases, the `Blad1` column → group mapping and the
     exclusions (First contact with TP, the TP/FP protocol group).
-  - **Checks moved from the uncommitted `ethogram_controle.py`** (deleted
-    in #151, since it no longer ran): unique
-    names, alias targets that exist, one Out of Sight per group, known
-    modifier categories.
+  - **The generator checks:** unique names, alias targets that exist, one
+    Out of Sight per group, known modifier categories.
   - `test_ethogram_definition.py` regenerates the JSON and fails on any
-    difference, so a new Ethogram behaviour always needs a deliberate
+    difference, so a new Ethogram behaviour needs a deliberate
     regeneration. Only the JSON and its module are copied into the backend
     image; the Ethogram is never read at run time.
-- **Scored phases come from `Blad1`,** as #143 decided: F1/F3/F6 for
-  Distance and Location, F2/F4/F7 for Dog following. The group notes on
-  the Behaviours sheet disagree ("phases 1, 3, 6, 8, 9, 11, 14 and 16"),
-  so they are not used. Until #153, a group whose scored phases aren't
-  F1–F7 is "not yet supported": its columns go to `excluded` with one
-  warning per group. None of those groups is in the real export.
-  (Done in #153: those groups are consolidated over their scored phases.)
-- **Header matching:** a header resolves to the longest known behaviour
-  name (Ethogram name or alias) it starts with, ignoring case and
-  whitespace. The rest is the modifier. A header matching no known name
-  fails the upload, naming the column. Consequence of longest-match, per
-  #143: a new behaviour whose name *starts with* a known one (e.g.
-  "Sitting quietly") reads as that behaviour with an unknown modifier, a
-  warning rather than a failure.
-- **Modifiers:** each `;`-separated value, after the modifier aliases,
-  must sit in its own category the Ethogram allows for the behaviour.
-  Otherwise there is a warning, and the values are kept.
-- **Out of Sight:** a group's `Total duration Out of sight … <No Modifier>`
-  column is required only when the group has an exported behaviour
-  (missing → the upload fails, naming the group). Otherwise it is listed
-  in `excluded` as ignored. `Total number Out of sight …` is never used.
-- **Events:** their duration columns go to `excluded`, with a warning if
-  any value is nonzero. Only the frequency is a result column, so the real
-  layout now has 503 result columns (538 minus 35 Event durations).
-- **Result change against #149:** Stiffening up is now corrected by the
-  exploration Out of Sight (IW), not the stress one. The existing
-  `Results (REL)` formula check still lists it as a note, next to the
-  stress-group count formulas that point at IW (a copy error, per #143).
-  (#151 removed that check.)
-  In both the synthetic fixture and the real export this moves no value:
-  compared with #149's output, every result value is identical, and only
-  the 35 Event duration columns are gone. The small-export tests show the
-  difference.
-- **`availability`:** every behaviour in a dog group (every non-excluded
-  group), as `not_exported`, `exported_all_zero` or `exported_nonzero`,
-  judged over every consolidated phase.
-- **No raw `KeyError` reaches a user.** `lees_observer` checks the three
-  sheets and its required columns itself, and names what is missing. The
-  runner no longer maps `KeyError` at all: one would now be a bug, logged,
-  with the generic failure reason shown. (A `KeyError` from openpyxl
-  opening a damaged workbook is mapped to "not a valid Excel workbook"
-  inside `lees_observer`.) `Fase` is no longer required, since #143 never
-  reads it. New messages are in English. The
-  importer's older ones stay Dutch until the importer rework in #151
-  (done: since #151 `lees_observer` checks only the `Results` sheet).
-- **Known wrinkle, from #149's layout:** `warnings` repeats an import
-  warning once per level. (Fixed in #152: the export is read once.)
-
-**Consolidation: the raw Observer export as-is (ticket #151, part of
-#143):** `lees_observer` reads only the `Results` sheet, exactly as
-Observer exports it. The hand-made working copies (`Results (2)`,
-`Results (REL)`) are never needed or read; a workbook that still has them
-consolidates from its `Results` sheet alone. The yellow-highlight check,
-the `Results (REL)` formula-reference check (and its notes), the
-cell-by-cell cross-check against the copy and the `stress0`/`self0` header
-repair (`normaliseer_kop`, which only the copy needed) are gone.
-- **Required columns:** Observations, Test ID, Dog ID, the owner-present
-  flag (`Aanwezigheid FP in fase`) and Duration. Missing → "Missing column
-  in Results: <header>". A duplicate of one of these or of a `Total …`
-  column fails naming it and its column letters, since which one counts
-  can't be told. Other headers are never read, so duplicates there don't
-  matter.
-- **Never read:** Fase, Geslacht hond, Observer's container columns
-  (`Independent Variables …`, `Result Containers`) and `Total number Out
-  of sight …`, exactly #143's "Ignored" class. Their cells may hold
-  anything; the Out of Sight counts are still listed in `excluded`.
-  `phase_selection` lost its `fase_bronkolom` column.
-- **F8 rows are listed but never validated** (decided with the user on
-  this branch): they never contribute to any result, per #143's "F8 rows
-  are ignored and listed", so junk there can't corrupt anything.
-- **Cells:** `-` is a measured 0. A blank cell or anything that isn't a
-  number (text, including a number stored as text) fails, naming the cell:
-  "Blank cell Results!J4 (<header>)" / "Not a number in cell Results!J4
-  (<header>)". **One rule for every other exported column** (decided with
-  the user on this branch): Duration and every `Total …` column is checked
-  whether or not it enters a result. That includes excluded protocol and
-  First-contact columns, and an Out of Sight column that corrects no
-  exported group. #143 story 34 ("irrelevant columns never block an
-  upload") is read as being about such a column not being *required*.
-  Observer always writes a number or `-`, so a blank there means a
-  damaged export. A
-  blank Observations, Test ID or owner-present flag cell fails the same
-  way ("Blank cell Results!C2 (Observations)"). A fully empty row is
-  skipped: it is not an Observation.
-- **Messages:** every `lees_observer` failure and warning is now English,
-  and names the column, cell, test or phase. The calculation's own
-  (`consolideer`) messages and `bereken_observer`'s notes stay Dutch; they
-  belong to the per-phase/no-visible-time rework (#152).
-- **Fixture:** `synthetic_observer_export.xlsx` is rebuilt as a raw
-  `Results`-only workbook from the real export's header row, values
-  generated (seed 151, many zeros as `-`). Its literal-value test is worked
-  out by hand from its cells.
-- **Verified against #150's importer:** on a legacy three-sheet copy of the
-  new fixture, #150's code gives every result and diagnostic sheet cell for
-  cell identical to this one on the raw sheet alone. On the real export,
-  the three result sheets and `denominators` are identical. Only
-  source column letters (`bronkolom`/`oos_kolom`, now pointing into raw
-  `Results`, two container columns further right) differ, and raw
-  `Results`' `Total duration First contact with TP` column, which the copy
-  lacked, is now listed in `excluded`.
-
-**Consolidation: per-phase results and no visible time (ticket #152,
-part of #143):** a fourth level, `per_phase`, and one rule for time
-without visibility at every level.
-- **One read, one calculation.** The runner calls `lees_observer` once and
-  `consolideer` once. `consolideer` takes `niveaus` (`NIVEAUS` in
-  `observer_import.py`: each level's Observer phases, `per_fase` for
-  `per_phase`) and sums each level separately. It is still sum first,
-  divide once; its input checks are unchanged. This replaces #149's
-  one-read-per-`deel` loop (`DELEN` is gone), so `warnings` no longer
-  repeats import warnings per level. Verified: `with_owner`,
-  `without_owner` and `combined` values are identical to #151's for the
-  synthetic fixture and the real export. Every `per_phase` cell of both
-  matches behaviour ÷ (Duration − group Out of Sight) recomputed straight
-  from the raw cells.
-- **No visible time:** visible time ≤ 0.001 s (the Observer tolerance,
-  `TOLERANTIE_S`), per phase or summed over a level, gives a blank
-  value with status `no_visible_time` in `details` and `denominators`,
-  never 0 and never a division. It used to be exactly 0 only, with the
-  Dutch status `geen_zichtbare_tijd` and a warning per group; that warning
-  is gone, since the status explains every blank. In the real export, the
-  28 phases where tail Out of Sight equals Duration are the only ones.
-- **Failures name test, phase and group/behaviour:** Out of Sight above
-  Duration by more than 0.001 s, a behaviour longer than its visible time
-  beyond it, and a count above 0 without visible time. Out of Sight within
-  the tolerance above Duration keeps the values, is no visible time, and
-  gives a `rounding` warning (as does a behaviour within the tolerance
-  above its visible time). An export with Observations only in F8 fails.
-- **Phase labels are `ME F3` / `ZE F1`** in `phases_used`,
-  `missing_phases` and `denominators`, so combined can't be ambiguous;
-  `per_phase` also has `observer_phase`, `condition` and `phase`, and so
-  does `phase_selection`, whose `deel`/`fase_in_deel` columns are gone.
-- **Missing phases:** `with_owner`/`without_owner`/`combined` rows carry
-  `phases_used`, `missing_phases` and `status` (`ok`/`incomplete`). A
-  test with none of a level's phases has no row there and a `no_phases`
-  warning, instead of the whole upload failing ("Geen aanwezige fases").
-  That includes a test with only an F8 row.
-- **Within-tolerance Out of Sight in a level sum:** a phase whose Out of
-  Sight is up to 0.001 s above its Duration has visible time 0 on its
-  own. A level still sums the raw values (visible = ΣDuration − ΣOut of
-  Sight, as #143 states), so the excess is subtracted there. At most
-  0.001 s per phase: accepted rather than clipping Out of Sight.
-- **Messages:** every `consolideer` message is English now. Only the
-  three visibility failures can come from an upload, since `lees_observer`
-  already guarantees the rest; the others would mean a bug.
-- **Sheets:**
-  - `phase_details` is gone. Its per-phase values are now `details` rows
-    at level `per_phase`, with the Observer phase in `fase`. Its
-    source-row columns are on `phase_selection`, where `levels` now
-    includes `per_phase`.
-  - `denominators` is rebuilt per level × test × phase (`per_phase` only)
-    × group, in English (`duration_s`, `out_of_sight_s`, `visible_s`,
-    `phases_used`, `status`). Before, it was per test and group only,
-    and summed clipped per-phase visible times.
-  - `details` keeps its Dutch column names until #154.
-  - Result sheets freeze their five leading columns.
-
-**Consolidation: the Scoring plan (ticket #153, part of #143):** Distance
-to TP, Distance to FP and Location (F1, F3, F6) and Dog following the TP
-(F2, F4, F7) are consolidated. They are no longer excluded as "not yet
-supported", and the `not_yet_supported` warning is gone.
-- **`consolideer` takes `gescoorde_fases`:** {group: Observer phases}.
-  The importer derives it from the definition's `scored_phases` for every
-  dog group: F3 is Observer phase 3 (ME) and 11 (ZE). A consolidated group
-  missing from it is a bug and fails.
-- **An unscored phase enters no sum and is never validated.** A behaviour
-  longer than its visible time, or a count without visible time, fails
-  only in a scored phase. A nonzero duration or count there gives a
-  `not_scored` warning per cell (test, Observer phase, column) and
-  changes no result.
-- **`not_scored` and `no_phases`:** an unscored phase on `per_phase` is
-  blank with status `not_scored`. On `with_owner`/`without_owner`/
-  `combined`, a test that has none of a group's scored phases in that
-  level (e.g. only ME F2 and F4 exported, for Distance) is blank with
-  status `no_phases` and gets a `no_phases` warning naming test, group and
-  level (decided with the user: the group *is* scored in that level, only
-  its phases are missing, so not `not_scored`; #143's two blank statuses
-  become three). In `details` and `denominators` the numerator, Duration,
-  Out of Sight, visible time and `phases_used` are blank as well. They
-  describe only what was summed. `phases_used` in `denominators` lists
-  only the group's scored phases.
-- **Missing phases per group** (decided with the user): `denominators`
-  has `missing_phases`: the group's scored phases of the level that the
-  test lacks (blank on `per_phase`). On `with_owner`/`without_owner`/
-  `combined`, the row's `phases_used`, `missing_phases` and `status` only
-  count phases in which at least one exported group is scored. Every
-  real export has groups scored in F1-F7, so this matters only for an
-  export of just Scoring plan groups. A test missing ME F2 with only
-  Distance exported is `ok`. Whether a test has a row at all is still
-  decided by any of the level's phases being present.
-- **`availability` is judged over each group's scored phases** (decided
-  with the user): a column that is nonzero only in unscored phases, so 0
-  in every result, is `exported_all_zero`. Its `not_scored` warnings still
-  list every such cell.
-- **Zero states need no code:** as ordinary behaviours of groups without
-  Out of Sight, they get their own relative duration over Duration.
-- **Verified:** for the synthetic fixture and the real export (neither has
-  these groups' columns), every sheet but README is identical to #152's,
-  apart from `denominators`' new `missing_phases` column (empty: both
-  exports have every phase).
+  - **Scored phases come from `Blad1`:** F1/F3/F6 for Distance and
+    Location, F2/F4/F7 for Dog following. The group notes on the
+    Behaviours sheet disagree ("phases 1, 3, 6, 8, 9, 11, 14 and 16"), so
+    they are not used.
+- **Columns:**
+  - **Header matching:** a `Total duration …`/`Total number …` header
+    resolves to the longest known behaviour name (Ethogram name or alias)
+    it starts with, ignoring case and whitespace. The rest is the
+    modifier. A header matching no known name fails, naming the column. A
+    new behaviour whose name *starts with* a known one ("Sitting quietly")
+    therefore reads as that behaviour with an unknown modifier: a warning,
+    not a failure.
+  - **Any behaviour column may be missing:** it is Not exported and has no
+    result column.
+  - **Modifiers:** each `;`-separated value, after the modifier aliases,
+    must sit in its own category the Ethogram allows for the behaviour.
+    Otherwise there is a warning and the values are kept. Every modifier
+    combination is its own variable, never summed into a base behaviour.
+  - **Out of Sight:** a group's `Total duration Out of sight … <No
+    Modifier>` column is required only when the group has an exported
+    behaviour; a missing one fails, naming the group. Otherwise it's
+    listed in `excluded` as ignored.
+  - **Events:** only their frequency is a result column. Their duration
+    columns go to `excluded`, with a warning if any value is nonzero.
+  - **Excluded by name:** First contact with TP and the TP/FP protocol
+    behaviours, listed in `excluded` with the reason.
+- **Calculation** (`consolideer`, adapted from the original code as #143
+  decided):
+  - **Levels** (`NIVEAUS`): `per_phase` (each of Observer phases 1–7 and
+    9–15 on its own), `with_owner` (1–7), `without_owner` (9–15) and
+    `combined` (1–7 + 9–15). F8 never counts.
+  - **Formula:** relative duration = Σ behaviour ÷ (Σ Duration − Σ the
+    group's Out of Sight); frequency = Σ count ÷ the same visible time,
+    per visible second. Sum first, divide once: never an average of phase
+    values, and combined is never an average of ME and ZE.
+  - **Groups without Out of Sight** (Vocalisation, Distance to TP/FP,
+    Location, Dog following the TP) use plain Duration. Zero states are
+    ordinary behaviours, never subtracted.
+  - **No visible time:** visible time ≤ 0.001 s (`TOLERANTIE_S`, Observer's
+    rounding), per phase or summed over a level, gives a blank value with
+    status `no_visible_time`, never 0 and never a division.
+  - **Within-tolerance Out of Sight:** a phase whose Out of Sight is up to
+    0.001 s above its Duration has visible time 0 on its own and gets a
+    `rounding` warning. A level still sums the raw values, so the excess
+    is subtracted there: accepted rather than clipping Out of Sight.
+  - **Scoring plan:** `consolideer` takes `gescoorde_fases` ({group:
+    Observer phases}) for every consolidated group, derived from the
+    definition (F3 is Observer phase 3 and 11). An unscored phase enters
+    no sum and is never validated; a nonzero value there gives a
+    `not_scored` warning per cell and changes no result. `availability`
+    is judged over each group's scored phases too (decided with the user
+    in #153).
+  - **Value statuses** (`details`, `denominators`): `ok`,
+    `no_visible_time`, `not_scored` (an unscored phase on `per_phase`) and
+    `no_phases` (on an aggregate level, the test has none of the group's
+    scored phases; plus a warning. Decided with the user in #153: the
+    group *is* scored there, its phases are just missing). A result cell
+    is blank only for these three. Blank statuses also blank the
+    numerator, Duration, Out of Sight, visible time and `phases_used` in
+    `details` and `denominators`.
+  - **Row status** (`with_owner`/`without_owner`/`combined`): `ok` or
+    `incomplete`, with `phases_used` and `missing_phases`. These count
+    only phases in which at least one exported group is scored (decided
+    with the user in #153). A test with none of a level's phases has no
+    row there and a `no_phases` warning. That includes a test with only
+    an F8 row.
+  - **Failures name the test, phase and group or behaviour:** Out of
+    Sight above Duration beyond the tolerance, and, in a scored phase, a
+    behaviour longer than its visible time or a count without visible
+    time. An export with Observations only in F8 fails.
+  - **Rest of the failure list:** duplicate test × phase, a malformed
+    Observation name, a phase outside 1–15, a flag that contradicts the
+    phase, and a missing or conflicting Dog ID.
+  - **Messages:** all English; each one names the column, cell, test or
+    phase involved.
+- **Result workbook** (`schrijf_resultaat`; sheets in this order):
+  - **`per_phase`:** one row per test × Observer phase, led by `test_id`,
+    `dog_id`, `observer_phase`, `condition` (ME/ZE) and `phase` (F1–F7).
+  - **`with_owner`, `without_owner`, `combined`:** one row per test, led
+    by `test_id`, `dog_id`, `phases_used`, `missing_phases` and `status`.
+  - **All four:** the variables come after the five leading columns.
+    - Headers: the exact Observer headers. A `Total duration …` column
+      holds the relative duration, and a `Total number …` column the
+      frequency per visible second.
+    - Values: plain fractions, never percentage-formatted. A blank stays
+      blank and a 0 stays 0.
+    - Order: Ethogram order, then the order in which each behaviour's
+      modifiers first appear in the export, then duration before count.
+    - **Row 1 is a merged, coloured Behaviour group row** (one colour per
+      group, single columns unmerged), so the headers are on row 2 and the
+      sheet freezes at F3. A program reading these sheets skips row 1.
+  - **`README`:** in sections.
+    - The source file's name and SHA-256, and the definition version: the
+      JSON's own SHA-256, plus the Ethogram it was generated from, with
+      that file's SHA-256.
+    - The levels, the formulas, the Scoring plan and the checks. The
+      groups without Out of Sight and the Scoring plan are written from the
+      definition, so a regenerated definition can't leave them stale.
+    - One `<status>: …` line per status (`ok`, `incomplete`,
+      `no_visible_time`, `not_scored`, `no_phases`, and `availability`'s
+      `not_exported`, `exported_all_zero`, `exported_nonzero`).
+    - Not exported vs measured zero.
+  - **`details`:** long; every level (`level` column) × test × phase
+    (`observer_phase`, `per_phase` rows only) × variable. Columns:
+    `dog_id`, `group`, `variable`, `behaviour`, `modifier`, `statistic`
+    (`duration`/`count`), `behaviour_duration_s`, `count`, `duration_s`,
+    `out_of_sight_s`, `visible_s`, `phases_used`, `fraction`,
+    `percentage`, `frequency_per_s`, `frequency_per_min`, `status`.
+  - **`denominators`:** level × test × phase (`per_phase` only) × group:
+    `duration_s`, `out_of_sight_s`, `visible_s`, `phases_used`,
+    `missing_phases` (the group's scored phases the test lacks) and
+    `status`.
+  - **`variables`:** one row per result column, in the same order:
+    `variable` (the exact header), `behaviour`, `modifier`, `code`,
+    `group`, `out_of_sight` (its behaviour name, or blank), `state_event`,
+    `statistic`, `value` (what the cell measures), `scored_phases`,
+    `source_column` and `out_of_sight_column`.
+  - **`availability`:** every behaviour in a dog group, as `not_exported`,
+    `exported_all_zero` or `exported_nonzero`.
+  - **`phase_selection`:** every source row (F8 too): `observation`,
+    `test_id`, `dog_id`, `observer_phase`, `condition`, `phase`,
+    `owner_present`, `source_row` and `levels`.
+  - **`warnings`:** `type`, `test_id`, `observer_phase`, `subject`,
+    `message`.
+  - **`excluded`:** `source_column`, `header`, `reason`: every export
+    column that never enters a result, including the never-read ones
+    (Fase, Geslacht hond, the container columns). Every entry has its
+    reason.
+  - The calculation's internal names (`fase`, `gedrag_s`, `duur`, …) never
+    reach the workbook: `schrijf_resultaat` renames them through one map
+    (`KOLOMNAMEN`).
+- **Deploy note (#149):** migration 0016 deleted every Consolidation made
+  before this format, and dropped the old `condition` column and its enum
+  type, irreversibly (`downgrade()` restores only the column). The audit
+  log is untouched. The stored results those rows referenced are removed
+  by a separate, re-runnable command, since a migration has no storage
+  client:
+  `docker compose exec backend python -m app.commands.remove_unreferenced_consolidation_results`.
+  - It deletes every object under `consolidations/` that no
+    Consolidation references, and nothing else.
+  - It lists objects before reading the referenced keys, and a key is
+    committed before its result is uploaded, so an in-flight
+    consolidation's result is never removed.
+  - It is a one-off, not wired into `deploy.yml`.
+- **Tests:** through the runner seam (`test_consolidation_service.py`),
+  with small synthetic exports (`tests/observer_exports.py`) and
+  `synthetic_observer_export.xlsx`. That fixture is a raw `Results`-only
+  workbook with the real export's header row and generated values (seed
+  151, many zeros as `-`). An opt-in test runs a real export, gated by
+  `CONSOLIDATION_REAL_FIXTURE_PATH`; real exports are never committed.
+- **Verified (#154):** for the synthetic fixture and the real export,
+  every value on the four result sheets is identical to #153's output.
+  Only the column order and the group row changed.
 
 **`assist` vendored (ticket #112) — approved deviation, supersedes Feature
 C's "pinned external dependency" decision:** the cutting-worker image used to

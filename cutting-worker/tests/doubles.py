@@ -19,7 +19,8 @@ from openpyxl import Workbook
 
 from cutting_worker.video_cutter import PHASE_ORDER
 
-_HEADERS = ["Test ID", "Dog ID", "C1/C2", *PHASE_ORDER]
+# The sheet writes each phase's header phase first ("F1_ME" for ME_F1).
+_HEADERS = ["Test ID", "Dog ID", "C1/C2", *(f"F{phase[4:]}_{phase[:2]}" for phase in PHASE_ORDER)]
 # Every object reports the same last_modified; nothing here reads it.
 _LAST_MODIFIED = datetime(2026, 1, 1, tzinfo=UTC)
 

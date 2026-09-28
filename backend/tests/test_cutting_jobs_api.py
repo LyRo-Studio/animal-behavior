@@ -20,8 +20,9 @@ from app.models.cutting_job import CuttingJob, CuttingJobOutputStatus, CuttingJo
 from tests.helpers import identity_headers
 
 _CONDITIONS = ("ME", "ZE")
-_PHASE_HEADERS = [f"{condition}_F{n}" for condition in _CONDITIONS for n in range(1, 9)]
-_HEADERS = ["Test ID", "Dog ID", "C1/C2", *_PHASE_HEADERS]
+_PHASES = [f"{condition}_F{n}" for condition in _CONDITIONS for n in range(1, 9)]
+# The sheet writes each phase's header phase first ("F1_ME" for ME_F1).
+_HEADERS = ["Test ID", "Dog ID", "C1/C2", *(f"F{phase[4:]}_{phase[:2]}" for phase in _PHASES)]
 
 
 def _excel_bytes(
@@ -33,7 +34,7 @@ def _excel_bytes(
     sheet.append(_HEADERS)
     for row_test_id in (test_id, *extra_test_ids):
         row = [row_test_id, "Rex", reference_camera]
-        for index, header in enumerate(_PHASE_HEADERS):
+        for index, header in enumerate(_PHASES):
             row.append(time(index + 1, 0, 0) if header in phases else None)
         sheet.append(row)
     buffer = BytesIO()
@@ -777,3 +778,41 @@ def test_get_cutting_job_for_unknown_id_is_not_found(client):
     response = client.get("/api/cutting-jobs/999999")
 
     assert response.status_code == 404
+
+
+# --- GET /cutting-jobs (ticket #101's history) ---
+
+
+def _create_job(client, *, identity):
+    upload = _start_upload(client, size=4)
+    _upload_all_bytes(client, upload["upload_id"], b"data")
+    return client.post(
+        "/api/cutting-jobs",
+        data={"test_id": "T001", "c1_upload_id": upload["upload_id"]},
+        files={"excel": ("timestamps.xlsx", _excel_bytes(), "application/octet-stream")},
+        headers=identity_headers(identity),
+    ).json()
+
+
+def test_list_cutting_jobs_returns_every_identitys_jobs_newest_first(client):
+    """Shared history, like `GET /analyses` since ticket #72 — each row says
+    who ran it, but nobody's jobs are hidden from anyone."""
+    first = _create_job(client, identity="alice@example.com")
+    second = _create_job(client, identity="bob@example.com")
+
+    response = client.get("/api/cutting-jobs", headers=identity_headers("alice@example.com"))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [(job["id"], job["requested_by_identity"]) for job in body] == [
+        (second["id"], "bob@example.com"),
+        (first["id"], "alice@example.com"),
+    ]
+    assert body[0]["outputs"] == second["outputs"]
+
+
+def test_list_cutting_jobs_is_empty_without_any_jobs(client):
+    response = client.get("/api/cutting-jobs")
+
+    assert response.status_code == 200
+    assert response.json() == []

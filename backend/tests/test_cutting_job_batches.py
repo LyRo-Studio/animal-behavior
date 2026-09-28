@@ -30,8 +30,9 @@ from app.services.cutting_jobs import (
 from app.services.cutting_uploads import append_upload_chunk, start_upload
 from app.services.timestamp_excel import MalformedTimestampCellError
 
-_PHASE_HEADERS = [f"{condition}_F{n}" for condition in ("ME", "ZE") for n in range(1, 9)]
-_HEADERS = ["Test ID", "Dog ID", "C1/C2", *_PHASE_HEADERS]
+_PHASES = [f"{condition}_F{n}" for condition in ("ME", "ZE") for n in range(1, 9)]
+# The sheet writes each phase's header phase first ("F1_ME" for ME_F1).
+_HEADERS = ["Test ID", "Dog ID", "C1/C2", *(f"F{phase[4:]}_{phase[:2]}" for phase in _PHASES)]
 
 
 def _workbook_bytes(*test_ids: str, reference_camera="C1") -> bytes:
@@ -41,7 +42,7 @@ def _workbook_bytes(*test_ids: str, reference_camera="C1") -> bytes:
     sheet = workbook.active
     sheet.append(_HEADERS)
     for test_id in test_ids:
-        phases = [time(n, 0, 0) if n <= 2 else None for n in range(1, len(_PHASE_HEADERS) + 1)]
+        phases = [time(n, 0, 0) if n <= 2 else None for n in range(1, len(_PHASES) + 1)]
         sheet.append([test_id, "Rex", reference_camera, *phases])
     buffer = BytesIO()
     workbook.save(buffer)
@@ -203,7 +204,7 @@ def test_a_malformed_cell_in_one_tests_row_fails_only_that_test(
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(_HEADERS)
-    blank_phases = [None] * (len(_PHASE_HEADERS) - 1)
+    blank_phases = [None] * (len(_PHASES) - 1)
     sheet.append(["T001", "Rex", "C1", time(1, 0, 0), *blank_phases])
     sheet.append(["T002", "Rex", "C1", "-", *blank_phases])
     buffer = BytesIO()

@@ -4,12 +4,10 @@ Feature C) — a pure, independently testable module: bytes in, validated
 user story 25).
 
 Only the workbook's first tab is read (CONTEXT.md's Feature C decision);
-other tabs are ignored entirely. The expected schema (column headers below)
-hasn't been confirmed against a real production sample sheet during this
-ticket — same "unconfirmed, revisit" caveat CONTEXT.md already carries for
-other external-format assumptions (e.g. app/api/deps.py's JWT email-claim
-name) — adjust `_TEST_ID_HEADER`/`_DOG_ID_HEADER`/`_REFERENCE_CAMERA_HEADER`
-below if a real sheet uses different header text.
+other tabs are ignored entirely. The expected headers match the sheet
+researchers actually use ("Timestamps cutting video") and `assist`'s own
+reader (`phase_slicer.py` upstream): `Test ID`, `Dog ID`, `C1/C2`, then one
+start time per phase written phase first, `F1_ME`..`F8_ZE`.
 """
 
 import re
@@ -35,9 +33,16 @@ _PHASE_NUMBERS = range(1, 9)
 # phase timestamps (CONTEXT.md's "ZE_F8 cannot be produced" decision: this
 # module parses all 16 faithfully, including ZE_F8's own cell; excluding it
 # from a CuttingJob's *expected outputs* is app/services/cutting_jobs.py's
-# concern, not this module's).
-_PHASE_HEADERS = [f"{condition}_F{n}" for condition in _CONDITIONS for n in _PHASE_NUMBERS]
+# concern, not this module's). Each sheet header ("F1_ME", phase first) maps
+# to the key the rest of the app uses ("ME_F1", condition first).
+_PHASE_HEADERS = {
+    f"F{n}_{condition}": f"{condition}_F{n}" for condition in _CONDITIONS for n in _PHASE_NUMBERS
+}
 _REQUIRED_HEADERS = [_TEST_ID_HEADER, _DOG_ID_HEADER, _REFERENCE_CAMERA_HEADER, *_PHASE_HEADERS]
+
+# `assist` reads the reference-camera column as `Camera(value)` (1 is C1,
+# 2 is C2), and the real sheet holds just that number.
+_CAMERA_NUMBERS = {1: "C1", 2: "C2"}
 
 _BARE_NUMERIC_TEST_ID_RE = re.compile(r"^\d+$")
 _TEST_ID_RE = re.compile(r"^T\d+$", re.IGNORECASE)
@@ -223,9 +228,13 @@ def _data_rows(data: bytes) -> Iterator[Iterator[tuple[int, Callable[[str], obje
         sheet = workbook.worksheets[0]
 
         header_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
-        header_index = {
-            str(value).strip(): index for index, value in enumerate(header_row) if value is not None
-        }
+        # The first column with a given header wins: the real sheet repeats
+        # every phase header in a later "Duration of the phase:" block of
+        # formulas, which must never be read as start times.
+        header_index: dict[str, int] = {}
+        for index, value in enumerate(header_row):
+            if value is not None:
+                header_index.setdefault(str(value).strip(), index)
         missing = [header for header in _REQUIRED_HEADERS if header not in header_index]
         if missing:
             raise ExcelSchemaError(missing)
@@ -246,6 +255,21 @@ def _data_rows(data: bytes) -> Iterator[Iterator[tuple[int, Callable[[str], obje
         workbook.close()
 
 
+def _parse_reference_camera(value: object) -> str | None:
+    """ "C1"/"C2" for a camera name ("C2", any case) or number (2, 2.0, "2"),
+    else None."""
+    if value is None or isinstance(value, bool):
+        return None
+    text_value = str(value).strip().upper()
+    if text_value in _CAMERA_NUMBERS.values():
+        return text_value
+    try:
+        number = float(text_value)
+    except ValueError:
+        return None
+    return _CAMERA_NUMBERS.get(int(number)) if number.is_integer() else None
+
+
 def _parse_row(row_number: int, cell: Callable[[str], object]) -> ExcelRow:
     """One data row, validated in full — raises MalformedTestIdError/
     MalformedReferenceCameraError/MalformedTimestampCellError for its first
@@ -263,15 +287,15 @@ def _parse_row(row_number: int, cell: Callable[[str], object]) -> ExcelRow:
     dog_id = str(raw_dog_id).strip() if raw_dog_id is not None else ""
 
     raw_camera = cell(_REFERENCE_CAMERA_HEADER)
-    reference_camera = str(raw_camera).strip().upper() if raw_camera is not None else ""
-    if reference_camera not in ("C1", "C2"):
+    reference_camera = _parse_reference_camera(raw_camera)
+    if reference_camera is None:
         raise MalformedReferenceCameraError(row_number, raw_camera)
 
     phase_timestamps: dict[str, int] = {}
-    for header in _PHASE_HEADERS:
+    for header, phase in _PHASE_HEADERS.items():
         seconds = _parse_time_cell(cell(header), row_number=row_number, column=header)
         if seconds is not None:
-            phase_timestamps[header] = seconds
+            phase_timestamps[phase] = seconds
 
     return ExcelRow(
         row_number=row_number,

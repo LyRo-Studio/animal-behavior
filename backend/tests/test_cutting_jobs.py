@@ -28,17 +28,19 @@ from app.services.cutting_jobs import (
     SourceVideoUpload,
     create_cutting_job,
     get_cutting_job,
+    list_cutting_jobs,
 )
 from app.services.media_prober import MediaProbeError
 from app.services.timestamp_excel import TestRowNotFoundError
 
 _CONDITIONS = ("ME", "ZE")
-_PHASE_HEADERS = [f"{condition}_F{n}" for condition in _CONDITIONS for n in range(1, 9)]
-_HEADERS = ["Test ID", "Dog ID", "C1/C2", *_PHASE_HEADERS]
+_PHASES = [f"{condition}_F{n}" for condition in _CONDITIONS for n in range(1, 9)]
+# The sheet writes each phase's header phase first ("F1_ME" for ME_F1).
+_HEADERS = ["Test ID", "Dog ID", "C1/C2", *(f"F{phase[4:]}_{phase[:2]}" for phase in _PHASES)]
 
 
 def _workbook_bytes(
-    test_id="T001", *, reference_camera="C1", dog_id="Rex", phases=_PHASE_HEADERS
+    test_id="T001", *, reference_camera="C1", dog_id="Rex", phases=_PHASES
 ) -> bytes:
     """A workbook with one row for `test_id`, every header in `phases` given
     a distinct, valid (non-skipped) elapsed time, everything else blank
@@ -47,7 +49,7 @@ def _workbook_bytes(
     sheet = workbook.active
     sheet.append(_HEADERS)
     row = [test_id, dog_id, reference_camera]
-    for index, header in enumerate(_PHASE_HEADERS):
+    for index, header in enumerate(_PHASES):
         row.append(time(index + 1, 0, 0) if header in phases else None)
     sheet.append(row)
     buffer = BytesIO()
@@ -431,6 +433,29 @@ def test_get_cutting_job_returns_the_created_job(db_session, s3_client, media_pr
 def test_get_cutting_job_for_unknown_id_raises(db_session):
     with pytest.raises(CuttingJobNotFoundError):
         get_cutting_job(db_session, cutting_job_id=999999)
+
+
+def test_list_cutting_jobs_is_newest_first_and_bounded(
+    db_session, s3_client, media_prober, tmp_path
+):
+    """Ticket #101's history: every identity's jobs (shared, like analysis
+    history since ticket #72), capped so the listing can't grow without
+    bound (ENGINEERING-STANDARDS.md §5)."""
+    ids = [
+        create_cutting_job(
+            db_session,
+            requested_by_identity=identity,
+            test_id="T001",
+            excel_bytes=_workbook_bytes(reference_camera="C1"),
+            uploads=[_source_video(tmp_path, camera="C1", suffix=identity)],
+            s3=s3_client,
+            media_prober=media_prober,
+        ).id
+        for identity in ("alice", "bob", "carol")
+    ]
+
+    assert [job.id for job in list_cutting_jobs(db_session)] == ids[::-1]
+    assert [job.id for job in list_cutting_jobs(db_session, limit=2)] == [ids[2], ids[1]]
 
 
 # --- CUTTING_STARTED audit event (ticket #99) ---

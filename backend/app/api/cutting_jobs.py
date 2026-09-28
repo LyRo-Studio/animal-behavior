@@ -49,6 +49,7 @@ from app.services.cutting_jobs import (
     SourceVideoNotDecodableError,
     UnknownSourceUploadError,
     get_cutting_job,
+    list_cutting_jobs,
     submit_cutting_job,
     submit_cutting_job_batch,
 )
@@ -406,6 +407,13 @@ def create_cutting_job_batch_endpoint(
             for result in results
         ]
     )
+
+
+@router.get("", response_model=list[CuttingJobOut])
+def list_cutting_jobs_endpoint(db: Session = Depends(get_db)) -> list[CuttingJob]:
+    """Ticket #101: every cutting job, whoever ran it, newest first and
+    bounded — shared history like `GET /analyses` (ticket #72)."""
+    return list_cutting_jobs(db)
 
 
 @router.get("/{cutting_job_id}", response_model=CuttingJobOut)

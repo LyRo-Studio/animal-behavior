@@ -5,6 +5,7 @@ itself, independent of the request-orchestration tests in
 test_consolidations_api.py (which fake this runner entirely).
 """
 
+import hashlib
 import os
 import re
 import zipfile
@@ -26,6 +27,23 @@ _SYNTHETIC_EXPORT = (
 
 
 _RESULT_SHEETS = ["with_owner", "without_owner", "combined"]
+# Every sheet holding result values: a Behaviour group row above the header.
+_LEVEL_SHEETS = ["per_phase", *_RESULT_SHEETS]
+# test_id, dog_id and three level-specific columns lead every result sheet.
+_LEADING_COLUMNS = 5
+_WORKBOOK_SHEETS = [
+    *_LEVEL_SHEETS,
+    "README",
+    "details",
+    "denominators",
+    "variables",
+    "availability",
+    "phase_selection",
+    "warnings",
+    "excluded",
+]
+_ETHOGRAM = Path(__file__).parents[2] / "consolidation" / "20241218_Printbaar ethogram.xlsx"
+_DEFINITION = Path(__file__).parents[2] / "consolidation" / "ethogram_definition.json"
 
 
 @pytest.fixture(scope="module")
@@ -38,9 +56,13 @@ def synthetic_result(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def _sheet_rows(path: Path, sheet: str) -> list[dict[str, object]]:
-    """A sheet's rows as {header: value}."""
+    """A sheet's rows as {header: value}. On a result sheet, the header is
+    the second row, under the Behaviour group row."""
     workbook = openpyxl.load_workbook(path, read_only=True)
-    header, *rows = workbook[sheet].iter_rows(values_only=True)
+    rows = workbook[sheet].iter_rows(values_only=True)
+    if sheet in _LEVEL_SHEETS:
+        next(rows)
+    header, *rows = rows
     return [dict(zip(header, row, strict=True)) for row in rows]
 
 
@@ -56,18 +78,7 @@ def _phase_rows(path: Path) -> dict[tuple[str, int], dict[str, object]]:
 
 def test_one_upload_produces_every_consolidation_level(synthetic_result: Path) -> None:
     workbook = openpyxl.load_workbook(synthetic_result, read_only=True)
-    assert workbook.sheetnames == [
-        "per_phase",
-        *_RESULT_SHEETS,
-        "README",
-        "details",
-        "denominators",
-        "warnings",
-        "variables",
-        "availability",
-        "phase_selection",
-        "excluded",
-    ]
+    assert workbook.sheetnames == _WORKBOOK_SHEETS
     for sheet in _RESULT_SHEETS:
         assert list(_result_rows(synthetic_result, sheet)) == ["T901", "T902"]
     # One row per test and Observer phase, F8 never.
@@ -101,25 +112,20 @@ def test_each_level_sums_its_own_phases_before_dividing(synthetic_result: Path) 
         assert rows["T902"]["missing_phases"] is None
 
 
-def test_the_readme_is_english_and_names_the_source_file(synthetic_result: Path) -> None:
-    readme = "\n".join(str(row["README"]) for row in _sheet_rows(synthetic_result, "README"))
-    assert "with_owner: Observer phases 1-7" in readme
-    assert "without_owner: Observer phases 9-15" in readme
-    assert f"Source: {_SYNTHETIC_EXPORT.name}" in readme
-
-
 def test_phase_selection_lists_the_levels_each_source_row_was_used_in(
     synthetic_result: Path,
 ) -> None:
     levels_by_phase = {
-        (row["test_id"], row["fase"]): row["levels"]
+        (row["test_id"], row["observer_phase"]): row["levels"]
         for row in _sheet_rows(synthetic_result, "phase_selection")
     }
     assert levels_by_phase[("T901", 1)] == "per_phase, with_owner, combined"
     assert levels_by_phase[("T901", 9)] == "per_phase, without_owner, combined"
     # Owner departure (F8) is listed, but never used.
     assert levels_by_phase[("T901", 8)] is None
-    phase_nine = next(r for r in _sheet_rows(synthetic_result, "phase_selection") if r["fase"] == 9)
+    phase_nine = next(
+        r for r in _sheet_rows(synthetic_result, "phase_selection") if r["observer_phase"] == 9
+    )
     assert (phase_nine["condition"], phase_nine["phase"]) == ("ZE", "F1")
 
 
@@ -176,8 +182,12 @@ def test_every_header_in_the_real_export_layout_resolves_to_one_definition_entry
         if str(value).startswith("Total ")
     ]
 
-    used = [v["gedrag"] for v in _sheet_rows(synthetic_result, "variables")]
-    excluded = [e["bronkop"] for e in _sheet_rows(synthetic_result, "excluded")]
+    used = [v["variable"] for v in _sheet_rows(synthetic_result, "variables")]
+    excluded = [
+        e["header"]
+        for e in _sheet_rows(synthetic_result, "excluded")
+        if e["header"].startswith("Total ")
+    ]
     assert sorted(used + excluded) == sorted(headers)
     assert not [
         w for w in _sheet_rows(synthetic_result, "warnings") if w["type"] == "unknown_modifier"
@@ -306,9 +316,9 @@ def _details(path: Path, level: str, behaviour: str) -> dict[object, dict[str, o
     """The `details` rows of one level and behaviour, by Observer phase
     (per_phase) or as the level's single row (key None)."""
     return {
-        row["fase"]: row
+        row["observer_phase"]: row
         for row in _sheet_rows(path, "details")
-        if row["level"] == level and row["gedrag"] == behaviour
+        if row["level"] == level and row["variable"] == behaviour
     }
 
 
@@ -367,7 +377,7 @@ def test_out_of_sight_just_within_the_tolerance_above_duration_is_no_visible_tim
     assert _phase_rows(result)[("T901", 2)][_TAIL] is None
     assert _details(result, "per_phase", _TAIL)[2]["status"] == "no_visible_time"
     rounding = [w for w in _sheet_rows(result, "warnings") if w["type"] == "rounding"]
-    assert [(w["test_id"], w["fase"], w["variabele"]) for w in rounding] == [
+    assert [(w["test_id"], w["observer_phase"], w["subject"]) for w in rounding] == [
         ("T901", 2, "Tail position")
     ]
 
@@ -467,7 +477,7 @@ def test_missing_phases_are_listed_and_a_level_without_phases_has_no_row(tmp_pat
     combined = _result_rows(result, "combined")["T901"]
     assert (combined["missing_phases"], combined["status"]) == (f"ME F3, {_ZE}", "incomplete")
     no_phases = [w for w in _sheet_rows(result, "warnings") if w["type"] == "no_phases"]
-    assert [(w["test_id"], w["variabele"]) for w in no_phases] == [("T901", "without_owner")]
+    assert [(w["test_id"], w["subject"]) for w in no_phases] == [("T901", "without_owner")]
 
 
 def test_a_test_with_only_owner_departure_gets_no_rows_but_warnings(tmp_path: Path) -> None:
@@ -488,7 +498,7 @@ def test_a_test_with_only_owner_departure_gets_no_rows_but_warnings(tmp_path: Pa
         assert list(_result_rows(output_path, sheet)) == ["T901"]
     assert {test_id for test_id, _ in _phase_rows(output_path)} == {"T901"}
     no_phases = [w for w in _sheet_rows(output_path, "warnings") if w["type"] == "no_phases"]
-    assert [(w["test_id"], w["variabele"]) for w in no_phases] == [
+    assert [(w["test_id"], w["subject"]) for w in no_phases] == [
         ("T902", sheet) for sheet in _RESULT_SHEETS
     ]
 
@@ -796,7 +806,7 @@ def test_an_out_of_sight_without_any_exported_behaviour_of_its_group_is_ignored(
 
     row = _result_rows(result, "with_owner")["T901"]
     assert row["Total duration Panting <No Modifier>"] == pytest.approx(0.20)
-    reasons = {e["bronkop"]: e["reden"] for e in _sheet_rows(result, "excluded")}
+    reasons = {e["header"]: e["reason"] for e in _sheet_rows(result, "excluded")}
     assert "ignored" in reasons["Total duration Out of sight attention <No Modifier>"]
 
 
@@ -814,7 +824,7 @@ def test_an_unknown_modifier_warns_and_is_kept(tmp_path: Path) -> None:
     row = _result_rows(result, "with_owner")["T901"]
     assert row["Total duration Panting Test person"] == pytest.approx(0.20)
     warned = {
-        w["variabele"] for w in _sheet_rows(result, "warnings") if w["type"] == "unknown_modifier"
+        w["subject"] for w in _sheet_rows(result, "warnings") if w["type"] == "unknown_modifier"
     }
     assert warned == {"Total duration Panting Test person"}
 
@@ -833,9 +843,9 @@ def test_event_durations_are_excluded_and_only_their_frequency_reported(tmp_path
     assert "Total duration Yawning <No Modifier>" not in row
     # 2 per phase / 80 visible seconds per phase.
     assert row["Total number Yawning <No Modifier>"] == pytest.approx(0.025)
-    excluded = {e["bronkop"] for e in _sheet_rows(result, "excluded")}
+    excluded = {e["header"] for e in _sheet_rows(result, "excluded")}
     assert "Total duration Yawning <No Modifier>" in excluded
-    warnings = [w["variabele"] for w in _sheet_rows(result, "warnings")]
+    warnings = [w["subject"] for w in _sheet_rows(result, "warnings")]
     assert "Total duration Yawning <No Modifier>" in warnings
 
 
@@ -874,7 +884,7 @@ def test_first_contact_and_protocol_behaviours_are_excluded_by_name(tmp_path: Pa
         "status",
         "Total duration Panting <No Modifier>",
     ]
-    reasons = {e["bronkop"]: e["reden"] for e in _sheet_rows(result, "excluded")}
+    reasons = {e["header"]: e["reason"] for e in _sheet_rows(result, "excluded")}
     assert "first-contact" in reasons["Total number First contact with TP <No Modifier>"]
     assert "protocol" in reasons["Total duration Standing bij TP <No Modifier>"]
 
@@ -972,10 +982,10 @@ def test_a_level_without_any_of_a_groups_scored_phases_is_blank_with_a_warning(
     assert _result_rows(result, "with_owner")["T901"][_PANTING] == pytest.approx(0.20)
     assert _result_rows(result, "without_owner")["T901"][_DISTANCE_TP] == 0
     no_phases = [w for w in _sheet_rows(result, "warnings") if w["type"] == "no_phases"]
-    assert [(w["test_id"], w["variabele"]) for w in no_phases] == [
+    assert [(w["test_id"], w["subject"]) for w in no_phases] == [
         ("T901", "Distance of the dog to TP")
     ]
-    assert "with_owner" in str(no_phases[0]["melding"])
+    assert "with_owner" in str(no_phases[0]["message"])
 
 
 def test_missing_phases_are_judged_against_each_groups_scored_phases(tmp_path: Path) -> None:
@@ -1050,11 +1060,11 @@ def test_a_nonzero_value_in_an_unscored_phase_warns_and_changes_no_result(
     assert _phase_rows(noisy) == _phase_rows(clean)
     assert _sheet_rows(noisy, "denominators") == _sheet_rows(clean, "denominators")
     warned = [w for w in _sheet_rows(noisy, "warnings") if w["type"] == "not_scored"]
-    assert [(w["test_id"], w["fase"], w["variabele"]) for w in warned] == [
+    assert [(w["test_id"], w["observer_phase"], w["subject"]) for w in warned] == [
         ("T901", 2, _DISTANCE_TP),
         ("T901", 12, distance_count),
     ]
-    assert "ME F2" in str(warned[0]["melding"])
+    assert "ME F2" in str(warned[0]["message"])
     assert not [w for w in _sheet_rows(clean, "warnings") if w["type"] == "not_scored"]
 
 
@@ -1123,6 +1133,233 @@ def test_not_exported_and_measured_zero_are_told_apart(tmp_path: Path) -> None:
     assert "Standing by TP" not in status
 
 
+# A complete, self-explanatory result workbook (ticket #154).
+
+
+def test_the_readme_explains_every_status_the_source_and_the_definition(
+    synthetic_result: Path,
+) -> None:
+    readme = "\n".join(str(row["README"]) for row in _sheet_rows(synthetic_result, "README"))
+    for status in (
+        "ok",
+        "incomplete",
+        "no_visible_time",
+        "not_scored",
+        "no_phases",
+        "not_exported",
+        "exported_all_zero",
+        "exported_nonzero",
+    ):
+        assert re.search(rf"^{status}: ", readme, re.MULTILINE), status
+    assert "measured zero" in readme
+    assert f"Source file: {_SYNTHETIC_EXPORT.name}" in readme
+    assert hashlib.sha256(_SYNTHETIC_EXPORT.read_bytes()).hexdigest() in readme
+    assert _ETHOGRAM.name in readme
+    assert hashlib.sha256(_ETHOGRAM.read_bytes()).hexdigest() in readme
+    assert hashlib.sha256(_DEFINITION.read_bytes()).hexdigest() in readme
+
+
+def test_result_columns_follow_the_ethogram_then_modifiers_then_duration_before_count(
+    tmp_path: Path,
+) -> None:
+    """Exported in a scrambled order. Ethogram order: Panting (32),
+    Barking (34), Obstructing TP (78), Tail tucked (81)."""
+    barking = "Total {} Barking {}"
+    columns = [
+        "Total number Tail tucked <No Modifier>",
+        barking.format("number", "Familiar person"),
+        "Total duration Obstructing test person <No Modifier>",
+        barking.format("duration", "Test person"),
+        "Total duration Tail tucked <No Modifier>",
+        barking.format("number", "Test person"),
+        "Total duration Panting <No Modifier>",
+        barking.format("duration", "Familiar person"),
+        "Total duration Out of sight tail <No Modifier>",
+        "Total duration Out of sight stress-related <No Modifier>",
+    ]
+    result = _consolidate(tmp_path, dict.fromkeys(columns, 0))
+
+    expected = [
+        "Total duration Panting <No Modifier>",
+        # Familiar person is exported before Test person.
+        barking.format("duration", "Familiar person"),
+        barking.format("number", "Familiar person"),
+        barking.format("duration", "Test person"),
+        barking.format("number", "Test person"),
+        "Total duration Obstructing test person <No Modifier>",
+        "Total duration Tail tucked <No Modifier>",
+        "Total number Tail tucked <No Modifier>",
+    ]
+    for sheet in _LEVEL_SHEETS:
+        assert list(_sheet_rows(result, sheet)[0])[_LEADING_COLUMNS:] == expected
+    assert [v["variable"] for v in _sheet_rows(result, "variables")] == expected
+
+    # A merged, coloured Behaviour group row above the headers.
+    sheet = openpyxl.load_workbook(result)["with_owner"]
+    merged = sorted(str(r) for r in sheet.merged_cells.ranges)
+    # Obstructing TP, the only stress-related column, needs no merge.
+    assert merged == ["F1:J1", "L1:M1"]
+    groups = {cell.column_letter: cell.value for cell in sheet[1] if cell.value}
+    assert groups == {
+        "F": "Vocalisation by the dog",
+        "K": "Stress-related behaviours by the dog",
+        "L": "Tail position",
+    }
+    fills = {sheet[f"{letter}1"].fill.fgColor.rgb for letter in "FKL"}
+    assert len(fills) == 3
+    assert sheet.freeze_panes == "F3"
+
+
+def test_a_blank_stays_blank_and_a_zero_stays_zero_after_an_excel_round_trip(
+    tmp_path: Path,
+) -> None:
+    result = _consolidate(
+        tmp_path,
+        {_TAIL: 0, _OOS_TAIL: lambda p: 100 if p == 2 else 20, _PANTING: 0, _DISTANCE_TP: 0},
+    )
+    workbook = openpyxl.load_workbook(result)
+    workbook.save(tmp_path / "round_trip.xlsx")
+    sheet = openpyxl.load_workbook(tmp_path / "round_trip.xlsx")["per_phase"]
+
+    header = [cell.value for cell in sheet[2]]
+    tail, panting = header.index(_TAIL) + 1, header.index(_PANTING) + 1
+    by_phase = {sheet.cell(r, 3).value: r for r in range(3, sheet.max_row + 1)}
+    blank = sheet.cell(by_phase[2], tail)
+    zero = sheet.cell(by_phase[2], panting)
+    assert blank.value is None
+    # Distance to TP isn't scored in F2, but is in F1.
+    distance = header.index(_DISTANCE_TP) + 1
+    assert sheet.cell(by_phase[2], distance).value is None
+    assert sheet.cell(by_phase[1], distance).value == 0
+    assert zero.value == 0 and zero.data_type == "n"
+    assert sheet.cell(by_phase[1], tail).value == 0
+    # Plain fractions: no percentage formatting on any value.
+    assert {sheet.cell(r, c).number_format for r in (3, 4) for c in (tail, panting)} == {"General"}
+
+
+def test_variables_describe_every_result_column(tmp_path: Path) -> None:
+    result = _consolidate(tmp_path, {_TAIL: 20, _TAIL_COUNT: 1, _OOS_TAIL: 20, _PANTING: 20})
+
+    variables = {v["variable"]: v for v in _sheet_rows(result, "variables")}
+    assert list(variables) == list(_sheet_rows(result, "with_owner")[0])[_LEADING_COLUMNS:]
+    assert list(variables[_TAIL]) == [
+        "variable",
+        "behaviour",
+        "modifier",
+        "code",
+        "group",
+        "out_of_sight",
+        "state_event",
+        "statistic",
+        "value",
+        "scored_phases",
+        "source_column",
+        "out_of_sight_column",
+    ]
+    tail = variables[_TAIL_COUNT]
+    assert (tail["behaviour"], tail["modifier"], tail["group"]) == (
+        "Tail tucked",
+        "<No Modifier>",
+        "Tail position",
+    )
+    assert (tail["out_of_sight"], tail["state_event"], tail["statistic"]) == (
+        "Out of sight tail",
+        "State",
+        "count",
+    )
+    assert tail["value"] == "frequency per visible second"
+    assert variables[_TAIL]["value"] == "fraction of visible time"
+    assert variables[_PANTING]["out_of_sight"] is None
+    assert variables[_PANTING]["scored_phases"] == "F1-F7"
+
+
+def test_phase_selection_lists_every_source_row(tmp_path: Path) -> None:
+    result = _consolidate(tmp_path, {_PANTING: 20}, tests={"T901": "D901", "T902": "D902"})
+
+    rows = _sheet_rows(result, "phase_selection")
+    assert list(rows[0]) == [
+        "observation",
+        "test_id",
+        "dog_id",
+        "observer_phase",
+        "condition",
+        "phase",
+        "owner_present",
+        "source_row",
+        "levels",
+    ]
+    # Two tests x 15 phases, on source rows 2-31, F8 included but unused.
+    assert [r["source_row"] for r in rows] == list(range(2, 32))
+    f8 = rows[7]
+    assert (f8["observation"], f8["observer_phase"], f8["owner_present"], f8["levels"]) == (
+        "T901_synthetic_F8",
+        8,
+        False,
+        None,
+    )
+
+
+def test_details_hold_every_numerator_denominator_and_value(tmp_path: Path) -> None:
+    result = _consolidate(tmp_path, {_TAIL: 20, _TAIL_COUNT: 2, _OOS_TAIL: 20})
+
+    rows = [r for r in _sheet_rows(result, "details") if r["level"] == "with_owner"]
+    assert list(rows[0]) == [
+        "level",
+        "test_id",
+        "dog_id",
+        "observer_phase",
+        "group",
+        "variable",
+        "behaviour",
+        "modifier",
+        "statistic",
+        "behaviour_duration_s",
+        "count",
+        "duration_s",
+        "out_of_sight_s",
+        "visible_s",
+        "phases_used",
+        "fraction",
+        "percentage",
+        "frequency_per_s",
+        "frequency_per_min",
+        "status",
+    ]
+    by_variable = {r["variable"]: r for r in rows}
+    duration, count = by_variable[_TAIL], by_variable[_TAIL_COUNT]
+    # Seven ME phases: 140 s of 700 s, 140 s out of sight, 14 counts.
+    assert [duration[c] for c in ("behaviour_duration_s", "duration_s", "out_of_sight_s")] == [
+        140,
+        700,
+        140,
+    ]
+    assert (duration["visible_s"], duration["status"], duration["dog_id"]) == (560, "ok", "D901")
+    assert duration["fraction"] == pytest.approx(0.25)
+    assert duration["percentage"] == pytest.approx(25)
+    assert count["count"] == 14
+    assert count["frequency_per_s"] == pytest.approx(14 / 560)
+    assert count["frequency_per_min"] == pytest.approx(1.5)
+    levels = {r["level"] for r in _sheet_rows(result, "details")}
+    assert levels == {"per_phase", *_RESULT_SHEETS}
+
+
+def test_every_warning_and_exclusion_gives_its_reason(synthetic_result: Path) -> None:
+    warnings = _sheet_rows(synthetic_result, "warnings")
+    excluded = _sheet_rows(synthetic_result, "excluded")
+    assert list(warnings[0]) == ["type", "test_id", "observer_phase", "subject", "message"]
+    assert list(excluded[0]) == ["source_column", "header", "reason"]
+    assert all(w["type"] and w["subject"] and w["message"] for w in warnings)
+    assert all(e["source_column"] and e["header"] and e["reason"] for e in excluded)
+    # Every export column that never enters a result is on record.
+    never_read = {e["header"]: e["reason"] for e in excluded if "Never read" in e["reason"]}
+    assert set(never_read) == {
+        "Independent Variables Statistics Behaviors Modifiers",
+        "Result Containers",
+        "Fase",
+        "Geslacht hond",
+    }
+
+
 @pytest.mark.real_consolidation_fixture
 def test_real_observer_export_succeeds(tmp_path: Path) -> None:
     """Opt-in: exercises the real pipeline against a real Observer export.
@@ -1155,4 +1392,4 @@ def test_real_observer_export_succeeds(tmp_path: Path) -> None:
     assert output_path.is_file()
     assert output_path.stat().st_size > 0
     result_workbook = openpyxl.load_workbook(output_path, read_only=True)
-    assert {"with_owner", "without_owner", "combined", "details"} <= set(result_workbook.sheetnames)
+    assert result_workbook.sheetnames == _WORKBOOK_SHEETS

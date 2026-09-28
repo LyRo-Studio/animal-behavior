@@ -30,13 +30,17 @@ function createTestRouter() {
 }
 
 async function mountView(id: string | number = 42) {
+  return (await mountViewWithRouter(id)).wrapper
+}
+
+async function mountViewWithRouter(id: string | number = 42) {
   const router = createTestRouter()
   router.push(`/analyses/${id}`)
   await router.isReady()
 
   const wrapper = mount(AnalysisView, { global: { plugins: [router] } })
   await flushPromises()
-  return wrapper
+  return { wrapper, router }
 }
 
 function job(overrides: Record<string, unknown> = {}) {
@@ -197,6 +201,40 @@ describe('AnalysisView', () => {
     const summary = wrapper.find('[data-testid="progress-summary"]').text()
     expect(summary).toContain('2/3 videos')
     expect(summary).toContain('T001_C2_ME_F2.mp4')
+  })
+
+  // Vue Router reuses the mounted view when only `:id` changes.
+  it('switches to another analysis when the route goes straight to it', async () => {
+    let finishOldPoll: (value: unknown) => void = () => {}
+    getAnalysisMock
+      .mockResolvedValueOnce(job({ id: 42, testIds: ['T001'], status: 'running' }))
+      .mockReturnValueOnce(new Promise((resolve) => (finishOldPoll = resolve)))
+      .mockResolvedValue(job({ id: 43, testIds: ['T002'], status: 'running' }))
+    const { wrapper, router } = await mountViewWithRouter(42)
+    await vi.advanceTimersByTimeAsync(2000)
+
+    await router.push('/analyses/43')
+    await flushPromises()
+    finishOldPoll(job({ id: 42, testIds: ['T001'], status: 'running' }))
+    await flushPromises()
+
+    expect(wrapper.find('h2').text()).toBe('Test T002')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(getAnalysisMock.mock.calls.map(([id]) => id)).toEqual([42, 42, 43, 43])
+  })
+
+  it("drops the previous analysis's cancel error when switching to another", async () => {
+    getAnalysisMock.mockImplementation(async (id: number) => job({ id, status: 'queued' }))
+    cancelAnalysisMock.mockRejectedValue(new Error('Only a queued analysis can be cancelled.'))
+    const { wrapper, router } = await mountViewWithRouter(42)
+    await wrapper.find('[data-testid="cancel"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Only a queued analysis can be cancelled.')
+
+    await router.push('/analyses/43')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('Only a queued analysis can be cancelled.')
   })
 
   it('stops polling once the job reaches a terminal state', async () => {
