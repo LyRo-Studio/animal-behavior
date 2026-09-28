@@ -58,6 +58,16 @@ Uploading a Test's C1 and/or C2 source video (plus the matching row of its times
 **Cutting, Feature C:**
 Slicing an ingested source video into its Cuts, via `assist` (the tool this app wraps, vendored into `cutting-worker/assist/` since ticket #112), driven by one Test's phase timestamps. The unit of work is a **CuttingJob** — one Test, mirroring `AnalysisJob`'s role for analysis. See "Video cutting + S3 ingestion (Feature C)" below.
 
+**Cancel (a CuttingJob)**:
+Stopping a `queued` CuttingJob before the cutting-worker claims it; its status becomes `cancelled`. A `running`, `succeeded` or `failed` job can't be cancelled. Anyone may cancel any job, like an analysis.
+_Avoid_: "cancel" for getting rid of a failed job's Retained source — that's Discard source. Issue #93 used "cancel" for both.
+
+**Retained source**:
+A failed CuttingJob's uploaded source video(s), kept on the app's local disk so the job can be retried without a multi-GB re-upload. Counts toward the upload storage cap until discarded.
+
+**Discard source**:
+Deleting the Retained source of a failed CuttingJob, or of a cancelled one whose source couldn't be deleted at cancel time. The job's status doesn't change: a failed job's history still shows that it ran and failed.
+
 **Observer export**:
 The raw `Results` sheet of an Observer XT export: one row per Observation (one Test in one Observer phase), one column per exported statistic (`Duration`, `Total duration <behaviour> <modifier>`, `Total number <behaviour> <modifier>`). The only input a Consolidation needs.
 _Avoid_: "Results (2)", "Results (REL)" as required inputs — those were hand-made working copies.
@@ -1958,7 +1968,8 @@ didn't pin down exactly:
   nor a cutting-worker exist yet to do either, so nothing currently deletes
   an upload once a `CuttingJob` is created from it (`discard_upload` is
   exposed for that future step to call). Out of scope for this ticket's own
-  acceptance criteria.
+  acceptance criteria. *Design agreed 2026-09-28:* see "Cutting job cancel and
+  Discard source" below.
 - **Audit log events not wired up here:** issue #93 names
   `CUTTING_STARTED`/`CUTTING_COMPLETED`/`CUTTING_FAILED` events, but this
   ticket's own acceptance criteria don't ask for them (mirrors ticket #45,
@@ -2449,6 +2460,72 @@ Implementation-time judgment calls:
   and `services/`, and a composable is none of those. `StatusView`'s
   health-check retry loop has a different shape (no id, no terminal
   state) and keeps its own.
+
+**Cutting job cancel and Discard source (issue #167) — design agreed
+2026-09-28, not yet built.** Closes the "No cleanup/retry/cancel path yet" gap left by ticket #94.
+Grilled against issue #93, which used "cancel" for two different things:
+stopping a queued job, and letting go of a failed job's kept source (story
+14: "keep my uploaded source video around until I explicitly retry or
+cancel"). They're now two actions — see **Cancel (a CuttingJob)**, **Retained
+source** and **Discard source** above.
+
+- **Only a `queued` job can be cancelled**, as with analyses (#44). A
+  `running` job is left alone: Cuts upload phase by phase as they finish
+  (#98), so interrupting a re-cut would leave `cuts/<Test>/` half new, half
+  old.
+- **A failed job is never cancelled; its source is discarded instead.** Its
+  status stays `failed`, so the history still shows that it ran and failed.
+- **Scope:** Cancel and Discard source together. Retry of a failed job is a
+  separate follow-up; it needs its own design (same row or a new one,
+  re-reading the Excel row, re-cut confirmation).
+- **Audit:** a new `CUTTING_CANCELLED` action, recorded with the canceller's
+  verified identity, like `ANALYSIS_CANCELLED`.
+- **Anyone may cancel any job:** the cutting history is shared (#101) and
+  there's no per-person authorization (ADR-0004).
+- **One job at a time:** a batch is just independent rows (#97), so there's
+  no "cancel the whole batch".
+- **Cancelling also deletes the job's source.** `cancelled` is final and
+  Retry is only for failed jobs, so nothing could use it again.
+- **Discard source is audited** as a new `CUTTING_SOURCE_DISCARDED` action,
+  with the discarder's verified identity: it deletes data belonging to a
+  shared job. The worker's own delete after a success isn't audited
+  separately; `CUTTING_COMPLETED` covers it.
+- **The database records whether a source is retained.** Every delete
+  (worker success, cancel, discard) clears `c1_source_path`/
+  `c2_source_path`, and the API exposes `source_retained`. Until now the
+  worker left the paths set after deleting the files, so a migration clears
+  them on existing succeeded jobs. Reading a job never touches the disk.
+  Discarding a directory that's already gone still succeeds, so a failed
+  job whose files vanished some other way can still be cleaned up.
+- **One upload feeds exactly one job.** The backend refuses to create a job
+  from an upload another job already references, naming the upload. Until
+  now only the frontend avoided sharing (#100 forgets an upload id once a
+  job is created from it), so deleting one job's source could remove
+  another's. Retry will reuse the failed job's own row, so the rule doesn't
+  get in its way.
+- **UI, on `CuttingJobView` only:** Cancel while `queued`, with no
+  confirmation, like `AnalysisView`. Discard source while `failed` with a
+  retained source, behind an inline second click ("Discard permanently?" →
+  Discard / Keep), like consolidation delete, because it throws away a
+  multi-GB upload.
+- **Paths are cleared only once the directory is really gone**, so
+  `source_retained` never lies. A failed Discard source returns an error and
+  the job stays retained, ready to try again. A Cancel still succeeds when
+  its delete fails (stopping the job is the point), and the cancelled job
+  keeps a Retained source, which Discard source then also accepts. The
+  worker's delete after a success follows the same rule, replacing its
+  silent `ignore_errors`.
+- **A cancelled job's outputs are left `pending`**, and `CuttingJobView`
+  hides the per-phase progress for a cancelled job, as `AnalysisView` hides
+  its summary. `finished_at` is set at cancel time, as for analyses.
+- **Out of scope, filed separately:** Retry of a failed job (#170), and
+  cleanup of uploads that never became a job (#171; they count toward the
+  storage cap too).
+- **Issues:** parent #167 with two `ready-for-agent` slices, Cancel (#168: endpoint,
+  audit, deleting the source, `source_retained` and its migration, the
+  one-upload-one-job rule, the button) then Discard source (endpoint, audit,
+  button with confirmation; #169, blocked by #168). The two out-of-scope items
+  are `needs-triage` follow-ups.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
