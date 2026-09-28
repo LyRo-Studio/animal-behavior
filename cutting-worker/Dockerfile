@@ -31,15 +31,20 @@ RUN pip install --no-cache-dir -r requirements-assist.txt
 
 # Only the FastAPI-free slice of backend/app: core config, DB session/base,
 # ORM models, and the specific service modules the cutting-worker calls
-# through (s3_client, cutting_jobs for the job-state transitions). Never
+# through (s3_client, cutting_jobs for the job-state transitions, and what
+# cutting_jobs itself imports: audit_log, media_browser). Never
 # app/api or app/main — those pull in FastAPI, which this image never
 # installs. Mirrors worker/Dockerfile's own COPY boundary.
+# tests/test_dockerfile.py fails when the worker starts importing a backend
+# module this list doesn't copy.
 COPY backend/app/__init__.py ./app/__init__.py
 COPY backend/app/core ./app/core
 COPY backend/app/db ./app/db
 COPY backend/app/models ./app/models
 COPY backend/app/services/__init__.py ./app/services/__init__.py
 COPY backend/app/services/s3_client.py ./app/services/s3_client.py
+COPY backend/app/services/audit_log.py ./app/services/audit_log.py
+COPY backend/app/services/media_browser.py ./app/services/media_browser.py
 COPY backend/app/services/media_prober.py ./app/services/media_prober.py
 COPY backend/app/services/cutting_uploads.py ./app/services/cutting_uploads.py
 COPY backend/app/services/timestamp_excel.py ./app/services/timestamp_excel.py
