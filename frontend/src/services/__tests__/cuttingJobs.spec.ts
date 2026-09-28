@@ -3,10 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   cancelCuttingJob,
   CuttingJobNotFoundError,
+  CutsAlreadyExistError,
   discardCuttingJobSource,
   forgetSourceVideoUpload,
   getCuttingJob,
   listCuttingJobs,
+  retryCuttingJob,
   submitCuttingJobBatch,
   uploadSourceVideo,
 } from '../cuttingJobs'
@@ -559,5 +561,82 @@ describe("discarding a cutting job's source", () => {
     await expect(discardCuttingJobSource(12)).rejects.toThrow(
       "The source video couldn't be deleted. Try discarding it again.",
     )
+  })
+})
+
+// Issue #170: POST /cutting-jobs/{id}/retry puts a failed job back in the
+// queue, optionally with a corrected timestamp workbook.
+describe('retrying a cutting job', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('posts the retry and returns the queued job', async () => {
+    const fetchMock = vi.fn<(url: string, init: RequestInit) => Promise<Response>>(async () =>
+      json(200, { ...JOB_RESPONSE, status: 'queued' }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const job = await retryCuttingJob(12)
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toMatch(/\/cutting-jobs\/12\/retry$/)
+    expect(init.method).toBe('POST')
+    const body = init.body as FormData
+    expect(body.get('excel')).toBeNull()
+    expect(body.get('confirm_overwrite')).toBe('false')
+    expect(job.status).toBe('queued')
+  })
+
+  it('sends a corrected workbook and the re-cut confirmation when given', async () => {
+    const fetchMock = vi.fn<(url: string, init: RequestInit) => Promise<Response>>(async () =>
+      json(200, { ...JOB_RESPONSE, status: 'queued' }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const excel = new File(['xlsx'], 'timestamps.xlsx')
+
+    await retryCuttingJob(12, { excel, confirmOverwrite: true })
+
+    const body = fetchMock.mock.calls[0][1].body as FormData
+    expect((body.get('excel') as File).name).toBe('timestamps.xlsx')
+    expect(body.get('confirm_overwrite')).toBe('true')
+  })
+
+  it('says so distinctly when the Test already has Cuts', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        json(409, {
+          detail: 'Cuts already exist for T001. Confirm to overwrite them.',
+          code: 'cuts_already_exist',
+        }),
+      ),
+    )
+
+    const error = await retryCuttingJob(12).catch((err: unknown) => err)
+
+    expect(error).toBeInstanceOf(CutsAlreadyExistError)
+    expect((error as Error).message).toBe('Cuts already exist for T001. Confirm to overwrite them.')
+  })
+
+  it("passes on the backend's reason when the job can't be retried", async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => json(409, { detail: 'Only a failed cutting job can be retried.' })),
+    )
+
+    const error = await retryCuttingJob(12).catch((err: unknown) => err)
+
+    expect(error).not.toBeInstanceOf(CutsAlreadyExistError)
+    expect((error as Error).message).toBe('Only a failed cutting job can be retried.')
+  })
+
+  it('says so distinctly when there is no such job, as fetching one does', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => json(404, { detail: 'Cutting job not found.' })),
+    )
+
+    await expect(retryCuttingJob(999)).rejects.toBeInstanceOf(CuttingJobNotFoundError)
   })
 })

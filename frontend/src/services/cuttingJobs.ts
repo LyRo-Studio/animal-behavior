@@ -419,9 +419,14 @@ export async function submitCuttingJobBatch(
 // other failure there's nothing worth retrying.
 export class CuttingJobNotFoundError extends Error {}
 
-// One cutting job from `url`: a 404 becomes CuttingJobNotFoundError, any other
-// failure the backend's detail (or `fallback`). Shared by fetching,
-// cancelling and discarding a source, like analyses.ts's requestAnalysisJob.
+// Issue #170: a retry refused because the Test already has Cuts (#96), so the
+// researcher can confirm overwriting them. Its message is the backend's detail.
+export class CutsAlreadyExistError extends Error {}
+
+// One cutting job from `url`: a 404 becomes CuttingJobNotFoundError, a "Cuts
+// already exist" rejection CutsAlreadyExistError, and any other failure the
+// backend's detail (or `fallback`). Shared by fetching, cancelling, discarding
+// a source and retrying, like analyses.ts's requestAnalysisJob.
 async function requestCuttingJob(
   url: string,
   init: RequestInit | undefined,
@@ -432,7 +437,11 @@ async function requestCuttingJob(
     throw new CuttingJobNotFoundError('Cutting job not found.')
   }
   if (!response.ok) {
-    throw await errorFromResponse(response, fallback)
+    const body = await response.json().catch(() => null)
+    const detail = typeof body?.detail === 'string' ? body.detail : fallback
+    throw body?.code === CUTS_ALREADY_EXIST_CODE
+      ? new CutsAlreadyExistError(detail)
+      : new Error(detail)
   }
   return toCuttingJob(await response.json())
 }
@@ -464,6 +473,31 @@ export async function discardCuttingJobSource(id: number): Promise<CuttingJob> {
     `${API_BASE_URL}/cutting-jobs/${id}/discard-source`,
     { method: 'POST' },
     "Failed to discard the cutting job's source.",
+  )
+}
+
+export interface RetryCuttingJobOptions {
+  // A corrected timestamp workbook: its row for this Test replaces the job's
+  // stored timestamps. Without one, the stored timestamps are cut again.
+  excel?: File
+  // Set on the follow-up to a CutsAlreadyExistError, once the researcher has
+  // confirmed overwriting the Test's Cuts.
+  confirmOverwrite?: boolean
+}
+
+// Issue #170: put a failed job back in the queue, cutting its Retained source
+// again. Resolves with the queued job.
+export async function retryCuttingJob(
+  id: number,
+  { excel, confirmOverwrite = false }: RetryCuttingJobOptions = {},
+): Promise<CuttingJob> {
+  const formData = new FormData()
+  if (excel) formData.append('excel', excel)
+  formData.append('confirm_overwrite', String(confirmOverwrite))
+  return requestCuttingJob(
+    `${API_BASE_URL}/cutting-jobs/${id}/retry`,
+    { method: 'POST', body: formData },
+    'Failed to retry the cutting job.',
   )
 }
 

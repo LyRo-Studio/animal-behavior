@@ -62,6 +62,9 @@ Slicing an ingested source video into its Cuts, via `assist` (the tool this app 
 Stopping a `queued` CuttingJob before the cutting-worker claims it; its status becomes `cancelled`. A `running`, `succeeded` or `failed` job can't be cancelled. Anyone may cancel any job, like an analysis.
 _Avoid_: "cancel" for getting rid of a failed job's Retained source — that's Discard source. Issue #93 used "cancel" for both.
 
+**Retry (a CuttingJob)**:
+Putting a failed CuttingJob back in the queue to cut its Retained source again, optionally with a corrected timestamp workbook. The same job row is reused. A cancelled job is never retried.
+
 **Retained source**:
 A CuttingJob's uploaded source video(s) while they're still on the app's local disk. A queued or running job needs its source; a failed job keeps it deliberately, so it can be retried without a multi-GB re-upload; any other job keeps one only when deleting it failed. Counts toward the upload storage cap until deleted.
 
@@ -2521,7 +2524,8 @@ source** and **Discard source** above.
 - **A cancelled job's outputs are left `pending`**, and `CuttingJobView`
   hides the per-phase progress for a cancelled job, as `AnalysisView` hides
   its summary. `finished_at` is set at cancel time, as for analyses.
-- **Out of scope, filed separately:** Retry of a failed job (#170), and
+- **Out of scope, filed separately:** Retry of a failed job (#170, since
+  built; see below), and
   cleanup of uploads that never became a job (#171; they count toward the
   storage cap too).
 - **Spec-time details (#167):** both audit rows are written by the service
@@ -2703,6 +2707,65 @@ source button on `CuttingJobView`. Implementation-time judgment calls:
 - **No dedicated test for migration 0019,** like 0018: without the enum
   value the best-effort audit write would drop the row, and the API tests
   would fail.
+
+**Retry a failed cutting job (issue #170) — design agreed 2026-09-28, then
+built.** The follow-up #167 split out. #167 had already settled that only a
+failed job is retried and that it reuses the job's own row. The four open
+questions were answered with the user:
+
+- **Timestamps:** a retry cuts the stored `phase_timestamps` again by
+  default. A corrected workbook may be attached; its row for this Test then
+  replaces the stored reference camera and timestamps, with the same checks
+  as a new job (missing row, malformed cells, a single camera that isn't the
+  reference camera).
+- **Re-cut confirmation:** the same as a new job (#96): a Test with Cuts
+  answers 409 `cuts_already_exist` until `confirm_overwrite` is sent. The
+  failed attempt's own Cuts trigger it too, since S3 can't tell whose they
+  are.
+- **Outputs and Cuts:** the job is reset in place: `queued`, `started_at`
+  and `finished_at` cleared, and the outputs rebuilt as `pending` from the
+  (possibly new) timestamps. Earlier Cuts are overwritten phase by phase as
+  the re-cut uploads; nothing is deleted up front.
+- **Audit:** a new `CUTTING_RETRIED` action (migration 0020) with the
+  retrier's verified identity, written by the service in the same commit.
+  `requested_by_identity` keeps naming whoever started the job. Anyone may
+  retry.
+
+Implementation-time judgment calls:
+
+- **`POST /cutting-jobs/{id}/retry`,** multipart with an optional `excel`
+  and `confirm_overwrite`. It locks the row, like cancel and Discard source,
+  so none of the three can interleave. Any other status is a 409 ("Only a
+  failed cutting job can be retried."), an unknown id a 404, and a workbook
+  problem the same 400 as creating a job.
+- **Every camera the job cut must still have its source.** The cameras cut
+  are those with outputs. If any of them has no path left (discarded, or
+  one camera's delete succeeded), the retry is a 409 ("This cutting job's
+  source is no longer kept. Upload the video again to cut it again.")
+  rather than quietly cutting less.
+- **The source isn't probed or collision-checked again:** both passed when
+  the job was created and the file hasn't changed. The disk isn't checked
+  either; a set path means the file is there (#172).
+- **It shares `POST /cutting-jobs`' rate limit,** under the same key: a
+  retry queues a whole re-cut, as expensive as a new job.
+- **A retried job keeps its `created_at`,** and the worker claims the
+  oldest queued job first, so a retry runs ahead of jobs queued after the
+  original. Accepted: that job already waited its turn once.
+- **The failed attempt's per-phase failure reasons are gone** once the
+  outputs are rebuilt. Its `CUTTING_FAILED` audit row still records the
+  failure.
+- **Old outputs are deleted and flushed before the new ones are added.**
+  Otherwise the unit of work inserts first and trips the (job, camera,
+  condition, phase) unique constraint. `create_cutting_job` and the retry
+  share `_expected_outputs`.
+- **Frontend:** `CuttingJobView` shows a Retry panel while a failed job's
+  source is retained, with an optional corrected-workbook picker. The
+  shared `requestCuttingJob` now throws `CutsAlreadyExistError` for a
+  `cuts_already_exist` rejection, and the view answers it with the upload
+  page's `ConfirmDialog` ("Re-cut and overwrite" / "Keep existing Cuts"),
+  keeping the page behind it inert. The returned queued job replaces the
+  shown one through `usePolledJob`'s `replace`, which starts polling again.
+- **No dedicated test for migration 0020,** like 0018 and 0019.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
