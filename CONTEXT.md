@@ -2547,9 +2547,10 @@ time judgment calls:
   per upload, right after the filename check and before the ffprobe and S3
   checks, since it's a single cheap query.
 - **"Already used" means a job row still holds the path**, in either
-  column, whatever that job's status. A job whose source has been deleted
-  has its path cleared (#172), and its upload directory is gone, so the
-  upload is then reported as unknown instead.
+  column, whatever that job's status. A succeeded job's upload directory is
+  deleted by the cutting-worker, so resubmitting that upload is reported as
+  unknown before this check runs. Once #172 lands (PR #176), every delete
+  also clears the path, so a deleted source never counts as used.
 - **409, naming the camera, the filename and the other job**
   ("The C1 upload T001_C1_source.mp4 is already used by cutting job 12.
   Upload the video again to cut it again."). It's a conflict with existing
