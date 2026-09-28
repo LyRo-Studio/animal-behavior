@@ -2529,11 +2529,11 @@ source** and **Discard source** above.
   delete is simulated in tests by swapping the one shared source-delete
   function, since tests run as root and file permissions can't block a
   delete.
-- **Issues:** parent #167 with two `ready-for-agent` slices, Cancel (#168: endpoint,
-  audit, deleting the source, `source_retained` and its migration, the
-  one-upload-one-job rule, the button) then Discard source (endpoint, audit,
-  button with confirmation; #169, blocked by #168). The two out-of-scope items
-  are `needs-triage` follow-ups.
+- **Issues:** parent spec #167, sliced into #172 (`source_retained`, the
+  shared delete, the worker change, clearing succeeded jobs' paths) and #173
+  (one upload feeds one job), which can run in parallel, then #168 (Cancel)
+  and #169 (Discard source). Each slice ships its own migration. The two
+  out-of-scope items are `needs-triage` follow-ups.
 
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
