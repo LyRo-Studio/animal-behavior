@@ -2345,6 +2345,13 @@ Implementation-time judgment calls:
   is one more `create-cutting-job` rate-limit attempt, as #96 already
   accepted. This replaces #100's "isn't possible from this page yet"
   message.
+- **A confirmation sticks to its Test until the Test ID changes (caught in
+  review).** If the confirmed follow-up fails as a whole (say, throttled),
+  the next "Upload and cut" still sends that Test with `confirm_overwrite`,
+  instead of being blocked again and re-asking, which would cost two more
+  rate-limit attempts per round. Editing the Test ID clears it, as it
+  already clears that Test's uploads. The form behind the dialog is `inert`
+  while the dialog is open, so it can't be edited from the keyboard either.
 - **`ConfirmDialog` is a reusable component** (`frontend/src/components/`),
   a plain `role="dialog"` overlay rather than native `<dialog>`, whose
   `showModal()` jsdom doesn't implement. Focus starts on Cancel so a stray

@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 
-import { CUTTING_JOB_STATUS_LABELS, listCuttingJobs, type CuttingJob } from '@/services/cuttingJobs'
+import {
+  CUTTING_JOB_STATUS_LABELS,
+  cutsDone,
+  listCuttingJobs,
+  type CuttingJob,
+} from '@/services/cuttingJobs'
 import { formatDate } from '@/utils/date'
 
 // Ticket #101: every cutting job, whoever ran it, newest first — shared
@@ -11,10 +16,6 @@ import { formatDate } from '@/utils/date'
 const jobs = ref<CuttingJob[]>([])
 const isLoading = ref(true)
 const loadError = ref<string | null>(null)
-
-function cutsDone(job: CuttingJob): number {
-  return job.outputs.filter((output) => output.status === 'succeeded').length
-}
 
 onMounted(async () => {
   try {

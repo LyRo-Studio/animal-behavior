@@ -304,6 +304,40 @@ describe('CuttingUploadView', () => {
     )
   })
 
+  it('keeps a confirmed re-cut confirmed when submitting it fails, so a retry needs no new dialog', async () => {
+    const wrapper = await mountView()
+    await submitWithT002AlreadyCut(wrapper)
+    submitCuttingJobBatchMock.mockRejectedValueOnce(new Error('Too many requests.'))
+    await wrapper.find('[data-testid="confirm-dialog-confirm"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="batch-error"]').text()).toBe('Too many requests.')
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+
+    uploadSourceVideoMock.mockClear()
+    submitCuttingJobBatchMock.mockResolvedValueOnce([
+      { testId: 'T002', job: job(32, 'T002'), error: null },
+    ])
+    await wrapper.find('[data-testid="submit-batch"]').trigger('click')
+    await flushPromises()
+
+    expect(uploadSourceVideoMock).not.toHaveBeenCalled()
+    expect(submitCuttingJobBatchMock).toHaveBeenLastCalledWith(expect.any(File), [
+      expect.objectContaining({ testId: 'T002', confirmOverwrite: true }),
+    ])
+    expect(testEntries(wrapper)[1]!.find('[data-testid="job-link"]').exists()).toBe(true)
+  })
+
+  it('locks the form behind the re-cut dialog', async () => {
+    const wrapper = await mountView()
+    await submitWithT002AlreadyCut(wrapper)
+
+    expect(wrapper.find('section').attributes('inert')).toBeDefined()
+
+    await wrapper.find('[data-testid="confirm-dialog-cancel"]').trigger('click')
+
+    expect(wrapper.find('section').attributes('inert')).toBeUndefined()
+  })
+
   it('leaves the existing Cuts alone when the re-cut is cancelled', async () => {
     const wrapper = await mountView()
     await submitWithT002AlreadyCut(wrapper)

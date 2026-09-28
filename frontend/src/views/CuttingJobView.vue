@@ -3,8 +3,10 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import {
+  CAMERAS,
   CUTTING_JOB_STATUS_LABELS,
   CuttingJobNotFoundError,
+  cutsDone,
   getCuttingJob,
   type Camera,
   type CuttingJob,
@@ -79,18 +81,13 @@ const OUTPUT_STATUS_CLASSES: Record<CuttingJobOutputStatus, string> = {
   failed: 'text-danger',
 }
 
-const cutsDone = computed(
-  () => job.value?.outputs.filter((output) => output.status === 'succeeded').length ?? 0,
-)
 const progressPercent = computed(() => {
   const total = job.value?.outputs.length ?? 0
-  return total === 0 ? 0 : Math.round((cutsDone.value / total) * 100)
+  return total === 0 ? 0 : Math.round((cutsDone(job.value!) / total) * 100)
 })
 
 const cameras = computed<Camera[]>(() =>
-  (['C1', 'C2'] as const).filter((camera) =>
-    job.value?.outputs.some((output) => output.camera === camera),
-  ),
+  CAMERAS.filter((camera) => job.value?.outputs.some((output) => output.camera === camera)),
 )
 
 interface PhaseRow {
@@ -149,7 +146,7 @@ const failedOutputs = computed(
           </dd>
           <dt class="text-muted">Cuts</dt>
           <dd class="text-foreground" data-testid="cuts-done">
-            {{ cutsDone }} of {{ job.outputs.length }} done
+            {{ cutsDone(job) }} of {{ job.outputs.length }} done
           </dd>
           <dt class="text-muted">Submitted</dt>
           <dd class="text-foreground">{{ formatDate(job.createdAt) }}</dd>

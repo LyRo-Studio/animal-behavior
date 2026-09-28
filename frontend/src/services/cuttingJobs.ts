@@ -6,6 +6,8 @@ import { API_BASE_URL, errorFromResponse } from '@/services/apiBase'
 
 export type Camera = 'C1' | 'C2'
 
+export const CAMERAS: Camera[] = ['C1', 'C2']
+
 export interface SourceVideoTarget {
   testId: string
   camera: Camera
@@ -324,6 +326,11 @@ function toCuttingJob(row: CuttingJobResponse): CuttingJob {
       failureReason: output.failure_reason,
     })),
   }
+}
+
+// How many of `job`'s expected Cuts are already in S3.
+export function cutsDone(job: CuttingJob): number {
+  return job.outputs.filter((output) => output.status === 'succeeded').length
 }
 
 export interface CuttingJobBatchEntry {

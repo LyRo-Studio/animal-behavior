@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import {
+  CAMERAS,
   CUTS_ALREADY_EXIST_CODE,
   forgetSourceVideoUpload,
   MAX_TESTS_PER_BATCH,
@@ -17,8 +18,6 @@ import {
 // Ticket #100, part of issue #93's Feature C: select up to 5 Tests, each
 // with a C1 and/or C2 source video, plus the one timestamp workbook holding
 // their rows (#97's batch endpoint reads every Test from the same file).
-
-const CAMERAS: Camera[] = ['C1', 'C2']
 
 interface SourceVideo {
   file: File | null
@@ -39,6 +38,10 @@ interface TestEntry {
   // The backend refused it because it already has Cuts (#96): the re-cut
   // dialog is asking whether to overwrite them (ticket #101).
   awaitingRecutConfirmation: boolean
+  // The researcher confirmed overwriting its Cuts: every submit sends it with
+  // `confirm_overwrite` from now on, so a failed follow-up (e.g. throttled)
+  // is retried without asking again.
+  recutConfirmed: boolean
 }
 
 let nextKey = 0
@@ -55,6 +58,7 @@ function newEntry(): TestEntry {
     error: null,
     job: null,
     awaitingRecutConfirmation: false,
+    recutConfirmed: false,
   }
 }
 
@@ -89,9 +93,11 @@ function onVideoChange(entry: TestEntry, camera: Camera, event: Event) {
   if (fromFilename && testIdOf(entry) === '') entry.testId = fromFilename
 }
 
-// An upload is declared for one Test ID, so a new ID needs new uploads.
+// An upload is declared for one Test ID, so a new ID needs new uploads, and
+// a re-cut confirmed for the old ID doesn't carry over.
 function onTestIdInput(entry: TestEntry) {
   for (const camera of CAMERAS) entry.videos[camera].uploadId = null
+  entry.recutConfirmed = false
 }
 
 function onExcelChange(event: Event) {
@@ -146,15 +152,15 @@ async function uploadVideos(entry: TestEntry): Promise<boolean> {
 
 // Submits `uploaded` as one batch and records each Test's outcome on it. A
 // Test that already has Cuts waits for the re-cut dialog instead of showing
-// an error; `confirmOverwrite` is that dialog's follow-up.
-async function submitBatch(uploaded: TestEntry[], confirmOverwrite: boolean) {
+// an error.
+async function submitBatch(uploaded: TestEntry[]) {
   const results = await submitCuttingJobBatch(
     excel.value!,
     uploaded.map((entry) => ({
       testId: testIdOf(entry),
       c1UploadId: entry.videos.C1.uploadId,
       c2UploadId: entry.videos.C2.uploadId,
-      ...(confirmOverwrite ? { confirmOverwrite: true } : {}),
+      ...(entry.recutConfirmed ? { confirmOverwrite: true } : {}),
     })),
   )
   // One result per submitted Test, in submission order (#97).
@@ -180,22 +186,13 @@ function describeRejection(error: CuttingJobBatchError | null): string {
   return error?.detail ?? 'The cutting job could not be created.'
 }
 
-// Uploads first, strictly one video at a time, then one batch for every
-// Test whose uploads all finished. A Test that fails (its upload, or the
-// backend's validation of it) keeps its error and stays in the form, so the
-// next submit retries just those Tests, resuming any half-finished upload.
-async function submit() {
-  if (!canSubmit.value || excel.value === null) return
-
+// Runs one submission, holding the form while it's under way and showing a
+// refusal of the whole batch under it.
+async function whileSubmitting(work: () => Promise<void>) {
   isSubmitting.value = true
   batchError.value = null
   try {
-    const uploaded: TestEntry[] = []
-    for (const entry of pendingEntries.value) {
-      entry.error = null
-      if (await uploadVideos(entry)) uploaded.push(entry)
-    }
-    if (uploaded.length > 0) await submitBatch(uploaded, false)
+    await work()
   } catch (err) {
     batchError.value = err instanceof Error ? err.message : 'Failed to submit the cutting jobs.'
   } finally {
@@ -203,28 +200,39 @@ async function submit() {
   }
 }
 
+// Uploads first, strictly one video at a time, then one batch for every
+// Test whose uploads all finished. A Test that fails (its upload, or the
+// backend's validation of it) keeps its error and stays in the form, so the
+// next submit retries just those Tests, resuming any half-finished upload.
+async function submit() {
+  if (!canSubmit.value) return
+
+  await whileSubmitting(async () => {
+    const uploaded: TestEntry[] = []
+    for (const entry of pendingEntries.value) {
+      entry.error = null
+      if (await uploadVideos(entry)) uploaded.push(entry)
+    }
+    if (uploaded.length > 0) await submitBatch(uploaded)
+  })
+}
+
 // Ticket #101: every Test the last submit found already cut, confirmed or
 // cancelled together in one dialog.
 const recutEntries = computed(() =>
   entries.value.filter((entry) => entry.awaitingRecutConfirmation),
 )
-const recutTestIds = computed(() => recutEntries.value.map(testIdOf).join(', '))
+const recutTestsLabel = computed(() => recutEntries.value.map(testIdOf).join(', '))
 
 // Resubmits just those Tests with `confirm_overwrite`. Their uploads weren't
 // consumed by the refused attempt (#96), so nothing is uploaded again.
 async function confirmRecut() {
   const confirmed = recutEntries.value
-  for (const entry of confirmed) entry.awaitingRecutConfirmation = false
-
-  isSubmitting.value = true
-  batchError.value = null
-  try {
-    await submitBatch(confirmed, true)
-  } catch (err) {
-    batchError.value = err instanceof Error ? err.message : 'Failed to submit the cutting jobs.'
-  } finally {
-    isSubmitting.value = false
+  for (const entry of confirmed) {
+    entry.awaitingRecutConfirmation = false
+    entry.recutConfirmed = true
   }
+  await whileSubmitting(() => submitBatch(confirmed))
 }
 
 function cancelRecut() {
@@ -252,7 +260,9 @@ function cancelRecut() {
       </div>
     </header>
 
-    <section class="mx-auto max-w-3xl px-6 py-10">
+    <!-- `inert` while the re-cut dialog is open, so nothing behind it can be
+         reached from the keyboard either. -->
+    <section class="mx-auto max-w-3xl px-6 py-10" :inert="recutEntries.length > 0 || undefined">
       <p class="text-sm text-muted">
         Upload the source video(s) of up to {{ MAX_TESTS_PER_BATCH }} Tests, plus the timestamp
         Excel holding their rows. Each Test becomes its own cutting job.
@@ -410,8 +420,8 @@ function cancelRecut() {
       @cancel="cancelRecut"
     >
       <p>
-        {{ recutTestIds }} already {{ recutEntries.length === 1 ? 'has' : 'have' }} Cuts. Re-cutting
-        overwrites every existing Cut it produces again.
+        {{ recutTestsLabel }} already {{ recutEntries.length === 1 ? 'has' : 'have' }} Cuts.
+        Re-cutting overwrites every existing Cut it produces again.
       </p>
     </ConfirmDialog>
   </main>
