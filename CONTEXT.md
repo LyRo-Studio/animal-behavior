@@ -2310,6 +2310,25 @@ uploads through #94's chunked protocol and submits through #97's
   `_C1_`/`_C2_`) when the field is still empty. The backend still validates
   the filename against the Test/camera at upload start.
 
+**Timestamp Excel matches the real sheet (bug fix, 2026-09-28).** A real
+sheet was refused with "Missing required column(s): ME_F1, …, ZE_F8". The
+schema from #94 had never been checked against a real sheet. Checked against
+the researchers' "Timestamps cutting video" sheet and `assist`'s own reader
+(`phase_slicer.py` upstream), `app/services/timestamp_excel.py` now:
+
+- **Reads phase headers phase first, `F1_ME`…`F8_ZE`,** as the sheet and
+  `assist` write them. It maps each one to the `ME_F1`…`ZE_F8` key the rest
+  of the app uses (`CuttingJob.phase_timestamps`, the cutting-worker), so
+  nothing downstream changed. Schema and cell errors name the sheet's own
+  header, e.g. `F3_ME`.
+- **Takes the first column when a header repeats.** The real sheet follows
+  the start times with a "Duration of the phase:" block that repeats
+  `F1_ME`…`F7_ZE` over formulas. The old last-column-wins lookup would have
+  read those durations as start times, silently mis-cutting every phase.
+- **Accepts the reference camera as a number** (`1`/`2`, which is what the
+  real sheet holds), as `assist`'s `Camera(value)` does, as well as
+  `C1`/`C2`.
+
 **Consolidation domain code (ticket #114, part of issue #113's Excel
 consolidation feature) — approved stack deviation:** `consolidation/`
 (`consolidatie.py`, `observer_import.py`) is pre-existing Observer XT

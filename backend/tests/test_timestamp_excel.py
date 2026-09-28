@@ -25,8 +25,11 @@ from app.services.timestamp_excel import (
 )
 
 _CONDITIONS = ("ME", "ZE")
+# The parsed keys ("ME_F1".."ZE_F8"), and the real sheet's own headers for
+# them ("F1_ME".."F8_ZE", phase first) — same order.
 _PHASE_HEADERS = [f"{condition}_F{n}" for condition in _CONDITIONS for n in range(1, 9)]
-_HEADERS = ["Test ID", "Dog ID", "C1/C2", *_PHASE_HEADERS]
+_SHEET_PHASE_HEADERS = [f"F{n}_{condition}" for condition in _CONDITIONS for n in range(1, 9)]
+_HEADERS = ["Test ID", "Dog ID", "C1/C2", *_SHEET_PHASE_HEADERS]
 
 
 def _workbook_bytes(rows: list[list[object]], *, headers: list[str] | None = None) -> bytes:
@@ -194,7 +197,7 @@ def test_malformed_timestamp_cell_raises_with_row_and_column():
     with pytest.raises(MalformedTimestampCellError) as exc_info:
         parse_timestamp_workbook(data)
     assert exc_info.value.row_number == 2
-    assert exc_info.value.column == "ME_F3"
+    assert exc_info.value.column == "F3_ME"
 
 
 def test_malformed_cell_does_not_crash_the_whole_parse_silently():
@@ -287,7 +290,7 @@ def test_read_test_row_still_rejects_the_requested_tests_own_malformed_cell():
     with pytest.raises(MalformedTimestampCellError) as exc_info:
         read_test_row(data, "T002")
     assert exc_info.value.row_number == 3
-    assert exc_info.value.column == "ME_F3"
+    assert exc_info.value.column == "F3_ME"
 
 
 def test_read_test_row_normalizes_a_bare_numeric_lookup_and_cell():
@@ -309,3 +312,61 @@ def test_read_test_row_still_rejects_workbook_level_problems():
         read_test_row(b"this is not an xlsx file", "T001")
     with pytest.raises(ExcelSchemaError):
         read_test_row(_workbook_bytes([["T001"]], headers=["Test ID"]), "T001")
+
+
+# --- The real sheet's layout (researchers' "Timestamps cutting video" sheet) ---
+
+
+def test_reads_the_real_sheets_layout():
+    """As in the sheet researchers actually use: phase headers written
+    phase first (`F1_ME`), the reference camera as a bare number, and a
+    second "Duration of the phase:" block repeating the phase headers with
+    different values after it. The first block is the start times; the
+    repeat must never be read in its place."""
+    headers = [
+        *_HEADERS,
+        None,
+        "ok to use",
+        "Duration of the phase:",
+        *_SHEET_PHASE_HEADERS[:-1],
+        None,
+        "Opmerking",
+    ]
+    start_times = [time(0, 44 + n) for n in range(16)]
+    durations = [time(0, 1)] * 15
+    data = _workbook_bytes(
+        [["T621", "D283", 2, *start_times, None, None, None, *durations, None, "a remark"]],
+        headers=headers,
+    )
+
+    row = read_test_row(data, "T621")
+
+    assert row.reference_camera == "C2"
+    assert row.phase_timestamps["ME_F1"] == 44
+    assert row.phase_timestamps["ZE_F8"] == 44 + 15
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [(1, "C1"), (2, "C2"), (2.0, "C2"), ("2", "C2"), ("c1", "C1")]
+)
+def test_reference_camera_may_be_a_bare_camera_number(raw, expected):
+    """`assist` reads the column as `Camera(value)`: 1 is C1, 2 is C2."""
+    data = _workbook_bytes([_row("T001", reference_camera=raw)])
+
+    assert read_test_row(data, "T001").reference_camera == expected
+
+
+@pytest.mark.parametrize("raw", [3, 0, 1.5, "C3"])
+def test_reference_camera_rejects_anything_but_camera_one_or_two(raw):
+    data = _workbook_bytes([_row("T001", reference_camera=raw)])
+
+    with pytest.raises(MalformedReferenceCameraError):
+        read_test_row(data, "T001")
+
+
+def test_missing_phase_columns_are_named_as_the_sheet_writes_them():
+    data = _workbook_bytes([_row("T001")], headers=["Test ID", "Dog ID", "C1/C2", *_PHASE_HEADERS])
+
+    with pytest.raises(ExcelSchemaError) as exc_info:
+        read_test_row(data, "T001")
+    assert exc_info.value.missing_headers == _SHEET_PHASE_HEADERS
