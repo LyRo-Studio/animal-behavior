@@ -2521,6 +2521,14 @@ source** and **Discard source** above.
 - **Out of scope, filed separately:** Retry of a failed job (#170), and
   cleanup of uploads that never became a job (#171; they count toward the
   storage cap too).
+- **Spec-time details (#167):** both audit rows are written by the service
+  in the same commit as the change, like `CUTTING_STARTED`, not by the API
+  afterwards like `ANALYSIS_CANCELLED`. The migration's downgrade is a
+  no-op: Postgres can't drop enum values, and cleared paths can't be
+  restored. Neither action is rate-limited, like analysis cancel. A failed
+  delete is simulated in tests by swapping the one shared source-delete
+  function, since tests run as root and file permissions can't block a
+  delete.
 - **Issues:** parent #167 with two `ready-for-agent` slices, Cancel (#168: endpoint,
   audit, deleting the source, `source_retained` and its migration, the
   one-upload-one-job rule, the button) then Discard source (endpoint, audit,
